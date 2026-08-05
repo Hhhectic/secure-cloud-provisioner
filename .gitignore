@@ -216,3 +216,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Secrets & cloud credentials
+.env
+.env.*
+*.pem
+*.ppk
+credentials
+.aws/
+.azure/
+*_credentials.json
+
+# Local
+venv/
+.venv/
+.vscode/
