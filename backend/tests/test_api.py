@@ -605,6 +605,91 @@ def test_an_unforced_cleanup_is_unchanged(client):
     assert len(done.json()["results"]) == 1
 
 
+# ------------------------------------------------------- Form options
+
+
+def test_the_form_is_offered_the_instance_types_the_tool_will_accept(client):
+    """The menu cannot disagree with the allowlist, because it is the allowlist.
+
+    A hardcoded list in the page would be a second copy of a refusal that
+    lives in aws/instances.py, and an offer the tool then rejects looks like
+    a bug rather than a guardrail.
+    """
+    from aws import instances as ec2i
+
+    body = client.get("/resources/instance/options").json()
+    offered = {o["value"] for o in body["options"]["instance_type"]}
+    assert offered == set(ec2i.ALLOWED_INSTANCE_TYPES)
+
+
+def test_the_port_menu_uses_the_scanners_own_words(client):
+    """So the phrase someone picks is the phrase the warning uses back."""
+    from scanner.rules import RISKY_PORTS
+
+    body = client.get("/resources/security-group/options").json()
+    labels = {o["value"]: o["label"] for o in body["options"]["port"]}
+
+    assert RISKY_PORTS[22] in labels["22"]
+    assert RISKY_PORTS[3389] in labels["3389"]
+    # 80 and 443 belong in a form but must never be in RISKY_PORTS, since
+    # everything there produces a finding.
+    assert "443" in labels
+    assert 443 not in RISKY_PORTS
+
+
+def test_networks_are_offered_from_the_account_rather_than_typed(client, vpc_id):
+    body = client.get("/resources/security-group/options").json()
+    assert vpc_id in {o["value"] for o in body["options"]["vpc_id"]}
+
+
+def test_a_type_with_nothing_to_offer_answers_empty_rather_than_404(client):
+    """So a form can ask unconditionally and fall back to plain text."""
+    body = client.get("/resources/bucket/options")
+    assert body.status_code == 200
+    assert body.json()["options"] == {}
+
+
+def test_options_for_an_unknown_type_is_still_a_404(client):
+    assert client.get("/resources/nonsense/options").status_code == 404
+
+
+# --------------------------------------------------------- The blueprint
+
+
+def test_the_blueprint_refuses_to_build_without_supplied_public_keys(client):
+    """The endpoint's whole safety property.
+
+    Without keys the blueprint generates them with ssh-keygen, which writes
+    private halves to the machine running the code. Over HTTP that is the
+    server. Refusing rather than defaulting is what keeps this endpoint from
+    being safe only while nobody omits a field.
+    """
+    refused = client.post("/blueprints/bastion", json={"name": "demo"})
+    assert refused.status_code == 400
+
+    detail = refused.json()["detail"]
+    assert "bastion-key" in detail and "private-key" in detail
+    assert "will not create a private key" in detail
+
+
+def test_the_blueprint_refuses_when_only_one_key_is_supplied(client):
+    refused = client.post("/blueprints/bastion", json={
+        "name": "demo",
+        "public_keys": {"bastion-key": "ssh-ed25519 AAAA comment"},
+    })
+    assert refused.status_code == 400
+    assert "private-key" in refused.json()["detail"]
+
+
+def test_the_blueprint_has_no_field_for_a_private_key(client):
+    """A caller cannot send one even by accident: the model has nowhere to
+    put it, and the page never asks for one."""
+    schema = client.get("/openapi.json").json()
+    spec = schema["components"]["schemas"]["BastionSpec"]["properties"]
+    assert "public_keys" in spec
+    assert not [f for f in spec if "private" in f.lower()]
+
+
 def test_cleanup_removes_every_managed_group(client, vpc_id):
     client.post("/resources/security-group", json=_open_ssh_spec("one"))
     client.post("/resources/security-group", json=_open_ssh_spec("two"))

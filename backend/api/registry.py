@@ -35,6 +35,9 @@ from scanner.rules import (
     check_firewall_rules,
     check_group_usage,
     check_default_group,
+    RISKY_PORTS,
+    OPEN_TO_WORLD_V4,
+    OPEN_TO_WORLD_V6,
 )
 from scanner.s3_rules import check_bucket_settings
 from scanner.key_pair_rules import check_key_pair
@@ -44,6 +47,55 @@ from scanner.iam_rules import check_account
 from scanner.snapshot_rules import check_snapshot
 
 DEFAULT_REGION = "us-east-1"
+
+# Ports a form should offer, which is not the same list as the ports the
+# scanner warns about. RISKY_PORTS exists to describe what is dangerous;
+# 80 and 443 belong in a menu of things people open on purpose and would be
+# wrong in that one, because everything in it produces a finding. The
+# descriptions are taken from the scanner wherever it has them, so the words a
+# user picks from are the words the warning will use back at them.
+FORM_PORTS = [22, 80, 443, 3389, 3306, 5432, 6379, 9200, 27017, 5900]
+
+EXTRA_PORT_LABELS = {
+    80: "HTTP, an unencrypted web server",
+    443: "HTTPS, an encrypted web server",
+}
+
+
+def _port_choices():
+    choices = []
+    for port in FORM_PORTS:
+        what = RISKY_PORTS.get(port) or EXTRA_PORT_LABELS.get(port, "")
+        choices.append({"value": str(port),
+                        "label": f"{port} — {what}" if what else str(port)})
+    return choices
+
+
+def _protocol_choices():
+    return [
+        {"value": "tcp", "label": "TCP"},
+        {"value": "udp", "label": "UDP"},
+        {"value": "icmp", "label": "ICMP (ping)"},
+        {"value": "-1", "label": "All protocols"},
+    ]
+
+
+def _source_choices():
+    return [
+        {"value": OPEN_TO_WORLD_V4,
+         "label": f"{OPEN_TO_WORLD_V4} — the entire internet"},
+        {"value": OPEN_TO_WORLD_V6,
+         "label": f"{OPEN_TO_WORLD_V6} — the entire internet, IPv6"},
+        {"value": "10.0.0.0/8", "label": "10.0.0.0/8 — private networks only"},
+        {"value": "172.16.0.0/12", "label": "172.16.0.0/12 — private networks only"},
+        {"value": "192.168.0.0/16", "label": "192.168.0.0/16 — private networks only"},
+    ]
+
+
+def _name_tag(resource, fallback="unnamed"):
+    """The Name tag off a raw AWS object, for labelling a menu entry."""
+    tags = {t["Key"]: t["Value"] for t in resource.get("Tags", [])}
+    return tags.get("Name", fallback)
 
 
 def _as_read(settings):
@@ -88,6 +140,19 @@ class ResourceType:
     create: Callable = _cannot_create
     delete: Callable = _cannot_create
     cleanup: Callable = _cannot_create
+
+    # The choices a form should offer for this type, as
+    # {field: [{"value", "label"}]}.
+    #
+    # Here rather than in the page because every one of them is already known
+    # on this side and knowing it twice is how the two drift: the instance
+    # allowlist is enforced in aws/instances.py, the port descriptions are the
+    # scanner's own words, and the networks a group can be placed in are a
+    # live account lookup. A menu hardcoded in JavaScript would be a second
+    # copy of all three, wrong at a different time from the first.
+    #
+    # None means this type has nothing to offer and the form is plain text.
+    options: Optional[Callable] = None
 
     # What a forced delete would destroy, in the order it would go.
     #
@@ -206,6 +271,29 @@ def _sg_check_spec(spec):
     return check_firewall_rules(spec.get("rules") or [])
 
 
+def _networks_for_menu(client):
+    """Every network, labelled. Shared by the forms that must place something.
+
+    Placement is asked for and never assumed, which only works if the asking
+    is answerable - a text box wanting a vpc- identifier is a question most
+    people cannot answer without leaving the page.
+    """
+    try:
+        return [{"value": v["id"], "label": v["name"]}
+                for v in _vpc_list(client, False)]
+    except ClientError:
+        return []
+
+
+def _sg_options(client):
+    return {
+        "vpc_id": _networks_for_menu(client),
+        "protocol": _protocol_choices(),
+        "port": _port_choices(),
+        "source": _source_choices(),
+    }
+
+
 def _sg_fix(client, resource_id, warning, options):
     return sg.apply_fix(client, resource_id, warning,
                         new_cidr=options.get("new_cidr"))
@@ -231,6 +319,7 @@ SECURITY_GROUP = ResourceType(
     describe=_sg_describe,
     check_spec=_sg_check_spec,
     fix=_sg_fix,
+    options=_sg_options,
     delete=_sg_delete,
     cleanup=_sg_cleanup,
 )
@@ -485,6 +574,45 @@ def _instance_check_spec(spec):
     })
 
 
+def _instance_options(client):
+    """The allowlist, plus whatever this account actually has to attach.
+
+    instance_type comes from aws/instances rather than a list typed here, so
+    the menu cannot offer something the tool would then refuse - the refusal
+    is the guardrail and a menu that disagreed with it would look like a bug.
+    """
+    def _safe(fn):
+        try:
+            return fn()
+        except ClientError:
+            return []
+
+    subnets = _safe(lambda: [
+        {"value": s["SubnetId"],
+         "label": f"{_name_tag(s)} ({s.get('CidrBlock')}, {s.get('AvailabilityZone')})"}
+        for s in client.describe_subnets()["Subnets"]
+    ])
+
+    groups = _safe(lambda: [
+        {"value": g["id"], "label": f"{g['name']} ({g.get('vpc_id') or 'no network'})"}
+        for g in _sg_list(client, False)
+    ])
+
+    keys = _safe(lambda: [{"value": k["id"], "label": k["name"]}
+                          for k in _key_pair_list(client, False)])
+
+    return {
+        "instance_type": [
+            {"value": t, "label": t + (" (default)"
+                                       if t == ec2i.DEFAULT_INSTANCE_TYPE else "")}
+            for t in sorted(ec2i.ALLOWED_INSTANCE_TYPES)
+        ],
+        "key_name": keys,
+        "security_group_ids": groups,
+        "subnet_id": subnets,
+    }
+
+
 def _instance_fix(client, resource_id, warning, options):
     return ec2i.apply_fix(client, resource_id, warning)
 
@@ -509,6 +637,7 @@ INSTANCE = ResourceType(
     describe=_instance_describe,
     check_spec=_instance_check_spec,
     fix=_instance_fix,
+    options=_instance_options,
     delete=_instance_delete,
     cleanup=_instance_cleanup,
 )
@@ -556,6 +685,22 @@ def _vpc_check_spec(spec):
     return []
 
 
+def _vpc_options(client):
+    """Sizes rather than a free-text CIDR.
+
+    The tool carves a /16 into two /24s, so the sensible answers are a small
+    set and the interesting decision is not the number.
+    """
+    return {
+        "cidr": [
+            {"value": vpcs.DEFAULT_CIDR, "label": f"{vpcs.DEFAULT_CIDR} (default)"},
+            {"value": "10.1.0.0/16", "label": "10.1.0.0/16"},
+            {"value": "172.31.0.0/16", "label": "172.31.0.0/16"},
+            {"value": "192.168.0.0/16", "label": "192.168.0.0/16"},
+        ],
+    }
+
+
 def _vpc_plan_deletion(client, resource_id):
     """The cascade, flattened for the API, with ownership marked per item.
 
@@ -601,6 +746,7 @@ VPC = ResourceType(
     check=check_vpc,
     check_spec=_vpc_check_spec,
     fix=_vpc_fix,
+    options=_vpc_options,
     delete=_vpc_delete,
     cleanup=_vpc_cleanup,
     plan_deletion=_vpc_plan_deletion,

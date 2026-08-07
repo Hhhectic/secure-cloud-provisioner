@@ -9,6 +9,7 @@ Keys are generated into a temporary directory so a test run never writes to
 ~/.ssh.
 """
 
+import os
 import shutil
 import tempfile
 
@@ -205,9 +206,31 @@ def test_a_failure_reports_what_already_exists(ec2, keys):
 
 
 def test_teardown_instructions_name_the_cascade():
-    lines = "\n".join(bastion.teardown_instructions({"vpc": "vpc-123"}))
-    assert "everything inside it" in lines
-    assert "Key pairs are not part of the network" in lines
+    lines = "\n".join(bastion.teardown_instructions({
+        "vpc": "vpc-123",
+        bastion.BASTION_KEY: "demo-bastion-key",
+        bastion.PRIVATE_KEY: "demo-private-key",
+    }))
+    assert "vpc-123" in lines
+    assert "everything inside" in lines
+    assert "not part of the network" in lines
+    # The key pairs survive the cascade, so a teardown has to name them.
+    assert "demo-bastion-key" in lines
+    assert "demo-private-key" in lines
+
+
+def test_teardown_instructions_name_no_interface():
+    """Printed by the CLI and rendered in the web page.
+
+    It used to give command line menu numbers, which were wrong for a web user
+    the moment there was one - and told them to go open a terminal for two
+    things the page can already do.
+    """
+    lines = "\n".join(bastion.teardown_instructions({
+        "vpc": "vpc-123", bastion.BASTION_KEY: "demo-bastion-key",
+    }))
+    for interface in ("main.py", "->", "menu", "option"):
+        assert interface not in lines, interface
 
 
 # -------------------------------------------------------------- Instructions
@@ -232,3 +255,69 @@ def test_instructions_are_honest_when_addresses_are_not_ready():
          "bastion_key": "k", "private_key": "k2"}
     )
     assert any("assigned as the machines start" in line for line in lines)
+
+
+# ------------------------------------------------- Driven over HTTP
+
+
+def _public_half(comment):
+    """A real public key. The blueprint validates before importing, so a
+    placeholder string fails for the wrong reason."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    key = ed25519.Ed25519PrivateKey.generate()
+    return key.public_key().public_bytes(
+        encoding=serialization.Encoding.OpenSSH,
+        format=serialization.PublicFormat.OpenSSH,
+    ).decode() + f" {comment}"
+
+
+def test_supplied_public_keys_are_imported_and_nothing_is_generated(ec2, keys):
+    """The whole reason this blueprint could not be an endpoint.
+
+    generate_locally writes private keys to the disk of whatever machine runs
+    it. From a terminal that machine is the user's own, which is the point.
+    From a web request it is the server, which would put two secrets on the
+    API host and give the person who asked for them neither.
+    """
+    supplied = {
+        bastion.BASTION_KEY: _public_half("bastion"),
+        bastion.PRIVATE_KEY: _public_half("private"),
+    }
+
+    def explode(*args, **kwargs):
+        raise AssertionError("generate_locally must not run when keys are given")
+
+    import aws.key_pairs as kp_module
+    original = kp_module.generate_locally
+    kp_module.generate_locally = explode
+    try:
+        ok, created, problems = _build(ec2, keys, with_instances=False,
+                                       public_keys=supplied)
+    finally:
+        kp_module.generate_locally = original
+
+    assert ok, problems
+    assert created[bastion.BASTION_KEY] == "demo-bastion-key"
+    assert created[bastion.PRIVATE_KEY] == "demo-private-key"
+
+    # Nothing was written to the key directory, because nothing was generated.
+    assert os.listdir(keys) == []
+
+    # AWS holds both, and holds only public material.
+    registered = {k["KeyName"] for k in ec2.describe_key_pairs()["KeyPairs"]}
+    assert {"demo-bastion-key", "demo-private-key"} <= registered
+
+
+def test_a_missing_supplied_key_stops_the_build_rather_than_generating_one(ec2, keys):
+    """Refusing beats defaulting. A build that quietly fell back to generating
+    would put a private key on the server for anyone who omitted a field."""
+    ok, created, problems = _build(
+        ec2, keys, with_instances=False,
+        public_keys={bastion.BASTION_KEY: _public_half("bastion")},
+    )
+
+    assert not ok
+    assert any(bastion.PRIVATE_KEY in p for p in problems), problems
+    assert os.listdir(keys) == []

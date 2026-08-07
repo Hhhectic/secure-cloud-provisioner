@@ -151,6 +151,35 @@ class ActionResponse(BaseModel):
     message: str
 
 
+class BastionSpec(BaseModel):
+    """What the blueprint needs, and pointedly not what it must never receive.
+
+    public_keys carries the public half of two pairs the caller generated
+    wherever the private halves are meant to live. There is no field for a
+    private key here for the same reason ResourceSpec has none: the blueprint
+    generates keys locally when driven from a terminal, because there the
+    local machine is the user's own, and over HTTP it is not.
+    """
+
+    name: str = Field(min_length=1, max_length=64)
+    region: Optional[str] = None
+    with_instances: bool = True
+
+    # {"bastion-key": "ssh-ed25519 AAAA…", "private-key": "ssh-ed25519 AAAA…"}
+    public_keys: dict[str, str] = Field(default_factory=dict)
+
+
+class BastionResponse(BaseModel):
+    ok: bool
+    name: str
+    created: dict
+    problems: list[str]
+    log: list[str]
+    connection: Optional[dict] = None
+    instructions: list[str]
+    teardown: list[str]
+
+
 class DeletionPlanItem(BaseModel):
     kind: str
     id: str

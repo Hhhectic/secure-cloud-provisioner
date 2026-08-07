@@ -54,7 +54,7 @@ def _find_subnet(settings, role):
 
 
 def build(ec2, name, region="us-east-1", report=print, with_instances=True,
-          key_directory="~/.ssh"):
+          key_directory="~/.ssh", public_keys=None):
     """Builds the whole arrangement. Returns (ok, result, problems).
 
     result carries every identifier created, in the order created, so a caller
@@ -99,17 +99,38 @@ def build(ec2, name, region="us-east-1", report=print, with_instances=True,
     # bastion is compromised, whatever is taken from it does not also open the
     # private machine - the same least-privilege reasoning as the security
     # groups, applied to credentials.
-    report("\nGenerating key pairs on this machine...")
+    #
+    # public_keys, when given, is {BASTION_KEY: material, PRIVATE_KEY: ...}
+    # and nothing is generated here at all. That is the only way this can be
+    # driven over HTTP: generate_locally writes private keys to the disk of
+    # whatever machine runs it, which from a terminal is the user's own and
+    # from a web request is the server's. A caller that already holds the
+    # secret sends the public halves and keeps the rest.
+    if public_keys:
+        report("\nImporting the public keys supplied by the caller...")
+    else:
+        report("\nGenerating key pairs on this machine...")
+
     for key_name in (BASTION_KEY, PRIVATE_KEY):
         full_name = f"{name}-{key_name}"
+        private_path = None
 
-        generated, material, private_path = kp.generate_locally(
-            full_name, directory=key_directory
-        )
-        if not generated:
-            return False, created, [
-                f"Could not create {full_name}: {material}"
-            ]
+        if public_keys:
+            material = public_keys.get(key_name)
+            if not material:
+                return False, created, [
+                    f"No public key was supplied for {key_name}. Generate the "
+                    "pair where the private half should live and send only "
+                    "the public part."
+                ]
+        else:
+            generated, material, private_path = kp.generate_locally(
+                full_name, directory=key_directory
+            )
+            if not generated:
+                return False, created, [
+                    f"Could not create {full_name}: {material}"
+                ]
 
         imported, result, key_problems = kp.import_key_pair(
             ec2, full_name, material
@@ -120,7 +141,8 @@ def build(ec2, name, region="us-east-1", report=print, with_instances=True,
         record(key_name, full_name)
         problems.extend(key_problems)
         report(f"  {key_name:<12} {full_name}")
-        report(f"               private half at {private_path}")
+        if private_path:
+            report(f"               private half at {private_path}")
 
     # ---- Security groups -------------------------------------------------
     report("\nCreating firewall rules...")
@@ -251,19 +273,40 @@ def connection_instructions(details, key_directory="~/.ssh"):
 
 
 def teardown_instructions(created):
-    """What to run to remove everything this built."""
+    """What has to be removed, in order, and why it is two steps.
+
+    Names the things rather than an interface. This is printed by the command
+    line and rendered in the web page, and the menu numbers it used to give
+    were wrong in one of them from the moment the second one existed.
+
+    Two steps because the pieces are not all in the same place. A network
+    cascade takes everything inside the VPC; key pairs are account-level and
+    survive it untouched, so a teardown that stopped at the cascade would
+    leave two of them behind and look complete.
+    """
     vpc_id = created.get("vpc")
+    keys = [created[role] for role in (BASTION_KEY, PRIVATE_KEY)
+            if created.get(role)]
     lines = []
 
     if vpc_id:
-        lines.append("Remove the network and everything inside it:")
-        lines.append("    python main.py  ->  5 Networks  ->  4 Delete "
-                     "one and everything inside it")
+        lines.append(f"1. Delete the network {vpc_id} and everything inside "
+                     "it.")
+        lines.append("   That is both machines, both subnets, both route "
+                     "tables, the")
+        lines.append("   internet gateway and both firewall groups.")
         lines.append("")
 
-    lines.append("Key pairs are not part of the network and survive that:")
-    lines.append("    python main.py  ->  3 Key Pairs  ->  5")
-    lines.append("")
-    lines.append("The private key files on this machine are yours to delete.")
+    if keys:
+        lines.append(f"{'2' if vpc_id else '1'}. Delete the key pairs. They "
+                     "are not part of the network and")
+        lines.append("   survive it:")
+        for name in keys:
+            lines.append(f"       {name}")
+        lines.append("")
+
+    lines.append("The private key files are on your own machine. This tool "
+                 "never had")
+    lines.append("them and cannot remove them; that part is yours.")
 
     return lines

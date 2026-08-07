@@ -18,13 +18,17 @@ login screen to a tool that already trusts whoever is sitting at the machine
 would be theatre. Do not put it on a public interface.
 """
 
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from api import models, registry
 from aws.s3_buckets import PermissionDenied
+from blueprints import bastion
 from scanner.common import summarize, fixable, worst_level
 
 app = FastAPI(
@@ -45,6 +49,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse("/ui/")
 
 
 @app.exception_handler(PermissionDenied)
@@ -142,6 +151,28 @@ def list_resource_types():
 
 
 # ---------------------------------------------------------------------- Check
+
+
+@app.get("/resources/{resource_type}/options")
+def form_options(resource_type: str, region: str = "us-east-1"):
+    """The choices a create form should offer, as {field: [{value, label}]}.
+
+    Generic, like everything else here: the registry supplies the lists and
+    this route does not know a port from a subnet. A type with nothing to
+    offer answers with an empty object rather than a 404, so a caller can ask
+    unconditionally and render plain text fields when the answer is empty.
+
+    Some of these are live account lookups - which networks exist, which key
+    pairs can be attached - so this costs AWS calls and is worth asking for
+    once per form rather than per keystroke.
+    """
+    known = _resource(resource_type)
+    if known.options is None:
+        return {"resource_type": resource_type, "options": {}}
+
+    client = known.get_client(region)
+    return {"resource_type": resource_type,
+            "options": known.options(client)}
 
 
 @app.post("/resources/{resource_type}/check", response_model=models.ScanResponse)
@@ -446,3 +477,94 @@ def cleanup(resource_type: str, force: bool = False,
         for rid, ok, msg in known.cleanup(client, {"force": force})
     ]
     return models.CleanupResponse(resource_type=resource_type, results=results)
+
+
+# ------------------------------------------------------------------ Blueprints
+
+
+@app.post("/blueprints/bastion", response_model=models.BastionResponse)
+def build_bastion(spec: models.BastionSpec):
+    """Builds a whole bastion architecture in one call.
+
+    Not under /resources, because it is not one. Every other route here acts
+    on a single thing the registry knows about; this composes six of them into
+    an arrangement whose security lives in the relationships rather than in
+    any one piece. Giving it a resource key would mean inventing a fake type
+    with no read, no scan and no delete.
+
+    The keys must be supplied. Called from a terminal the blueprint generates
+    them with ssh-keygen, which writes the private halves to the machine
+    running it - correct there, and exactly wrong here, where that machine is
+    the server. Refusing rather than defaulting is the difference between an
+    endpoint that is safe and one that is safe as long as nobody omits a
+    field.
+
+    This is slow. Two instances, a VPC, and the waits AWS needs between them;
+    a minute or more is normal and the caller should expect to hold the
+    connection open.
+    """
+    missing = [k for k in (bastion.BASTION_KEY, bastion.PRIVATE_KEY)
+               if not spec.public_keys.get(k)]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Public keys are required for: {', '.join(missing)}. Generate "
+                "both pairs where the private halves should live - your own "
+                "machine or your browser - and send only the public halves. "
+                "This tool will not create a private key for you."
+            ),
+        )
+
+    client = registry.VPC.get_client(spec.region or registry.DEFAULT_REGION)
+
+    log = []
+    try:
+        ok, created, problems = bastion.build(
+            client,
+            spec.name,
+            region=spec.region or registry.DEFAULT_REGION,
+            report=log.append,
+            with_instances=spec.with_instances,
+            public_keys=spec.public_keys,
+        )
+    except bastion.BuildFailed as e:
+        # Nothing rolls back. Report precisely what exists so it can be
+        # removed deliberately rather than hunted for in the console.
+        raise HTTPException(
+            status_code=500,
+            detail={"message": str(e), "created": e.created,
+                    "teardown": bastion.teardown_instructions(e.created)},
+        )
+
+    details = bastion.connection_details(client, created) if ok else None
+
+    return models.BastionResponse(
+        ok=ok,
+        name=spec.name,
+        created=created,
+        problems=problems,
+        log=log,
+        connection=details,
+        instructions=bastion.connection_instructions(details) if ok else [],
+        teardown=bastion.teardown_instructions(created),
+    )
+
+
+# ------------------------------------------------------------------ The page
+
+
+# Mounted last, because a mount at "/ui" would otherwise shadow nothing but
+# still reorders route matching, and because the API is the product here - the
+# page is one caller of it.
+#
+# Served from this process rather than a second dev server, so there is one
+# thing to run and no CORS in the way. The CORS middleware above stays for
+# anyone who does want to run a build tool on 5173 later.
+#
+# Guarded by is_dir so the backend still starts, and the tests still pass, in a
+# checkout where the frontend is absent.
+_PAGE = Path(__file__).resolve().parent.parent.parent / "frontend"
+
+if _PAGE.is_dir():
+    app.mount("/ui", StaticFiles(directory=_PAGE, html=True), name="ui")
