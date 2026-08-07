@@ -1,20 +1,26 @@
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+import boto3
 from botocore.exceptions import ClientError
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 
-# Import unified AWS scanner logic & Boto3 live readers
-from aws.scanner.aws_scanner import scan_aws_resource
-from aws.scanner.live_reads import (
+# Import unified AWS scanner logic, Boto3 live readers, and deployment gatekeeper
+from backend.aws.scanner.aws_scanner import scan_aws_resource
+from backend.aws.scanner.live_reads import (
     fetch_security_group_config,
     fetch_s3_bucket_config,
 )
+from backend.aws.deploy import deploy_resource, build_creators
 
 app = FastAPI(
     title="Secure Cloud Provisioner API",
     description="Backend API for secure-by-default AWS provisioning and pre-flight scanning.",
     version="1.0.0"
 )
+
+# Initialize Boto3 session & registered deployment creators
+session = boto3.Session()
+creators = build_creators(session)
 
 # -------------------------------------------------------------------
 # Request / Response Models (Data Validation)
@@ -30,6 +36,13 @@ class LiveScanRequest(BaseModel):
     resource_type: str = Field(..., description="Resource type e.g. 'security_group' or 's3_bucket'")
     resource_id: str = Field(..., description="Security Group ID (e.g. sg-12345) or S3 Bucket name")
     region: str = Field(default="us-east-1", description="AWS region where the resource lives")
+
+
+class DeployRequest(BaseModel):
+    """Payload model for enforced AWS resource provisioning."""
+    resource_type: str = Field(..., description="Resource type e.g. 'security_group' or 's3_bucket'")
+    config: Dict[str, Any] = Field(..., description="Configuration dictionary for the resource")
+    accept_risk: Optional[bool] = Field(default=False, description="Explicitly accept security risk to deploy despite CRITICAL alerts")
 
 
 # -------------------------------------------------------------------
@@ -91,6 +104,32 @@ def scan_live_aws_resource(payload: LiveScanRequest):
         )
 
 
+@app.post("/api/v1/aws/deploy", tags=["AWS Services"])
+def deploy_aws_resource(payload: DeployRequest):
+    """
+    Enforced provisioning entry point. Runs pre-flight scan first; blocks deployment
+    if CRITICAL security findings exist unless accept_risk is explicitly True.
+    """
+    try:
+        result = deploy_resource(
+            resource_type=payload.resource_type,
+            config=payload.config,
+            accept_risk=payload.accept_risk or False,
+            creators=creators
+        )
+        return {
+            "status": result.status,
+            "alerts": result.alerts,
+            "resource_id": result.resource_id,
+            "error": result.error,
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Deployment gatekeeper failed: {str(e)}"
+        )
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("backend.main:app", host="127.0.0.1", port=8000, reload=True)
