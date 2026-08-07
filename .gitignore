@@ -1,0 +1,24 @@
+# Local virtual environment
+.venv/
+venv/
+
+# Python cache & temporary files
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Credentials & secrets
+#
+# Not *.json. That was meant to catch downloaded credential files and instead
+# caught docs/iam-policy.json, which is the one file a reader most needs and
+# the one nobody would notice missing. It would take package.json with it the
+# moment a frontend arrives. Name the shapes credentials actually come in.
+.env
+*.pem
+*credentials*.json
+*secret*.json
+*accessKeys*.csv
+.aws/
+
+# VS Code settings
+.vscode/

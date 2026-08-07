@@ -1,0 +1,28 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadIamForTheAccountAudit",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GenerateCredentialReport",
+        "iam:GetCredentialReport",
+        "iam:GetAccountSummary",
+        "iam:GetAccountPasswordPolicy",
+        "iam:ListAccountAliases",
+        "iam:ListUsers",
+        "iam:ListGroupsForUser",
+        "iam:ListUserPolicies",
+        "iam:ListAttachedUserPolicies",
+        "iam:ListVirtualMFADevices",
+        "iam:ListPolicies",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:ListEntitiesForPolicy",
+        "iam:ListServerCertificates",
+        "access-analyzer:ListAnalyzers"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

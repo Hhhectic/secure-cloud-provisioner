@@ -1,0 +1,16 @@
+boto3>=1.34
+botocore>=1.34
+
+# API layer.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+
+# Testing only. moto fakes AWS in memory so the suite needs no account.
+# httpx backs fastapi's TestClient. cryptography generates real key pairs for
+# the key pair tests: moto parses imported keys properly and rejects fabricated
+# ones, correctly.
+pytest>=8.0
+moto[s3,ec2]>=5.0
+httpx>=0.27
+cryptography>=42.0
