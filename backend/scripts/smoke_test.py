@@ -28,6 +28,8 @@ for each resource type that finds anything left behind by its tag.
 """
 
 import argparse
+import json
+import os
 import random
 import shutil
 import string
@@ -882,6 +884,131 @@ def smoke_account_audit(region):
     print_warnings(warnings)
 
 
+# ---------------------------------------------------------------- The routes
+
+
+def smoke_api(region):
+    """Drives the HTTP layer against the real account.
+
+    Everything else here calls the registry adapters directly, which is one
+    layer below the routes. That was fine while the only caller was a person
+    at a terminal; now a web page depends on the routes and nothing had ever
+    exercised them against anything but moto.
+
+    TestClient calls the app in-process, so there is no port to bind - and
+    with no moto around it, the boto3 calls underneath go to the real
+    account. Free: a security group and a network cost nothing.
+    """
+    heading("The routes")
+
+    from fastapi.testclient import TestClient
+    from api.app import app
+
+    # Somewhere disposable, so a smoke run does not append to the real log.
+    log = Path(tempfile.mkdtemp(prefix="scp-smoke-audit-")) / "audit.log"
+    os.environ["SCP_AUDIT_LOG"] = str(log)
+
+    client = TestClient(app, base_url="http://127.0.0.1:8000")
+    name = f"scp-smoke-{suffix()}"
+    group_id = None
+
+    try:
+        check(client.get("/health").json() == {"status": "ok"},
+              "the API answers")
+
+        # ---- The guards, which cost nothing to try ----------------------
+        rebound = client.get("/resources", headers={"Host": "evil.example"})
+        check(rebound.status_code == 403,
+              "a request for a rebound hostname is refused")
+
+        cross = client.post(f"/resources/security-group/cleanup?force=true"
+                            f"&confirm=security-group",
+                            headers={"Origin": "https://evil.example"})
+        check(cross.status_code == 403,
+              "a write from another site's page is refused")
+
+        guessed = client.post("/resources/security-group/cleanup?force=true"
+                              "&confirm=security-group")
+        check(guessed.status_code == 400,
+              "a guessed cleanup confirmation is refused")
+
+        # ---- What the forms are offered ---------------------------------
+        options = client.get("/resources/security-group/options").json()["options"]
+        check(any(o["value"].startswith("vpc-") for o in options["vpc_id"]),
+              "the form is offered this account's real networks")
+
+        instance_options = client.get("/resources/instance/options").json()["options"]
+        check(set(o["value"] for o in instance_options["instance_type"])
+              == set(ec2i.ALLOWED_INSTANCE_TYPES),
+              "the size menu is the allowlist itself, not a copy of it")
+
+        # ---- Create, scan, fix, delete, through the routes ---------------
+        created = client.post("/resources/security-group", json={
+            "name": name,
+            "description": "smoke test of the HTTP layer",
+            "rules": [{"protocol": "tcp", "from_port": 22, "to_port": 22,
+                       "source": "0.0.0.0/0"}],
+        })
+        if not check(created.status_code == 201, "created a group over HTTP"):
+            print(f"        {RED}{created.text}{RESET}")
+            return
+        group_id = created.json()["resource_id"]
+        print(f"        {DIM}{group_id}{RESET}")
+
+        scanned = client.get(f"/resources/security-group/{group_id}").json()
+        check(scanned["counts"]["critical"] == 1,
+              "the scan over HTTP finds the open port")
+        check(scanned["settings"] is not None,
+              "the scan says what the group is, not only what is wrong")
+
+        fixable_here = [w for w in scanned["warnings"]
+                        if w.get("fix") and w.get("rule_id")]
+        if check(bool(fixable_here), "the finding is offered as fixable"):
+            fixed = client.post(
+                f"/resources/security-group/{group_id}/fix",
+                json={"rule_id": fixable_here[0]["rule_id"]},
+            )
+            check(fixed.status_code == 200, "the fix applied over HTTP")
+            rescanned = client.get(f"/resources/security-group/{group_id}").json()
+            check(rescanned["counts"]["critical"] == 0,
+                  "and the finding is gone on a rescan")
+
+        # ---- The destructive guard, on something real -------------------
+        forced = client.delete(f"/resources/security-group/{group_id}"
+                               "?force=true")
+        check(forced.status_code == 400,
+              "a forced delete with no confirmation is refused")
+
+        plan = client.get(f"/resources/security-group/{group_id}"
+                          "/deletion-plan").json()
+        check(plan["confirm_with"] == group_id,
+              "the deletion plan says what to echo back")
+
+        deleted = client.delete(f"/resources/security-group/{group_id}")
+        if check(deleted.status_code == 200, "deleted it over HTTP"):
+            group_id = None
+
+        # ---- The audit log ----------------------------------------------
+        entries = [json.loads(line) for line in
+                   log.read_text().splitlines()] if log.exists() else []
+        check(any(e.get("outcome") == "refused" for e in entries),
+              "refusals are recorded, and they leave no trace in the account")
+        check(any(e.get("outcome") == "done" for e in entries),
+              "so are the things that happened")
+        check(not any("/resources/security-group\"" in str(e.get("path", ""))
+                      and e.get("method") == "GET" for e in entries),
+              "reads are not recorded, which is what keeps the log readable")
+
+    except ClientError as e:
+        fail(f"{e.response['Error']['Code']}: {e.response['Error']['Message']}")
+    finally:
+        os.environ.pop("SCP_AUDIT_LOG", None)
+        shutil.rmtree(log.parent, ignore_errors=True)
+        if group_id and not KEEP:
+            registry.SECURITY_GROUP.delete(
+                registry.SECURITY_GROUP.get_client(region), group_id, {})
+
+
 # ------------------------------------------------------------- Disk backups
 
 
@@ -1040,6 +1167,9 @@ def main():
         # Read-only and free, so these always run.
         smoke_account_audit(args.region)
         smoke_snapshots(args.region)
+
+        # The HTTP layer, which everything above reaches one level below.
+        smoke_api(args.region)
 
         report_leftovers(args.region)
     except Exception:

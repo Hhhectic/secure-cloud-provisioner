@@ -253,7 +253,11 @@ the code was correct and an assumption was not.
   inline: a guardrail that detaches separately from what it guards is not a
   guardrail.
 
-Run the smoke test before believing anything works.
+Run the smoke test before believing anything works. It drives the
+registry and `aws/` directly, and since the web page arrived it drives
+the HTTP routes too - but nothing in it executes a line of the
+frontend's JavaScript, and the bastion blueprint has no live coverage
+in it at all.
 
 ## Style
 
