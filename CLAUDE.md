@@ -253,6 +253,11 @@ the code was correct and an assumption was not.
   inline: a guardrail that detaches separately from what it guards is not a
   guardrail.
 
+Node runs `frontend/keygen.js` unmodified: WebCrypto, `btoa`, `atob`
+and `TextEncoder` are all globals there, so the browser's key
+generator can be executed and checked against `ssh-keygen` rather
+than mirrored in Python and checked by proxy.
+
 Run the smoke test before believing anything works. It drives the
 registry and `aws/` directly, and since the web page arrived it drives
 the HTTP routes and, behind `--with-blueprint`, the whole bastion
@@ -269,13 +274,15 @@ Severity means something — if everything is critical, nothing is.
 
 ## Not done
 
-- **The frontend is unexercised by anything automated.** `frontend/` is plain
-  HTML and JS served by FastAPI at `/ui`, with no build step and no
-  dependencies. Tests cover that it is served, that the mount did not shadow
-  the API, and that the key generation module cannot reach the network — but
-  no test executes a line of the JavaScript, because there is no engine in the
-  development environment. Every bug found in it so far was found by a person
-  looking at it.
+- **Only the key generator is exercised in the frontend.** `frontend/` is
+  plain HTML and JS served by FastAPI at `/ui`, with no build step and no
+  dependencies. `keygen.test.mjs` runs the real generator under Node and has
+  `ssh-keygen` derive the public half from the private file it produced, for
+  both the Ed25519 path and the forced RSA fallback; `test_frontend_keygen.py`
+  runs it from pytest and skips where Node is absent. Everything else in
+  `app.js` — the forms, the menus, the cascade dialog, the blueprint panel —
+  is still only ever tested by a person looking at it, and every bug found in
+  it so far was found that way.
 - **The snapshot audit covers one region.** Snapshots are regional and
   `list_snapshots` sees only the client's region, the same limit as the Access
   Analyzer check below. An account passing this check has been shown to pass

@@ -31,6 +31,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r backend/requirements.txt
 
+      # GitHub's runners already ship Node and ssh-keygen, which is all
+      # tests/test_frontend_keygen.py needs. It skips itself where they are
+      # absent, so this step exists to say the coverage is expected here
+      # rather than to install anything.
+      - name: Show the JavaScript toolchain the keygen test uses
+        run: node --version && ssh-keygen -A -f /tmp/probe 2>/dev/null; ssh-keygen --help 2>&1 | head -1
+
       - name: Run the offline suite
         working-directory: backend
         # Deliberately fake credentials rather than none.
