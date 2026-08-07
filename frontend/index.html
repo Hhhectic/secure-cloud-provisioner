@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Secure Cloud Provisioner</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1>Secure Cloud Provisioner</h1>
+  <div class="bar">
+    <label>Region
+      <select id="region"></select>
+    </label>
+    <span id="health" class="pill">checking…</span>
+  </div>
+</header>
+
+<p class="warn">
+  This talks to a real AWS account. Creating and deleting here does the same
+  thing it does from the command line.
+</p>
+
+<nav id="types"></nav>
+
+<main>
+  <section id="listing">
+    <h2>
+      <span id="listing-title">Resources</span>
+      <span class="controls">
+        <label><input type="checkbox" id="only-ours" checked> only ones this tool made</label>
+        <label><input type="checkbox" id="with-scan"> scan each (slow)</label>
+        <button id="refresh">Refresh</button>
+      </span>
+    </h2>
+    <div id="list"></div>
+    <div id="cleanup-box"></div>
+  </section>
+
+  <section id="detail">
+    <h2>Detail</h2>
+    <div id="detail-body" class="muted">Pick something from the list.</div>
+  </section>
+
+  <section id="create">
+    <h2>Create</h2>
+    <div id="create-body"></div>
+  </section>
+
+  <section id="blueprint">
+    <h2>Blueprint: bastion architecture</h2>
+    <div id="blueprint-body"></div>
+  </section>
+</main>
+
+<div id="modal" class="hidden">
+  <div class="sheet">
+    <h2 id="modal-title">Confirm</h2>
+    <div id="modal-body"></div>
+    <div class="row">
+      <button id="modal-cancel">Cancel</button>
+      <button id="modal-go" class="danger" disabled>Delete</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="hidden"></div>
+
+<script src="keygen.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,110 @@
+/* Deliberately plain. Severity is the only thing colour is spent on, because
+   it is the only thing here where colour carries meaning rather than mood. */
+
+* { box-sizing: border-box; }
+
+body {
+  font: 14px/1.5 ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+  margin: 0;
+  padding: 1rem;
+  background: #fbfbfa;
+  color: #1a1a1a;
+}
+
+header { border-bottom: 2px solid #1a1a1a; padding-bottom: .5rem; }
+h1 { font-size: 1.2rem; margin: 0 0 .4rem; }
+h2 { font-size: .95rem; margin: 0 0 .6rem; border-bottom: 1px solid #ccc; padding-bottom: .3rem; }
+h3 { font-size: .85rem; margin: .8rem 0 .3rem; }
+
+.bar { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+.row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-top: .6rem; }
+.controls { float: right; font-weight: normal; display: flex; gap: .8rem; align-items: center; }
+
+.warn {
+  background: #fff4d6; border-left: 3px solid #b8860b;
+  padding: .5rem .7rem; margin: .8rem 0;
+}
+
+nav { display: flex; gap: .3rem; flex-wrap: wrap; margin: 1rem 0; }
+nav button.active { background: #1a1a1a; color: #fff; }
+
+main { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; align-items: start; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+section { border: 1px solid #ccc; background: #fff; padding: .8rem; }
+#listing { grid-column: 1 / -1; }
+
+button {
+  font: inherit; padding: .3rem .6rem; cursor: pointer;
+  border: 1px solid #1a1a1a; background: #fff;
+}
+button:hover:not(:disabled) { background: #eee; }
+button:disabled { opacity: .4; cursor: not-allowed; }
+button.danger { border-color: #a00; color: #a00; }
+button.danger:hover:not(:disabled) { background: #fee; }
+
+input, textarea, select { font: inherit; padding: .25rem; border: 1px solid #999; }
+textarea { width: 100%; }
+label { display: inline-flex; gap: .3rem; align-items: center; }
+
+table { border-collapse: collapse; width: 100%; margin-top: .4rem; }
+th, td { border: 1px solid #ddd; padding: .25rem .4rem; text-align: left; vertical-align: top; }
+th { background: #f0f0f0; }
+tr.clickable:hover { background: #f6f6ff; cursor: pointer; }
+
+.pill { padding: .1rem .4rem; border: 1px solid; font-size: .8rem; }
+.ok { color: #060; border-color: #060; }
+.bad { color: #a00; border-color: #a00; }
+
+.finding { border-left: 3px solid #999; padding: .4rem .6rem; margin: .4rem 0; background: #fafafa; }
+.finding.critical { border-color: #a00; background: #fff5f5; }
+.finding.warning  { border-color: #b8860b; background: #fffdf3; }
+.finding.info     { border-color: #26c; background: #f5f8ff; }
+.level { font-weight: bold; text-transform: uppercase; font-size: .75rem; }
+.critical .level { color: #a00; }
+.warning .level  { color: #8a6400; }
+.info .level     { color: #26c; }
+.cite { color: #555; font-size: .8rem; }
+
+/* Forms. Every control gets a caption above it rather than a placeholder
+   inside it, because a placeholder disappears exactly when it is needed. */
+.field { display: flex; align-items: center; gap: .5rem; margin: .5rem 0; flex-wrap: wrap; }
+.field > label { min-width: 9rem; font-weight: bold; }
+.field .hint { color: #666; font-size: .8rem; }
+
+.rule {
+  display: flex; gap: .8rem; align-items: flex-end; flex-wrap: wrap;
+  border: 1px solid #ddd; padding: .5rem; margin: .4rem 0; background: #fafafa;
+}
+.labelled { display: flex; flex-direction: column; gap: .15rem; }
+.labelled small { color: #555; font-size: .72rem; text-transform: uppercase; letter-spacing: .03em; }
+
+select { font: inherit; padding: .25rem; border: 1px solid #999; background: #fff; }
+
+.note {
+  color: #444; font-size: .82rem; line-height: 1.45;
+  margin: -.2rem 0 .7rem; padding-left: .6rem; border-left: 2px solid #ddd;
+  max-width: 46rem;
+}
+
+.existing {
+  border: 1px solid #ddd; padding: .5rem .7rem; margin: .4rem 0;
+  background: #fafafa; display: flex; flex-direction: column; gap: .3rem;
+}
+
+.keygen { border: 1px dashed #999; padding: .6rem; margin: .6rem 0; background: #fcfcfc; }
+.keygen .warn { margin: .5rem 0 0; }
+
+.muted { color: #666; }
+.mono-block { background: #f4f4f4; padding: .5rem; overflow-x: auto; white-space: pre-wrap;
+              word-break: break-word; max-height: 22rem; }
+.foreign { background: #fff5f5; }
+.hidden { display: none !important; }
+
+#modal { position: fixed; inset: 0; background: rgba(0,0,0,.5);
+         display: flex; align-items: center; justify-content: center; padding: 1rem; }
+.sheet { background: #fff; padding: 1rem; max-width: 46rem; width: 100%;
+         max-height: 90vh; overflow-y: auto; border: 2px solid #a00; }
+
+#toast { position: fixed; bottom: 1rem; right: 1rem; padding: .6rem .9rem;
+         border: 1px solid #1a1a1a; background: #fff; max-width: 34rem; }
+#toast.err { border-color: #a00; background: #fee; }

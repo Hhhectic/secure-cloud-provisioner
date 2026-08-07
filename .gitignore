@@ -231,3 +231,27 @@ credentials
 venv/
 .venv/
 .vscode/
+
+# ---------------------------------------------------------------------------
+# Added with the AWS provisioner and its web interface.
+
+# Private keys the web page downloads. frontend/keygen.js generates a key pair
+# in the browser and hands the private half straight to a download; the browser
+# chooses where that lands, and if it lands here then a secret is one
+# `git add -A` from being published. These patterns match what the page and the
+# bastion blueprint name their downloads.
+id_ed25519*
+id_rsa*
+*-id_ed25519*
+*-id_rsa*
+*-bastion-key
+*-private-key
+
+# Windows writes one of these next to anything downloaded through a browser.
+*:Zone.Identifier
+
+# Broader than the *_credentials.json above, which misses credentials.json and
+# aws-credentials.json.
+*credentials*.json
+*secret*.json
+*accessKeys*.csv

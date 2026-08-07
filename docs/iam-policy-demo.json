@@ -1,0 +1,28 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CreateAndPublishOneBlankDiskForTheDemo",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateVolume",
+        "ec2:DeleteVolume",
+        "ec2:CreateSnapshot",
+        "ec2:DeleteSnapshot",
+        "ec2:ModifySnapshotAttribute"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RefuseAnyVolumeBiggerThanTheDemoNeeds",
+      "Effect": "Deny",
+      "Action": "ec2:CreateVolume",
+      "Resource": "*",
+      "Condition": {
+        "NumericGreaterThan": {
+          "ec2:VolumeSize": "1"
+        }
+      }
+    }
+  ]
+}
