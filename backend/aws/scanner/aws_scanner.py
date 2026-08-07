@@ -3,25 +3,33 @@ from typing import Dict, List, Any
 
 def check_ec2_security_group(config: Dict[str, Any]) -> List[Dict[str, str]]:
     """
-    Evaluates EC2 Security Group inbound rules for risky open ports.
+    Evaluates EC2 Security Group inbound rules for risky open ports (IPv4 and IPv6).
     """
     alerts = []
     ip_permissions = config.get("ip_permissions", [])
 
     for permission in ip_permissions:
-        from_port = permission.get("from_port")
-        to_port = permission.get("to_port")
-        ip_ranges = permission.get("ip_ranges", [])
+        # Default to full port range if protocol allows all traffic (-1)
+        from_port = permission.get("from_port", 0)
+        to_port = permission.get("to_port", 65535)
 
-        # Check if rule allows access from anywhere (0.0.0.0/0)
-        is_open_to_world = any(cidr == "0.0.0.0/0" for cidr in ip_ranges)
+        if from_port is None or to_port is None:
+            from_port, to_port = 0, 65535
+
+        ip_ranges = permission.get("ip_ranges", [])
+        ipv6_ranges = permission.get("ipv6_ranges", [])
+
+        # Check if rule allows access from anywhere (IPv4 or IPv6)
+        is_open_v4 = any(cidr == "0.0.0.0/0" for cidr in ip_ranges)
+        is_open_v6 = any(cidr == "::/0" for cidr in ipv6_ranges)
+        is_open_to_world = is_open_v4 or is_open_v6
 
         if is_open_to_world:
             # Check SSH (Port 22)
             if from_port <= 22 <= to_port:
                 alerts.append({
                     "severity": "CRITICAL",
-                    "message": "SSH (Port 22) is open to the entire internet (0.0.0.0/0).",
+                    "message": "SSH (Port 22) is open to the entire internet (0.0.0.0/0 or ::/0).",
                     "remediation": "Restrict SSH ingress to your specific public IP address."
                 })
             
@@ -29,7 +37,7 @@ def check_ec2_security_group(config: Dict[str, Any]) -> List[Dict[str, str]]:
             if from_port <= 3389 <= to_port:
                 alerts.append({
                     "severity": "CRITICAL",
-                    "message": "RDP (Port 3389) is open to the entire internet (0.0.0.0/0).",
+                    "message": "RDP (Port 3389) is open to the entire internet (0.0.0.0/0 or ::/0).",
                     "remediation": "Restrict RDP ingress to a known management network IP."
                 })
 
@@ -96,40 +104,3 @@ def scan_aws_resource(resource_type: str, config: Dict[str, Any]) -> Dict[str, A
         "alert_count": len(alerts),
         "alerts": alerts
     }
-
-
-# =====================================================================
-# Local Test Driver
-# =====================================================================
-if __name__ == "__main__":
-    print("--- Testing Insecure S3 Bucket ---")
-    insecure_s3 = {
-        "public_access_block": {
-            "BlockPublicAcls": True,
-            "IgnorePublicAcls": False,  # Insecure
-            "BlockPublicPolicy": True,
-            "RestrictPublicBuckets": True
-        },
-        "encryption_enabled": False
-    }
-    result = scan_aws_resource("s3_bucket", insecure_s3)
-    print(f"Status: {result['status']}")
-    for alert in result["alerts"]:
-        print(f" [{alert['severity']}] {alert['message']}")
-        print(f"  └─ Fix: {alert['remediation']}")
-
-    print("\n--- Testing Insecure Security Group ---")
-    insecure_sg = {
-        "ip_permissions": [
-            {
-                "from_port": 22,
-                "to_port": 22,
-                "ip_ranges": ["0.0.0.0/0"]  # Insecure
-            }
-        ]
-    }
-    sg_result = scan_aws_resource("ec2_security_group", insecure_sg)
-    print(f"Status: {sg_result['status']}")
-    for alert in sg_result["alerts"]:
-        print(f" [{alert['severity']}] {alert['message']}")
-        print(f"  └─ Fix: {alert['remediation']}")

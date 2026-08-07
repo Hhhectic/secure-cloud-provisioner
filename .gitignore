@@ -231,3 +231,13 @@ credentials
 venv/
 .venv/
 .vscode/
+# Python bytecode & cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment & local settings
+.env
+venv/
+.venv/
