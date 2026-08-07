@@ -47,6 +47,7 @@ from botocore.exceptions import ClientError, NoCredentialsError, WaiterError
 from api import registry
 from aws import key_pairs as kp
 from aws import instances as ec2i
+from aws import security_groups as sg_module
 from aws import snapshots
 from aws import vpcs
 from aws.s3_buckets import PermissionDenied
@@ -884,6 +885,171 @@ def smoke_account_audit(region):
     print_warnings(warnings)
 
 
+# ------------------------------------------------------------- The blueprint
+
+
+def smoke_blueprint(region):
+    """The whole bastion architecture, built through the HTTP endpoint.
+
+    The strongest thing this tool does and, until now, the least verified: the
+    offline suite builds it against moto, and moto does not enforce the
+    cross-VPC rejection or the routing that half of this arrangement depends
+    on. What is being checked is not that six resources appeared, but that the
+    relationships between them are the ones that make it safe.
+
+    Keys are generated here with ssh-keygen and only the public halves are
+    posted, which is the same bargain the web page makes with WebCrypto. This
+    also covers the endpoint's refusal to build without them.
+
+    Launches two t3.micro instances and terminates them.
+    """
+    heading("Blueprint: bastion architecture")
+
+    from fastapi.testclient import TestClient
+    from api.app import app
+    from blueprints import bastion as bp
+
+    client = TestClient(app, base_url="http://127.0.0.1:8000")
+    ec2 = registry.VPC.get_client(region)
+    name = f"scp-smoke-{suffix()}"
+    key_dir = tempfile.mkdtemp(prefix="scp-smoke-keys-")
+    created = {}
+
+    try:
+        # ---- The refusal, which costs nothing -----------------------------
+        refused = client.post("/blueprints/bastion", json={"name": name})
+        check(refused.status_code == 400,
+              "the endpoint refuses to build without supplied public keys")
+        check("will not create a private key" in refused.json()["detail"],
+              "and says it will not make one for you")
+
+        # ---- Two pairs, generated where the private halves should live ----
+        public_halves = {}
+        for role in (bp.BASTION_KEY, bp.PRIVATE_KEY):
+            made, material, path = kp.generate_locally(
+                f"{name}-{role}", directory=key_dir)
+            if not check(made, f"generated {role} on this machine"):
+                print(f"        {RED}{material}{RESET}")
+                return
+            public_halves[role] = material
+
+        check(all("PRIVATE KEY" not in m for m in public_halves.values()),
+              "only public halves are about to leave this machine")
+        check(len(set(public_halves.values())) == 2,
+              "the two pairs are genuinely different")
+
+        # ---- Build it ------------------------------------------------------
+        print(f"  {DIM}building {name}, two machines, this takes a "
+              f"minute{RESET}")
+        built = client.post("/blueprints/bastion", json={
+            "name": name,
+            "region": region,
+            "with_instances": True,
+            "public_keys": public_halves,
+        }, timeout=600)
+
+        if not check(built.status_code == 200, "built the whole arrangement"):
+            print(f"        {RED}{built.text[:400]}{RESET}")
+            return
+
+        body = built.json()
+        created = body["created"]
+        if not check(body["ok"], "the build reports success"):
+            for p in body["problems"]:
+                print(f"        {RED}{p}{RESET}")
+            return
+
+        for kind, identifier in created.get("order", []):
+            print(f"        {DIM}{kind:<18} {identifier}{RESET}")
+
+        # ---- The relationships, which are the actual product ---------------
+        vpc_id = created["vpc"]
+        settings = vpcs.read_vpc_for_scanning(ec2, vpc_id)
+
+        private_subnet = next(
+            (s for s in settings["subnets"]
+             if s.get("declared_role") == "private"), None)
+        public_subnet = next(
+            (s for s in settings["subnets"]
+             if s.get("declared_role") == "public"), None)
+        check(private_subnet and public_subnet,
+              "the network has a public and a private subnet")
+
+        bastion = ec2i.read_instance_for_scanning(ec2,
+                                                  created["bastion_instance"])
+        private = ec2i.read_instance_for_scanning(ec2,
+                                                  created["private_instance"])
+
+        check(private["subnet_id"] == private_subnet["subnet_id"],
+              "the private machine is in the subnet with no route out")
+        check(bastion["subnet_id"] == public_subnet["subnet_id"],
+              "the bastion is in the subnet that reaches the internet")
+        check(private.get("public_ip") is None,
+              "the private machine has no public address")
+        check(bastion.get("public_ip"),
+              "the bastion has one, which is the only way in")
+        check(bastion["key_name"] != private["key_name"],
+              "the two machines use different keys, so one does not open both")
+
+        # The protection that survives the bastion's address changing.
+        rules = sg_module.read_group_for_scanning(ec2, created["private_sg"])
+        check(any(r["source"].startswith("sg:") for r in rules),
+              "the private firewall trusts the bastion's group, not an address")
+        check(not any(r["source"] in ("0.0.0.0/0", "::/0") for r in rules),
+              "and trusts nothing on the internet")
+
+        # ---- What the scanner makes of it ----------------------------------
+        findings = registry.INSTANCE.check(
+            registry.INSTANCE.read(ec2, created["private_instance"]))
+        check(summarize(findings)[CRITICAL] == 0,
+              "the scanner finds nothing critical on the private machine")
+
+        check(any("ProxyJump" in line or "-J " in line
+                  for line in body["instructions"]),
+              "the connection instructions route through the bastion")
+
+    except ClientError as e:
+        fail(f"{e.response['Error']['Code']}: {e.response['Error']['Message']}")
+    finally:
+        shutil.rmtree(key_dir, ignore_errors=True)
+        if created and not KEEP:
+            _tear_down_blueprint(ec2, region, created)
+        elif created:
+            note(f"left blueprint {name} in place")
+
+
+def _tear_down_blueprint(ec2, region, created):
+    """The two steps the teardown instructions describe.
+
+    The cascade takes everything inside the network. Key pairs are
+    account-level and survive it, which is the whole reason this is two
+    operations rather than one.
+    """
+    vpc_id = created.get("vpc")
+    if vpc_id:
+        print(f"  {DIM}terminating and deleting, this takes a minute{RESET}")
+        removed, message = registry.VPC.delete(ec2, vpc_id, {"force": True})
+        check(removed, f"deleted {vpc_id} and both machines with it")
+        if not removed:
+            print(f"        {RED}{message}{RESET}")
+
+    key_client = registry.KEY_PAIR.get_client(region)
+    survivors = []
+    for role in ("bastion-key", "private-key"):
+        key_name = created.get(role)
+        if not key_name:
+            continue
+        if kp.read_key_pair_for_scanning(key_client, key_name):
+            survivors.append(key_name)
+
+    check(len(survivors) == 2,
+          "both key pairs survived the cascade, as account-level things do")
+
+    for key_name in survivors:
+        gone, message = kp.delete_key_pair(key_client, key_name)
+        check(gone, f"removed {key_name}")
+
+
 # ---------------------------------------------------------------- The routes
 
 
@@ -1132,6 +1298,9 @@ def main():
                         help="do not delete what this script creates")
     parser.add_argument("--with-instances", action="store_true",
                         help="also launch and terminate a real t3.micro")
+    parser.add_argument("--with-blueprint", action="store_true",
+                        help="also build and tear down the whole bastion "
+                             "architecture, which launches two t3.micro")
     args = parser.parse_args()
     KEEP = args.keep
 
@@ -1170,6 +1339,13 @@ def main():
 
         # The HTTP layer, which everything above reaches one level below.
         smoke_api(args.region)
+
+        if args.with_blueprint:
+            smoke_blueprint(args.region)
+        else:
+            heading("Blueprint: bastion architecture")
+            print(f"  {DIM}skipped. Pass --with-blueprint to build and tear "
+                  f"down a real one.{RESET}")
 
         report_leftovers(args.region)
     except Exception:

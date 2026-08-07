@@ -255,9 +255,10 @@ the code was correct and an assumption was not.
 
 Run the smoke test before believing anything works. It drives the
 registry and `aws/` directly, and since the web page arrived it drives
-the HTTP routes too - but nothing in it executes a line of the
-frontend's JavaScript, and the bastion blueprint has no live coverage
-in it at all.
+the HTTP routes and, behind `--with-blueprint`, the whole bastion
+architecture. Nothing in it executes a line of the frontend's
+JavaScript, which remains the only part with no automated coverage of
+any kind.
 
 ## Style
 
