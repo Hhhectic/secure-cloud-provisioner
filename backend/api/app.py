@@ -20,10 +20,11 @@ would be theatre. Do not put it on a public interface.
 
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from api import models, registry
@@ -49,6 +50,46 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _is_local_origin(origin):
+    """Whether a browser Origin header belongs to this machine."""
+    host = urlparse(origin).hostname
+    return host in ("localhost", "127.0.0.1", "::1")
+
+
+@app.middleware("http")
+async def _refuse_cross_site_writes(request, call_next):
+    """Rejects state-changing requests sent from another site's page.
+
+    CORS does not do this. It stops a page *reading* the response, which is
+    the wrong half for a tool whose endpoints are destructive: the request has
+    already run by the time the answer is discarded.
+
+    A POST with no custom header and no JSON content type is a "simple
+    request" and is sent without a preflight, so any page in any tab could
+    reach a server bound to localhost. POST /resources/network/cleanup needs
+    no body at all and takes confirm=network in the query string, which is a
+    resource type and therefore guessable - the most destructive endpoint here
+    was the one most exposed.
+
+    Requests with no Origin at all are allowed: that is curl, the CLI and the
+    smoke test, none of which a hostile web page can impersonate. Browsers
+    always send Origin on a write.
+    """
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("origin")
+        if origin and not _is_local_origin(origin):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": (
+                    "This request came from a page on another site. The tool "
+                    "holds credentials that can delete infrastructure and has "
+                    "no login, so it only accepts changes from a page it "
+                    "served itself."
+                )},
+            )
+    return await call_next(request)
 
 
 @app.get("/", include_in_schema=False)

@@ -690,6 +690,52 @@ def test_the_blueprint_has_no_field_for_a_private_key(client):
     assert not [f for f in spec if "private" in f.lower()]
 
 
+# ------------------------------------------------- Cross-site writes
+
+
+def test_a_write_from_another_site_is_refused(client):
+    """CORS does not cover this, and the gap is the destructive half.
+
+    A POST with no custom header and no JSON body is a simple request: the
+    browser sends it without a preflight, so any page in any tab can reach a
+    server bound to localhost. CORS then hides the response, which is the
+    wrong half - the cleanup already ran.
+
+    POST /resources/{type}/cleanup needs no body at all and its confirm value
+    is the resource type, so the most destructive endpoint here was also the
+    most reachable.
+    """
+    refused = client.post(
+        "/resources/security-group/cleanup?force=true&confirm=security-group",
+        headers={"Origin": "https://evil.example"},
+    )
+    assert refused.status_code == 403
+    assert "another site" in refused.json()["detail"]
+
+
+def test_a_write_from_the_tools_own_page_is_allowed(client):
+    allowed = client.post(
+        "/resources/security-group/cleanup?force=true&confirm=security-group",
+        headers={"Origin": "http://127.0.0.1:8000"},
+    )
+    assert allowed.status_code == 200
+
+
+def test_a_write_with_no_origin_is_allowed(client):
+    """curl, the CLI and the smoke test send none, and a hostile page cannot
+    suppress the header."""
+    allowed = client.post(
+        "/resources/security-group/cleanup?force=true&confirm=security-group")
+    assert allowed.status_code == 200
+
+
+def test_reading_from_another_site_is_not_blocked_here(client):
+    """Left to CORS, which is what it is for. A GET changes nothing, and the
+    response is withheld from the page by the browser."""
+    fine = client.get("/resources", headers={"Origin": "https://evil.example"})
+    assert fine.status_code == 200
+
+
 # --------------------------------------------------------------- The page
 
 
