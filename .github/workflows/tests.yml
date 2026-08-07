@@ -1,0 +1,51 @@
+name: tests
+
+# The offline suite needs no AWS account and no credentials: moto stands in
+# for the API and scanner/ has no cloud calls in it at all. That is what makes
+# it safe to run on every push from a fork, and it is the reason the rules were
+# kept free of boto3 in the first place.
+#
+# What this cannot check is whether the tool works. Several things in this
+# project were correct against moto and wrong against AWS, and the list of them
+# is in CLAUDE.md. scripts/smoke_test.py is the answer to that question and it
+# needs a real account, so it is deliberately not run here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  offline-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Run the offline suite
+        working-directory: backend
+        # Deliberately fake credentials rather than none.
+        #
+        # A runner has no account today, so a plain run would prove the same
+        # thing - but the moment somebody adds real AWS secrets to this
+        # repository for another workflow, a test that reached past moto would
+        # start touching a live account and still show a green tick. These
+        # values are moto's own convention and cannot authenticate anywhere.
+        #
+        # Setting them empty instead of fake does not work: botocore treats an
+        # empty string as a credential and fails differently from having none.
+        env:
+          AWS_ACCESS_KEY_ID: testing
+          AWS_SECRET_ACCESS_KEY: testing
+          AWS_SESSION_TOKEN: testing
+          AWS_DEFAULT_REGION: us-east-1
+        run: pytest -q
