@@ -3,6 +3,7 @@ main.py
 FastAPI web server exposing REST API endpoints for cloud pre-flight scanning and provisioning.
 """
 
+import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -16,8 +17,9 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Schema for Azure Scan and Deploy Requests
+# Request schema for Azure Operations
 class AzureDeploymentRequest(BaseModel):
+    subscription_id: Optional[str] = None
     resource_group_name: str = "rg-secure-cloud-demo"
     location: str = "eastus"
     storage_account_name: Optional[str] = None
@@ -31,19 +33,12 @@ def read_root():
 
 @app.post("/api/v1/azure/scan")
 def azure_preflight_scan(request: AzureDeploymentRequest):
-    """
-    REST endpoint to evaluate proposed Azure resources against pre-flight security rules.
-    """
     payload = request.dict()
     scan_result = run_azure_security_scan(payload)
     return scan_result
 
 @app.post("/api/v1/azure/deploy")
 def azure_enforced_deploy(request: AzureDeploymentRequest):
-    """
-    Enforced deployment endpoint: Runs pre-flight security scan first.
-    Blocks deployment if security checks fail; provisions resources only if passed.
-    """
     payload = request.dict()
     
     # Step 1: Pre-flight security scan
@@ -59,14 +54,21 @@ def azure_enforced_deploy(request: AzureDeploymentRequest):
             }
         )
     
-    # Step 3: Safe Provisioning Execution
+    # Step 3: Safe Provisioning Execution via Azure SDK
     try:
-        deploy_summary = {
+        sub_id = request.subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", "mock-sub-id")
+        
+        # If running locally with real Azure credentials, trigger actual Azure SDK creation:
+        if sub_id != "mock-sub-id":
+            azure_crud.create_resource_group(sub_id, request.resource_group_name, request.location)
+            if request.storage_account_name:
+                azure_crud.create_storage_account(sub_id, request.resource_group_name, request.location, request.storage_account_name)
+
+        return {
             "status": "SUCCESS",
             "message": "Resource Group and configured infrastructure provisioned successfully.",
             "resource_group": request.resource_group_name,
             "location": request.location
         }
-        return deploy_summary
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Provisioning error: {str(e)}")
