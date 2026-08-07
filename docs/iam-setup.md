@@ -103,6 +103,66 @@ for want of a permission`, and the credential report comes back with its root
 row. Any `could not check X: missing Y` note names the permission that is
 absent.
 
+## Better than a long-lived access key
+
+Everything above assumes an IAM user with an access key in
+`~/.aws/credentials`. That key does not expire. If the file is read — by
+another account on the machine, by a backup, by a commit — whoever has it
+holds this account until somebody notices and revokes it.
+
+This tool audits accounts for exactly that. CIS 1.12 and 1.13 exist because
+static keys accumulate and outlive the person who made them.
+
+**First, if you keep the key:**
+
+```bash
+chmod 700 ~/.aws && chmod 600 ~/.aws/credentials
+```
+
+The default on some systems is world-readable, which means every account on
+the machine can read it.
+
+**Better: swap it for a role the user assumes.** Move the permissions from the
+user to a role, leave the user able to do nothing except assume it, and take
+an hour-long session when you work.
+
+Create a role — call it `secure-cloud-provisioner` — with this trust policy,
+substituting the account ID:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {"AWS": "arn:aws:iam::ACCOUNT_ID:user/EC2_Dude"},
+    "Action": "sts:AssumeRole",
+    "Condition": {"Bool": {"aws:MultiFactorAuthPresent": "true"}}
+  }]
+}
+```
+
+Attach `iam-policy.json` and `iam-policy-account-audit.json` to the **role**
+rather than the user, and leave the user with only `sts:AssumeRole` on it.
+Then add to `~/.aws/config`:
+
+```ini
+[profile scp]
+role_arn = arn:aws:iam::ACCOUNT_ID:role/secure-cloud-provisioner
+source_profile = default
+mfa_serial = arn:aws:iam::ACCOUNT_ID:mfa/YOUR_DEVICE
+region = us-east-1
+```
+
+and run everything with `AWS_PROFILE=scp`. boto3 handles the assume-role and
+the MFA prompt itself; nothing in this codebase changes.
+
+What that buys: a leaked credentials file expires within the hour instead of
+never, the MFA condition means a stolen key alone is not enough, and every
+action arrives in CloudTrail as the role rather than as a shared user, so the
+log says which session did what.
+
+The cost is a prompt when the session expires. That is the whole cost.
+
 ## What this policy assumes
 
 It assumes it is the **only** thing granting the identity access. Alongside

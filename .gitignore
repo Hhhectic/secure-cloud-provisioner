@@ -255,3 +255,6 @@ id_rsa*
 *credentials*.json
 *secret*.json
 *accessKeys*.csv
+
+# The local audit log, if it is pointed somewhere inside the repo.
+audit.log

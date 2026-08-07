@@ -23,7 +23,7 @@ MY_IP = "203.0.113.25/32"
 @pytest.fixture
 def client():
     with mock_aws():
-        yield TestClient(app)
+        yield TestClient(app, base_url="http://127.0.0.1:8000")
 
 
 @pytest.fixture
@@ -581,18 +581,52 @@ def test_a_deletion_plan_for_something_absent_is_a_404(client):
     assert missing.status_code == 404
 
 
-def test_a_forced_cleanup_needs_confirming_too(client):
-    """The loudest endpoint must not be the least guarded one."""
+def test_a_forced_cleanup_needs_a_token_it_had_to_fetch(client):
+    """The loudest endpoint must not be the least guarded one.
+
+    confirm used to be the resource type, which every caller already knows -
+    the weakness that made the cross-site hole damaging, because an attacker
+    who could not read a single response could still guess "network". The
+    token has to be fetched, and fetching means reading a response.
+    """
     _network(client, "api-cleanup-net")
 
-    refused = client.post("/resources/network/cleanup",
-                          params={"force": True})
+    refused = client.post("/resources/network/cleanup", params={"force": True})
     assert refused.status_code == 400
-    assert "confirm=network" in refused.json()["detail"]
+    assert "cleanup-plan" in refused.json()["detail"]
+
+    guessed = client.post("/resources/network/cleanup",
+                          params={"force": True, "confirm": "network"})
+    assert guessed.status_code == 400
+
+    plan = client.get("/resources/network/cleanup-plan").json()
+    assert plan["count"] >= 1
+    assert plan["items"], "the preview has to say what would go"
 
     done = client.post("/resources/network/cleanup",
-                       params={"force": True, "confirm": "network"})
+                       params={"force": True, "confirm": plan["confirm_with"]})
     assert done.status_code == 200
+
+
+def test_a_cleanup_token_is_good_only_once(client):
+    """So a token overheard or replayed cannot be spent twice."""
+    token = client.get("/resources/security-group/cleanup-plan").json()["confirm_with"]
+
+    first = client.post("/resources/security-group/cleanup",
+                        params={"force": True, "confirm": token})
+    assert first.status_code == 200
+
+    again = client.post("/resources/security-group/cleanup",
+                        params={"force": True, "confirm": token})
+    assert again.status_code == 400
+
+
+def test_a_cleanup_token_does_not_work_on_another_type(client):
+    token = client.get("/resources/security-group/cleanup-plan").json()["confirm_with"]
+
+    wrong = client.post("/resources/network/cleanup",
+                        params={"force": True, "confirm": token})
+    assert wrong.status_code == 400
 
 
 def test_an_unforced_cleanup_is_unchanged(client):
@@ -706,7 +740,7 @@ def test_a_write_from_another_site_is_refused(client):
     most reachable.
     """
     refused = client.post(
-        "/resources/security-group/cleanup?force=true&confirm=security-group",
+        "/resources/security-group/cleanup?force=true&confirm=anything",
         headers={"Origin": "https://evil.example"},
     )
     assert refused.status_code == 403
@@ -714,19 +748,39 @@ def test_a_write_from_another_site_is_refused(client):
 
 
 def test_a_write_from_the_tools_own_page_is_allowed(client):
-    allowed = client.post(
-        "/resources/security-group/cleanup?force=true&confirm=security-group",
-        headers={"Origin": "http://127.0.0.1:8000"},
-    )
+    allowed = client.post("/resources/security-group/cleanup",
+                          headers={"Origin": "http://127.0.0.1:8000"})
     assert allowed.status_code == 200
 
 
 def test_a_write_with_no_origin_is_allowed(client):
     """curl, the CLI and the smoke test send none, and a hostile page cannot
     suppress the header."""
-    allowed = client.post(
-        "/resources/security-group/cleanup?force=true&confirm=security-group")
+    allowed = client.post("/resources/security-group/cleanup")
     assert allowed.status_code == 200
+
+
+def test_a_request_for_a_rebound_hostname_is_refused(client):
+    """DNS rebinding: a page at evil.example whose record now points at
+    127.0.0.1. The browser treats it as same-origin, so a read carries no
+    Origin at all and the Origin check above never fires - but the Host header
+    still names what the page actually asked for.
+
+    Checked on reads too, because a same-origin read hands the response to the
+    attacking page.
+    """
+    refused = client.get("/resources", headers={"Host": "evil.example"})
+    assert refused.status_code == 403
+    assert "rebinding" in refused.json()["detail"]
+
+    written = client.post("/resources/security-group/cleanup",
+                          headers={"Host": "evil.example"})
+    assert written.status_code == 403
+
+
+def test_localhost_by_any_of_its_names_is_accepted(client):
+    for host in ("127.0.0.1:8000", "localhost:8000", "localhost", "[::1]:8000"):
+        assert client.get("/health", headers={"Host": host}).status_code == 200, host
 
 
 def test_reading_from_another_site_is_not_blocked_here(client):

@@ -801,13 +801,35 @@ async function showCascade(id, refusal, andThen) {
   typed.focus();
 }
 
-function startCleanup(known) {
+async function startCleanup(known) {
   const body = $("modal-body");
+  body.replaceChildren(text("p", "Reading what would go…", "muted"));
+  $("modal-title").textContent = "Clean up everything this tool made?";
+  $("modal").classList.remove("hidden");
+
+  // The plan carries the authorisation as well as the inventory. Nothing is
+  // destroyed without this having been fetched, and a page on another site
+  // cannot fetch it, because fetching means reading the response.
+  let plan;
+  try {
+    plan = await api(`/resources/${known.key}/cleanup-plan`);
+  } catch (e) {
+    body.replaceChildren(text("p", e.message, "bad"));
+    return;
+  }
+
   body.replaceChildren();
-  body.append(text("p",
-    `This deletes every ${known.label.toLowerCase()} tagged as created by ` +
-    `this tool, and destroys what is inside them. For networks that ` +
-    `terminates running machines.`));
+  body.append(text("p", plan.message));
+
+  if (plan.items.length) {
+    const list = document.createElement("ul");
+    for (const item of plan.items) {
+      list.append(text("li", `${item.id}  ${item.name || ""}`));
+    }
+    body.append(list);
+  } else {
+    body.append(text("p", "Nothing is tagged as created by this tool.", "muted"));
+  }
 
   const typed = document.createElement("input");
   typed.size = 34;
@@ -822,13 +844,13 @@ function startCleanup(known) {
   row.append(text("label", `Type ${known.key} to confirm`), typed);
   body.append(row);
 
-  $("modal-title").textContent = "Clean up everything this tool made?";
   go.textContent = "Clean up";
   go.onclick = async () => {
     go.disabled = true;
     try {
       const res = await api(
-        `/resources/${state.type}/cleanup?force=true&confirm=${encodeURIComponent(known.key)}`,
+        `/resources/${state.type}/cleanup?force=true` +
+        `&confirm=${encodeURIComponent(plan.confirm_with)}`,
         { method: "POST" }
       );
       const failed = res.results.filter(r => !r.ok);
@@ -842,7 +864,6 @@ function startCleanup(known) {
     }
   };
 
-  $("modal").classList.remove("hidden");
   typed.focus();
 }
 

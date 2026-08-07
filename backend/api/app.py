@@ -18,6 +18,8 @@ login screen to a tool that already trusts whoever is sitting at the machine
 would be theatre. Do not put it on a public interface.
 """
 
+import secrets
+import time
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -27,7 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from api import models, registry
+from api import audit, models, registry
 from aws.s3_buckets import PermissionDenied
 from blueprints import bastion
 from scanner.common import summarize, fixable, worst_level
@@ -52,10 +54,36 @@ app.add_middleware(
 )
 
 
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
 def _is_local_origin(origin):
     """Whether a browser Origin header belongs to this machine."""
-    host = urlparse(origin).hostname
-    return host in ("localhost", "127.0.0.1", "::1")
+    return urlparse(origin).hostname in LOCAL_HOSTS
+
+
+def _is_local_host_header(value):
+    """Whether the Host a request asked for is this machine.
+
+    Defends against DNS rebinding, where a page at http://evil.example is
+    served by a domain whose record has been changed to 127.0.0.1. The
+    browser then treats requests to that name as same-origin - no Origin
+    header on a read, and an Origin the check above would have to accept for
+    a write - but the Host header still says evil.example, because that is
+    the name the page actually asked for.
+    """
+    host = (value or "").strip().lower()
+
+    # An IPv6 literal is bracketed precisely because it is full of colons, so
+    # the port cannot be split off before the brackets are dealt with.
+    # Splitting first turns "[::1]:8000" into "[", which then matches nothing
+    # and refuses a request from this machine.
+    if host.startswith("["):
+        host = host[1:host.index("]")] if "]" in host else host[1:]
+    elif host.count(":") == 1:
+        host = host.split(":")[0]
+
+    return host in LOCAL_HOSTS
 
 
 @app.middleware("http")
@@ -77,9 +105,25 @@ async def _refuse_cross_site_writes(request, call_next):
     smoke test, none of which a hostile web page can impersonate. Browsers
     always send Origin on a write.
     """
+    # Host is checked on every method, including reads. A rebound name makes
+    # the browser treat this server as same-origin, so a read would be sent
+    # with no Origin at all and the response handed to the attacking page.
+    if not _is_local_host_header(request.headers.get("host")):
+        return JSONResponse(
+            status_code=403,
+            content={"detail": (
+                "This server answers only to localhost. The address used to "
+                "reach it was something else, which is what a DNS rebinding "
+                "attack looks like."
+            )},
+        )
+
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         origin = request.headers.get("origin")
         if origin and not _is_local_origin(origin):
+            audit.record(method=request.method, path=request.url.path,
+                         outcome="refused", why="cross-site origin",
+                         origin=origin)
             return JSONResponse(
                 status_code=403,
                 content={"detail": (
@@ -89,7 +133,21 @@ async def _refuse_cross_site_writes(request, call_next):
                     "served itself."
                 )},
             )
-    return await call_next(request)
+
+    response = await call_next(request)
+
+    # Writes only. Scanning is the safe half, and recording it would bury the
+    # handful of lines that matter.
+    if request.method in audit.WRITE_METHODS:
+        audit.record(
+            method=request.method,
+            path=request.url.path,
+            query=str(request.url.query) or None,
+            status=response.status_code,
+            outcome=audit.describe(response.status_code),
+        )
+
+    return response
 
 
 @app.get("/", include_in_schema=False)
@@ -214,6 +272,36 @@ def form_options(resource_type: str, region: str = "us-east-1"):
     client = known.get_client(region)
     return {"resource_type": resource_type,
             "options": known.options(client)}
+
+
+@app.get("/resources/{resource_type}/cleanup-plan")
+def cleanup_plan(resource_type: str, region: str = "us-east-1"):
+    """What a cleanup would delete, and the token needed to go ahead.
+
+    The same bargain as the deletion plan: nothing is destroyed without the
+    inventory having been fetched first. Here it also carries the
+    authorisation, because a caller who has read this response has proved
+    something a hostile page cannot.
+    """
+    known = _resource(resource_type)
+    _must_be_writable(known)
+    client = known.get_client(region)
+
+    found = known.list_all(client, True)
+
+    return {
+        "resource_type": resource_type,
+        "items": found,
+        "count": len(found),
+        "confirm_with": _issue_cleanup_token(resource_type),
+        "message": (
+            f"{len(found)} {known.label.lower()}(s) tagged as created by this "
+            "tool would be deleted, and force destroys what is inside them - "
+            "for networks that terminates running machines. Repeat the "
+            "cleanup with the confirm value above; it is good once and for "
+            f"{_CLEANUP_TOKEN_SECONDS // 60} minutes."
+        ),
+    }
 
 
 @app.post("/resources/{resource_type}/check", response_model=models.ScanResponse)
@@ -482,6 +570,40 @@ def delete(resource_type: str, resource_id: str, force: bool = False,
     return models.ActionResponse(ok=True, message=message)
 
 
+# Tokens handed out by the cleanup preview, and spent by the cleanup itself.
+#
+# confirm used to be the resource type, which is the thing every caller
+# already knows. That was the weakness that made the cross-site hole
+# damaging: an attacker who could not read a single response could still
+# guess "network". A token has to be fetched, and fetching means reading a
+# response, which is precisely what a page on another site cannot do.
+#
+# In memory and single-process, which is the right size for a tool that binds
+# to localhost. Each is good once and expires.
+_CLEANUP_TOKENS = {}
+_CLEANUP_TOKEN_SECONDS = 300
+
+
+def _issue_cleanup_token(resource_type):
+    now = time.monotonic()
+    for token, (kind, expires) in list(_CLEANUP_TOKENS.items()):
+        if expires < now:
+            del _CLEANUP_TOKENS[token]
+
+    token = secrets.token_urlsafe(16)
+    _CLEANUP_TOKENS[token] = (resource_type, now + _CLEANUP_TOKEN_SECONDS)
+    return token
+
+
+def _spend_cleanup_token(resource_type, token):
+    """True if this token was issued for this type and has not been used."""
+    found = _CLEANUP_TOKENS.pop(token, None)
+    if not found:
+        return False
+    kind, expires = found
+    return kind == resource_type and expires >= time.monotonic()
+
+
 @app.post("/resources/{resource_type}/cleanup",
           response_model=models.CleanupResponse)
 def cleanup(resource_type: str, force: bool = False,
@@ -502,14 +624,16 @@ def cleanup(resource_type: str, force: bool = False,
     _must_be_writable(known)
     client = known.get_client(region)
 
-    if force and confirm != resource_type:
+    if force and not _spend_cleanup_token(resource_type, confirm or ""):
         raise HTTPException(
             status_code=400,
             detail=(
                 f"This would delete every {known.label.lower()} tagged as "
                 "created by this tool, and force means destroying what is "
                 "inside them as well - for networks, that terminates running "
-                f"machines. Repeat with confirm={resource_type} to go ahead."
+                "machines. Fetch GET /resources/"
+                f"{resource_type}/cleanup-plan first: it lists what would go "
+                "and returns the confirm value, which is good once."
             ),
         )
 

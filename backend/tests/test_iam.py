@@ -1005,7 +1005,7 @@ def api():
     from api.app import app
 
     with mock_aws():
-        yield TestClient(app)
+        yield TestClient(app, base_url="http://127.0.0.1:8000")
 
 
 def test_the_account_is_listed_as_one_row(api):
