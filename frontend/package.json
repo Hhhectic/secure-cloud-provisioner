@@ -1,0 +1,12 @@
+{
+  "name": "secure-cloud-provisioner-frontend",
+  "private": true,
+  "type": "module",
+  "description": "Test tooling only. The page itself has no dependencies: index.html loads two plain scripts and nothing is bundled, minified or transpiled. jsdom exists so app.js can be executed somewhere other than a person's browser, and is never shipped.",
+  "scripts": {
+    "test": "node keygen.test.mjs && node app.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0"
+  }
+}

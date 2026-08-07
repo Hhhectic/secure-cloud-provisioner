@@ -258,3 +258,7 @@ id_rsa*
 
 # The local audit log, if it is pointed somewhere inside the repo.
 audit.log
+
+# Test tooling only. The page itself ships no dependencies.
+node_modules/
+package-lock.json

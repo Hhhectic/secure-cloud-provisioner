@@ -274,15 +274,17 @@ Severity means something — if everything is critical, nothing is.
 
 ## Not done
 
-- **Only the key generator is exercised in the frontend.** `frontend/` is
-  plain HTML and JS served by FastAPI at `/ui`, with no build step and no
-  dependencies. `keygen.test.mjs` runs the real generator under Node and has
-  `ssh-keygen` derive the public half from the private file it produced, for
-  both the Ed25519 path and the forced RSA fallback; `test_frontend_keygen.py`
-  runs it from pytest and skips where Node is absent. Everything else in
-  `app.js` — the forms, the menus, the cascade dialog, the blueprint panel —
-  is still only ever tested by a person looking at it, and every bug found in
-  it so far was found that way.
+- **The frontend's untested half is now its rendering, not its logic.**
+  `frontend/` is plain HTML and JS served at `/ui`, with no build step and
+  nothing shipped but two script tags. `keygen.test.mjs` runs the real
+  generator under Node and has `ssh-keygen` derive the public half from the
+  private file it produced, for both the Ed25519 path and the forced RSA
+  fallback. `app.test.mjs` loads `index.html`, `keygen.js` and `app.js` into
+  jsdom and drives them against a stub API, which is the only place the path
+  from a chosen menu value to a request body can be checked at all. jsdom is a
+  devDependency; the page has none. What remains uncovered is whether any of
+  it *looks* right — layout, the modal, whether a button is reachable — and
+  that is still only ever found by a person opening the page.
 - **The snapshot audit covers one region.** Snapshots are regional and
   `list_snapshots` sees only the client's region, the same limit as the Access
   Analyzer check below. An account passing this check has been shown to pass

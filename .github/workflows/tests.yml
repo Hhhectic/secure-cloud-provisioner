@@ -31,12 +31,20 @@ jobs:
       - name: Install dependencies
         run: pip install -r backend/requirements.txt
 
-      # GitHub's runners already ship Node and ssh-keygen, which is all
-      # tests/test_frontend_keygen.py needs. It skips itself where they are
-      # absent, so this step exists to say the coverage is expected here
-      # rather than to install anything.
-      - name: Show the JavaScript toolchain the keygen test uses
-        run: node --version && ssh-keygen -A -f /tmp/probe 2>/dev/null; ssh-keygen --help 2>&1 | head -1
+      # The frontend tests run under Node, which the runner already has along
+      # with ssh-keygen. jsdom is the one thing that needs fetching, and it is
+      # a devDependency: the page itself ships no dependencies at all.
+      #
+      # Both suites skip themselves when their tools are missing, so leaving
+      # this step out would turn a real failure into a silent skip.
+      - name: Install the frontend test tooling
+        working-directory: frontend
+        run: npm install --no-audit --no-fund
+
+      - name: Confirm the frontend tests are not silently skipping
+        working-directory: backend
+        run: pytest tests/test_frontend_keygen.py -q --no-header -rs
+          && test -d ../frontend/node_modules/jsdom
 
       - name: Run the offline suite
         working-directory: backend
