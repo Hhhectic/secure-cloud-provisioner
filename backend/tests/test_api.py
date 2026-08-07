@@ -690,6 +690,32 @@ def test_the_blueprint_has_no_field_for_a_private_key(client):
     assert not [f for f in spec if "private" in f.lower()]
 
 
+# --------------------------------------------------------------- The page
+
+
+def test_the_page_is_served_from_the_same_process_as_the_api(client):
+    """One thing to run, and no CORS between the page and its own backend."""
+    page = client.get("/ui/")
+    assert page.status_code == 200
+    assert "Secure Cloud Provisioner" in page.text
+
+    for asset in ("/ui/app.js", "/ui/style.css"):
+        assert client.get(asset).status_code == 200, asset
+
+
+def test_the_root_sends_you_to_the_page(client):
+    landing = client.get("/", follow_redirects=False)
+    assert landing.status_code in (307, 308)
+    assert landing.headers["location"] == "/ui/"
+
+
+def test_mounting_the_page_did_not_shadow_the_api(client):
+    """A mount reorders route matching. The API is the product; the page is
+    one caller of it, and must not be able to take a path from it."""
+    assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/resources").status_code == 200
+
+
 def test_cleanup_removes_every_managed_group(client, vpc_id):
     client.post("/resources/security-group", json=_open_ssh_spec("one"))
     client.post("/resources/security-group", json=_open_ssh_spec("two"))

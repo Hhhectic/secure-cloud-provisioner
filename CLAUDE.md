@@ -62,6 +62,19 @@ sentence about what the tool does instead. IAM posture and existing snapshots
 are things to look at, not things to make; a `create` that always returned an
 error would let `/docs` advertise an endpoint that can never work.
 
+**The browser generates key pairs, and so does the blueprint's caller.**
+`frontend/keygen.js` makes the pair with WebCrypto, writes the private half
+straight to a download and submits only the public half — the same bargain
+`ssh-keygen` gets from the CLI, moved to where the secret already is. A test
+asserts that module contains no `fetch`, `XMLHttpRequest`, `WebSocket`,
+`sendBeacon` or `api(` at all: it cannot reach the network, so it cannot leak
+what it holds. `bastion.build` takes `public_keys` for the same reason —
+`generate_locally` writes private halves to the machine running it, which from
+a terminal is the user's and over HTTP is the server's, and
+`POST /blueprints/bastion` refuses rather than defaulting when they are
+missing. The OpenSSH byte layouts in `keygen.js` were verified by mirroring
+them in Python and having `ssh-keygen -y` derive the same public key.
+
 **Key pairs are import-only.** `create_key_pair` returns private key material
 in the response body, so `aws/key_pairs.py` never calls it and the IAM policy
 denies it outright. `ssh-keygen` generates locally, only the public half is
@@ -251,7 +264,13 @@ Severity means something — if everything is critical, nothing is.
 
 ## Not done
 
-- No frontend. The tool is reachable only from a terminal or `/docs`.
+- **The frontend is unexercised by anything automated.** `frontend/` is plain
+  HTML and JS served by FastAPI at `/ui`, with no build step and no
+  dependencies. Tests cover that it is served, that the mount did not shadow
+  the API, and that the key generation module cannot reach the network — but
+  no test executes a line of the JavaScript, because there is no engine in the
+  development environment. Every bug found in it so far was found by a person
+  looking at it.
 - **The snapshot audit covers one region.** Snapshots are regional and
   `list_snapshots` sees only the client's region, the same limit as the Access
   Analyzer check below. An account passing this check has been shown to pass
@@ -273,8 +292,6 @@ Severity means something — if everything is critical, nothing is.
 - **Five of CIS section 1 is unimplemented, on purpose.** 1.1, 1.2, 1.10, 1.17
   and 1.20 have no API that answers them; the reasoning per control is at the
   foot of `scanner/controls.py`. Sixteen of twenty-one are covered.
-- **No blueprint endpoint.** `blueprints/bastion.py` is reachable only from the
-  CLI, so the strongest demo cannot be driven over HTTP.
 - **`GET /resources/{type}` with `with_scan=true` is serial.** Seven AWS calls
   per bucket, one after another. Fine for a demo account, visibly slow past
   that. Either concurrency or default the flag off and load findings per row.

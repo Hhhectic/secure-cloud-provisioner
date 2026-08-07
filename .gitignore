@@ -20,5 +20,19 @@ __pycache__/
 *accessKeys*.csv
 .aws/
 
+# Private keys the web page downloads. The browser chooses where they land,
+# and if that is this folder then a secret is one `git add -A` from being
+# published. These patterns match what frontend/keygen.js and the blueprint
+# name their downloads.
+id_ed25519*
+id_rsa*
+*-id_ed25519*
+*-id_rsa*
+*-bastion-key
+*-private-key
+
+# Windows writes these next to anything downloaded through a browser.
+*:Zone.Identifier
+
 # VS Code settings
 .vscode/

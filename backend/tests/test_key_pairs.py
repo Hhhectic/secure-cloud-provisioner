@@ -150,6 +150,46 @@ def test_a_multiline_key_is_refused():
 # ----------------------------------------------------------- Import, over moto
 
 
+def test_the_web_page_never_sends_a_private_key_to_the_api():
+    """The browser generates the pair; only the public half is submitted.
+
+    The companion to test_this_module_never_calls_create_key_pair. That one
+    stops the server obtaining private key material from AWS; this one stops
+    the page handing any back to the server. Both protect the same property
+    from opposite directions, and the page is the side a reviewer is less
+    likely to check.
+
+    Read as text rather than parsed, because there is no JS engine here. It is
+    a coarse check and it is still the one that would catch someone adding a
+    private_key field to the JSON body in a hurry.
+    """
+    page = Path(__file__).resolve().parent.parent.parent / "frontend"
+    if not page.is_dir():
+        pytest.skip("frontend not present in this checkout")
+
+    keygen = (page / "keygen.js").read_text()
+    app = (page / "app.js").read_text()
+
+    # The module that holds the secret cannot reach the network at all. This
+    # is the structural half of the guarantee, and the same shape of argument
+    # as aws/key_pairs.py never importing the call that returns one.
+    for reaches_out in ("fetch(", "XMLHttpRequest", "WebSocket", "sendBeacon",
+                        "navigator.clipboard", "api("):
+        assert reaches_out not in keygen, f"keygen.js must not call {reaches_out}"
+
+    # And in the page that does talk to the API, the private half is only ever
+    # handed to a download.
+    uses = [line.strip() for line in app.splitlines() if ".privateKey" in line]
+    assert uses, "the page should be generating a key pair"
+    for line in uses:
+        assert line.startswith("download("), f"private key used for: {line}"
+
+    # The submitted spec has a field for the public half and none for anything
+    # else, which is what api/models.ResourceSpec accepts.
+    assert '"public_key"' in app
+    assert "private_key" not in app
+
+
 @pytest.fixture
 def ec2():
     with mock_aws():
