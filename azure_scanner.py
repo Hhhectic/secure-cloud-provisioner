@@ -8,6 +8,7 @@ from security_messages import GET_SECURITY_MESSAGE
 def check_nsg_ssh_rule(nsg_rules: list) -> list:
     """
     Checks if SSH (Port 22) or RDP (Port 3389) is exposed to the public internet (*, 0.0.0.0/0, Internet).
+    Tags each warning with the specific offending rule's name.
     """
     findings = []
     unsafe_sources = ["*", "0.0.0.0/0", "internet"]
@@ -15,7 +16,7 @@ def check_nsg_ssh_rule(nsg_rules: list) -> list:
     if not nsg_rules:
         return findings
 
-    for rule in nsg_rules:
+    for idx, rule in enumerate(nsg_rules):
         direction = rule.get("direction", "Inbound").lower()
         access = rule.get("access", "Allow").lower()
         dest_port = str(rule.get("destination_port_range", ""))
@@ -23,7 +24,8 @@ def check_nsg_ssh_rule(nsg_rules: list) -> list:
 
         if direction == "inbound" and access == "allow":
             if dest_port in ["22", "3389", "*"] and source_prefix in unsafe_sources:
-                msg = GET_SECURITY_MESSAGE("AZURE_NSG_OPEN_SSH")
+                msg = GET_SECURITY_MESSAGE("AZURE_NSG_OPEN_SSH").copy()
+                msg["target_rule_name"] = rule.get("name", f"rule-{idx}")
                 findings.append(msg)
 
     return findings
@@ -37,7 +39,8 @@ def check_storage_public_access(storage_config: dict) -> list:
         return findings
 
     if storage_config.get("allow_blob_public_access") is True:
-        msg = GET_SECURITY_MESSAGE("AZURE_STORAGE_PUBLIC_ACCESS_ENABLED")
+        msg = GET_SECURITY_MESSAGE("AZURE_STORAGE_PUBLIC_ACCESS_ENABLED").copy()
+        msg["target_resource"] = storage_config.get("account_name", "storage_account")
         findings.append(msg)
 
     return findings
@@ -51,7 +54,8 @@ def check_storage_https_only(storage_config: dict) -> list:
         return findings
 
     if storage_config.get("supports_https_traffic_only") is False:
-        msg = GET_SECURITY_MESSAGE("AZURE_STORAGE_HTTPS_DISABLED")
+        msg = GET_SECURITY_MESSAGE("AZURE_STORAGE_HTTPS_DISABLED").copy()
+        msg["target_resource"] = storage_config.get("account_name", "storage_account")
         findings.append(msg)
 
     return findings
