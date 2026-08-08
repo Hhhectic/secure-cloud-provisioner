@@ -25,7 +25,6 @@ def check_nsg_ssh_rule(nsg_rules: list) -> list:
             if dest_port in ["22", "3389", "*"] and source_prefix in unsafe_sources:
                 msg = GET_SECURITY_MESSAGE("AZURE_NSG_OPEN_SSH")
                 findings.append(msg)
-                break
 
     return findings
 
@@ -51,7 +50,6 @@ def check_storage_https_only(storage_config: dict) -> list:
     if not storage_config:
         return findings
 
-    # Flag explicit setting of supports_https_traffic_only to False
     if storage_config.get("supports_https_traffic_only") is False:
         msg = GET_SECURITY_MESSAGE("AZURE_STORAGE_HTTPS_DISABLED")
         findings.append(msg)

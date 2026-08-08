@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 
 from azure_scanner_engine import run_azure_security_scan
-import azure_crud
+from azure_crud import create_resource_group, create_network_security_group, create_storage_account
 
 app = FastAPI(
     title="Secure Cloud Provisioner API",
@@ -58,28 +58,28 @@ def azure_enforced_deploy(request: AzureDeploymentRequest):
     try:
         sub_id = request.subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID")
         
-        # If a real Azure Subscription ID is provided, execute real Azure creation
+        # If an Azure Subscription ID exists, execute real Azure creation
         if sub_id and sub_id != "mock-sub-id":
             # 1. Create Resource Group
-            azure_crud.create_resource_group(sub_id, request.resource_group_name, request.location)
+            rg_res = create_resource_group(request.resource_group_name, request.location)
             
-            # 2. Create Storage Account (if requested)
-            if request.storage_account_name:
-                azure_crud.create_storage_account(
-                    sub_id, 
-                    request.resource_group_name, 
-                    request.location, 
-                    request.storage_account_name
+            # 2. Create Network Security Group (if requested)
+            if request.nsg_name or request.nsg_rules:
+                nsg_name = request.nsg_name or "default-nsg"
+                create_network_security_group(
+                    group_name=request.resource_group_name,
+                    location=request.location,
+                    nsg_name=nsg_name,
+                    nsg_rules=request.nsg_rules
                 )
-            
-            # 3. Create Network Security Group (if requested)
-            if request.nsg_name:
-                azure_crud.create_network_security_group(
-                    sub_id, 
-                    request.resource_group_name, 
-                    request.location, 
-                    request.nsg_name, 
-                    request.nsg_rules
+
+            # 3. Create Storage Account (if requested)
+            if request.storage_account_name:
+                create_storage_account(
+                    group_name=request.resource_group_name,
+                    location=request.location,
+                    account_name=request.storage_account_name,
+                    storage_config=request.storage_config
                 )
                 
             provision_status = "PROVISIONED_IN_AZURE"
