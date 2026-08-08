@@ -8,7 +8,7 @@ from security_messages import GET_SECURITY_MESSAGE
 def check_nsg_ssh_rule(nsg_rules: list) -> list:
     """
     Checks if SSH (Port 22) or RDP (Port 3389) is exposed to the public internet (*, 0.0.0.0/0, Internet).
-    Tags each warning with the specific offending rule's name.
+    Tags each warning with the specific offending rule's name or a generated fallback name.
     """
     findings = []
     unsafe_sources = ["*", "0.0.0.0/0", "internet"]
@@ -16,6 +16,7 @@ def check_nsg_ssh_rule(nsg_rules: list) -> list:
     if not nsg_rules:
         return findings
 
+    # enumerate ensures idx is defined for unnamed rule fallbacks
     for idx, rule in enumerate(nsg_rules):
         direction = rule.get("direction", "Inbound").lower()
         access = rule.get("access", "Allow").lower()

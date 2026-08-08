@@ -83,5 +83,25 @@ class TestAzureScanner(unittest.TestCase):
         self.assertTrue(result["passed"])
         self.assertEqual(result["total_warnings"], 0)
 
+    def test_unnamed_rule_fallback_does_not_raise_error(self):
+        """
+        Verifies that an NSG rule without a 'name' field uses the 'rule-{idx}' fallback
+        without raising a NameError.
+        """
+        payload = {
+            "nsg_rules": [
+                {
+                    # Intentionally omitted 'name' key
+                    "direction": "Inbound",
+                    "access": "Allow",
+                    "destination_port_range": "22",
+                    "source_address_prefix": "*"
+                }
+            ]
+        }
+        result = run_azure_security_scan(payload)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["warnings"][0]["target_rule_name"], "rule-0")
+
 if __name__ == "__main__":
     unittest.main()
