@@ -60,9 +60,28 @@ def azure_enforced_deploy(request: AzureDeploymentRequest):
         
         # If a real Azure Subscription ID is provided, execute real Azure creation
         if sub_id and sub_id != "mock-sub-id":
+            # 1. Create Resource Group
             azure_crud.create_resource_group(sub_id, request.resource_group_name, request.location)
+            
+            # 2. Create Storage Account (if requested)
             if request.storage_account_name:
-                azure_crud.create_storage_account(sub_id, request.resource_group_name, request.location, request.storage_account_name)
+                azure_crud.create_storage_account(
+                    sub_id, 
+                    request.resource_group_name, 
+                    request.location, 
+                    request.storage_account_name
+                )
+            
+            # 3. Create Network Security Group (if requested)
+            if request.nsg_name:
+                azure_crud.create_network_security_group(
+                    sub_id, 
+                    request.resource_group_name, 
+                    request.location, 
+                    request.nsg_name, 
+                    request.nsg_rules
+                )
+                
             provision_status = "PROVISIONED_IN_AZURE"
         else:
             # Fallback for dry-run / local testing without live Azure credentials
