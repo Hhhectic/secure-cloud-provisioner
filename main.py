@@ -56,17 +56,22 @@ def azure_enforced_deploy(request: AzureDeploymentRequest):
     
     # Step 3: Safe Provisioning Execution via Azure SDK
     try:
-        sub_id = request.subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", "mock-sub-id")
+        sub_id = request.subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID")
         
-        # If running locally with real Azure credentials, trigger actual Azure SDK creation:
-        if sub_id != "mock-sub-id":
+        # If a real Azure Subscription ID is provided, execute real Azure creation
+        if sub_id and sub_id != "mock-sub-id":
             azure_crud.create_resource_group(sub_id, request.resource_group_name, request.location)
             if request.storage_account_name:
                 azure_crud.create_storage_account(sub_id, request.resource_group_name, request.location, request.storage_account_name)
+            provision_status = "PROVISIONED_IN_AZURE"
+        else:
+            # Fallback for dry-run / local testing without live Azure credentials
+            provision_status = "PASSED_PREFLIGHT_MOCK_PROVISIONED"
 
         return {
             "status": "SUCCESS",
-            "message": "Resource Group and configured infrastructure provisioned successfully.",
+            "provision_mode": provision_status,
+            "message": "Pre-flight checks passed. Infrastructure deployment authorized.",
             "resource_group": request.resource_group_name,
             "location": request.location
         }
