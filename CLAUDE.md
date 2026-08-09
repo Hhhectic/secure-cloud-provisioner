@@ -372,8 +372,15 @@ the code was correct and an assumption was not.
   though it honours `ActionsEnabled` on `PutMetricAlarm`. The tempting fix is
   to flip the flag by rewriting the whole alarm, which moto would accept — and
   which is worse, because `PutMetricAlarm` replaces an alarm entirely and every
-  field not resent reverts to a default. The one-purpose call stays, and the
-  test asserts the call rather than its effect.
+  field not resent reverts to a default. The one-purpose call stays, the
+  offline test asserts the call rather than its effect, and the smoke test
+  confirms against a real account that both calls exist and that the fix lands.
+- **A new alarm starts in `INSUFFICIENT_DATA`, and moto says `OK`.** That is
+  the same state a permanently dead alarm sits in — a billing alarm in the
+  wrong region never leaves it — so an offline test asserting the state would
+  have encoded the one answer that makes the two indistinguishable. The smoke
+  test prints the state rather than asserting it, because a real alarm with
+  data legitimately reaches `OK` within minutes.
 - **moto sometimes passes the broken version.** It does not enforce the
   cross-VPC rejection that group-derived placement works around, so the old
   code — reaching for the account default while holding a group from elsewhere
