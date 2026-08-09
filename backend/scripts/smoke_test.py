@@ -53,7 +53,7 @@ from aws import vpcs
 from aws import alarms
 from aws.s3_buckets import PermissionDenied
 from scanner.common import (summarize, fixable, cited, print_warnings,
-                            CRITICAL)
+                            CRITICAL, WARNING, INFO)
 
 GREEN, RED, YELLOW, DIM, RESET = (
     "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
@@ -1072,6 +1072,137 @@ def _tear_down_blueprint(ec2, region, created):
         check(gone, f"removed {key_name}")
 
 
+# ------------------------------------------------------------- Workload
+
+# CloudWatch basic monitoring publishes every five minutes, and a machine has
+# to have been running for one of those windows before there is anything to
+# read. Ten minutes is two windows, which is enough slack for the first to be
+# missed.
+WORKLOAD_WAIT_SECONDS = 10 * 60
+WORKLOAD_POLL_SECONDS = 60
+
+
+def smoke_workload(region):
+    """Waits for a real machine's processor readings and checks what is said.
+
+    smoke_instance already asks for readings, but it asks seconds after launch
+    when the honest answer is None, so it can only check that the call is
+    permitted and that the absence is handled. Nothing automated has ever seen
+    this finding fire. It was confirmed once by hand, against a machine
+    deliberately pegged at 83%, and that has not been repeatable since.
+
+    This tests the idle band instead, because an ordinary machine reaches it
+    without being made to: a t3.micro doing nothing settles near zero. That
+    covers the metric plumbing, the window and period pairing, the band
+    boundaries against real numbers, and the choice to report idleness as a
+    note rather than a warning. It does not cover the saturated band, which
+    would mean generating load, and the boundary between them is already
+    pinned offline.
+
+    Slow on purpose: it waits for AWS to publish. Behind its own flag for
+    that reason as much as for the instance it launches.
+    """
+    heading("Workload readings")
+
+    resource = registry.INSTANCE
+    client = resource.get_client(region)
+    name = f"scp-smoke-idle-{suffix()}"
+    instance_id = None
+
+    try:
+        launched, instance_id, problems = ec2i.launch_instance(
+            client, name=name, region=region)
+        if not check(launched, "launched a machine to be measured"):
+            print(f"        {RED}{instance_id}{RESET}")
+            instance_id = None
+            return
+        for p in problems:
+            note(p)
+        print(f"  {DIM}{instance_id}, waiting for it to start{RESET}")
+
+        client.get_waiter("instance_running").wait(InstanceIds=[instance_id])
+
+        # The window that broke against a real account. A fortnight at
+        # five-minute sampling is more data points than GetMetricStatistics
+        # will return, and the failure arrived as a ClientError that
+        # read_cpu_usage turned into "no readings" - a busy machine reported
+        # as unmeasured. period_for_window widens the sampling instead, and
+        # only a real account can say whether it widened it enough.
+        wide = ec2i.read_cpu_usage(client, instance_id, hours=24 * 14)
+        ok("a fortnight-wide window is accepted rather than refused for "
+           "asking too many data points")
+
+        print(f"  {DIM}waiting up to {WORKLOAD_WAIT_SECONDS // 60} minutes for "
+              f"CloudWatch to publish{RESET}")
+
+        usage = None
+        deadline = time.time() + WORKLOAD_WAIT_SECONDS
+        while time.time() < deadline:
+            usage = ec2i.read_cpu_usage(client, instance_id)
+            if usage:
+                break
+            waited = int(WORKLOAD_WAIT_SECONDS - (deadline - time.time()))
+            print(f"        {DIM}nothing yet, {waited // 60}m elapsed{RESET}")
+            time.sleep(WORKLOAD_POLL_SECONDS)
+
+        if not check(usage is not None,
+                     f"readings arrived within {WORKLOAD_WAIT_SECONDS // 60} "
+                     f"minutes"):
+            note("CloudWatch was slower than this test is willing to wait. "
+                 "That is not a failure of the tool, and the machine has "
+                 "been terminated either way.")
+            return
+
+        print(f"        {DIM}{usage['average']:.1f}% average, "
+              f"{usage['peak']:.1f}% peak, {usage['samples']} sample(s) over "
+              f"{usage['hours']}h{RESET}")
+
+        check(usage["samples"] >= 1, "with at least one real data point")
+        check(0 <= usage["average"] <= 100,
+              "and an average inside the range a percentage can occupy")
+
+        # ---- What the scanner makes of it ---------------------------------
+        warnings = resource.check(resource.read(client, instance_id))
+        workload = [w for w in warnings if "processor use" in w["message"]]
+
+        if not check(len(workload) == 1,
+                     "the scanner says exactly one thing about the workload"):
+            return
+
+        finding = workload[0]
+        print(f"        {DIM}{finding['message'][:150]}{RESET}")
+
+        check(f"{usage['average']:.1f}%" in finding["message"],
+              "quoting the number it actually read")
+
+        # A machine that has done nothing is idle, and idle is a note. A
+        # standby is idle on purpose, and warning about it would train people
+        # to ignore the level that matters.
+        check(finding["level"] == INFO,
+              "an idle machine is reported as a note, not as a warning")
+        check("idle" in finding["message"].lower(),
+              "and is described as idle rather than as a fault")
+        check(not finding.get("fix"),
+              "with nothing offered to fix, because only its owner knows "
+              "whether it is finished with")
+        check(not finding.get("control"),
+              "and no citation, because no benchmark covers paying for idle "
+              "machines")
+
+    except ClientError as e:
+        fail(f"{e.response['Error']['Code']}: {e.response['Error']['Message']}")
+    finally:
+        if instance_id and not KEEP:
+            stopped, message = ec2i.terminate_instance(client, instance_id)
+            check(stopped, f"terminated {instance_id}")
+            if not stopped:
+                print(f"        {RED}{message}{RESET}")
+                print(f"        {RED}This is running and billing. Terminate "
+                      f"it by hand.{RESET}")
+        elif instance_id:
+            note(f"left {instance_id} running and billing")
+
+
 # ---------------------------------------------------------------- The routes
 
 
@@ -1447,6 +1578,25 @@ def smoke_alarms(region, with_email=None):
                 else:
                     note("the subscription is already confirmed, so this "
                          "address has been through this before")
+        elif subs:
+            # The topic is shared by every alarm this tool makes, and a
+            # confirmed email subscription cannot be undone by running this
+            # script. So one earlier --with-alarm-email run removes "an alarm
+            # nobody is listening to" from this account permanently, and
+            # asserting it here would fail forever for a reason that is not a
+            # defect. The same shape as the tag-filter note above.
+            note(f"the alert topic already has {len(subs)} subscriber(s) from "
+                 f"an earlier --with-alarm-email run, so an alarm with no "
+                 f"destination cannot be produced in this account. Remove "
+                 f"them in SNS to see that finding again.")
+
+            # The opposite assertion is still worth making, and is the one
+            # that would catch a scanner reporting silence that is not there.
+            findings = resource.check(settings)
+            check(not any(w["rule"]["setting"] == "no_subscribers"
+                          for w in findings),
+                  "and the scanner does not claim nobody is listening when "
+                  "somebody is")
         else:
             check(subs == [],
                   "with no address given, the topic exists and nobody is on it")
@@ -1578,6 +1728,11 @@ def main():
                         help="subscribe this address to the alert topic. "
                              "Sends a real confirmation email, which is the "
                              "only way to see the state moto cannot produce")
+    parser.add_argument("--with-workload", action="store_true",
+                        help="launch a machine and wait for CloudWatch to "
+                             "publish its processor readings, then check what "
+                             "the scanner says about them. Slow: about ten "
+                             "minutes of waiting")
     parser.add_argument("--with-blueprint", action="store_true",
                         help="also build and tear down the whole bastion "
                              "architecture, which launches two t3.micro")
@@ -1622,6 +1777,13 @@ def main():
 
         # The HTTP layer, which everything above reaches one level below.
         smoke_api(args.region)
+
+        if args.with_workload:
+            smoke_workload(args.region)
+        else:
+            heading("Workload readings")
+            print(f"  {DIM}skipped. Pass --with-workload to launch a machine "
+                  f"and wait for its readings.{RESET}")
 
         if args.with_blueprint:
             smoke_blueprint(args.region)
