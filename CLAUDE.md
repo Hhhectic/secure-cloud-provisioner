@@ -42,7 +42,54 @@ account, and cleanup deletes by *tag*, not by author: `make_vulnerable.py
 resources a teammate created. `--region` is supported everywhere, so a region
 each is free isolation.
 
+## There are two applications in this repository
+
+This matters before anything else, because nothing in the rest of this file
+says it and the obvious assumption is wrong.
+
+```
+main.py                 app = FastAPI()   /api/v1/azure/scan, /api/v1/azure/deploy
+backend/api/app.py      app = FastAPI()   /resources/..., /blueprints/..., /ui, /docs
+```
+
+Two `FastAPI()` instances, neither mounting the other. Two scanners
+(`azure_scanner_engine.run_azure_security_scan` and `backend/scanner/`), two
+warning formats, two ports. `frontend/` is served by the AWS app at `/ui` and
+calls only its routes, so the page covers half the tool the README describes.
+
+Both halves work. They have simply never been introduced.
+
+**The README is the scope, and it is one tool:** *"provisions AWS and Azure
+resources through guided forms and flags unsecure configurations before
+deployment."* Against that, the AWS half is complete and past its ticket — KAN-8
+capped it at one storage type, one compute type and one network rule, and there
+are now seven resource types. What is missing is not features. It is that a
+demonstration currently means starting two servers and explaining that the page
+only drives one of them.
+
+**Two ways to join them, and they are not equally interesting.**
+
+Mounting one app inside the other is an afternoon. `app.mount("/aws", ...)` or
+the reverse, one process, one port, and the frontend can reach both. It solves
+the demo and nothing else: there would still be two scanners disagreeing about
+what a finding looks like.
+
+Making Azure a `ResourceType` in `api/registry.py` is the version worth doing.
+`scanner/common.py` has claimed since the first commit that its warning shape is
+provider-agnostic, and `api/app.py` has one set of routes on the strength of
+that claim. Registering an Azure resource would be the first evidence either
+statement is true, and "why is it built this way?" is the obvious question in a
+viva. The cost is rewriting `azure_scanner_engine` to return the common warning
+shape, and agreeing whether Azure lives in `backend/azure/` beside `backend/aws/`
+or stays where it is.
+
+The group should pick one deliberately. Drifting into the first because it is
+Friday is a defensible choice; doing it without noticing the second existed is
+not.
+
 ## Running things
+
+The AWS half, which is what the rest of this file is about:
 
 ```bash
 cd backend
@@ -70,17 +117,35 @@ so a checkout without either still gets a green suite — CI installs both and
 asserts they are not skipping, because a skip and a pass look the same in a
 tick.
 
+The Azure half runs from the repository root and is a separate process:
+
+```bash
+uvicorn main:app --reload --port 8001    # Azure scan and deploy
+```
+
+It has no test suite, no `/ui`, and shares nothing with `backend/` but the
+repository. Nothing below this line applies to it.
+
 ## Layout
 
 ```
-scanner/     pure rule logic, no boto3 anywhere, no cloud calls
-aws/         all boto3, one module per resource type (iam.py reads only)
-api/         FastAPI over a resource registry, generic across types
-blueprints/  compositions of several resources into a correct architecture
-scripts/     live smoke test and demo helpers
-frontend/    the page: two plain scripts, no build step, no shipped deps
-docs/        IAM policy (three files, see iam-setup.md), bastion walkthrough
+main.py                 the Azure app. Separate FastAPI instance, root of repo
+azure_scanner*.py       the Azure scanner, separate from backend/scanner/
+security_messages.py    Azure's warning text
+
+backend/
+  scanner/     pure rule logic, no boto3 anywhere, no cloud calls
+  aws/         all boto3, one module per resource type (iam.py reads only)
+  api/         FastAPI over a resource registry, generic across types
+  blueprints/  compositions of several resources into a correct architecture
+  scripts/     live smoke test and demo helpers
+frontend/      the page: two plain scripts, no build step, no shipped deps
+docs/          IAM policy (three files, see iam-setup.md), bastion walkthrough
 ```
+
+`backend/providers/aws.py` is the empty placeholder this repository scaffolded
+before the AWS work started. It stayed empty; `backend/aws/` is where the code
+went. Deleting it is a five-second job nobody has wanted to do unilaterally.
 
 `scanner/` must never import from `aws/`. That separation is what lets the
 rules be tested without an account, and what would make a second cloud
@@ -362,8 +427,33 @@ Severity means something — if everything is critical, nothing is.
 - **`_sg_create` still falls back to the default VPC** when a spec omits
   `vpc_id`. The CLI always passes one now, so only API callers can place a
   group somewhere they did not choose.
-- Azure. The abstraction was built for it but nothing has been attempted.
+- **Azure and AWS are two applications.** See the section at the top. The
+  abstraction was built for a second provider and a second provider exists;
+  they have never met.
+- **The frontend covers AWS only.** It is served by the AWS app and calls only
+  its routes. Either it grows an Azure half or the README stops promising one.
+
+## Where this stands against the scope
+
+The README is the scope: *provisions AWS and Azure resources through guided
+forms and flags unsecure configurations before deployment.*
+
+Done: the AWS provisioning and scanning, well past KAN-8 — seven resource
+types, CIS citations across sections 1, 2, 3 and 5, a blueprint, guarded
+destructive paths, a live smoke test, and a browser key generator that cannot
+reach the network. The guided form exists at `/ui`. Pre-deployment scanning
+exists on both halves; `POST /resources/{type}/check` creates nothing.
+
+Not done, and it is one thing wearing several hats: the two halves are separate
+programs. Everything in *Not done* above other than that is a refinement.
 
 ## Next
 
-1. The frontend.
+1. Decide how Azure and AWS become one application — mount, or register Azure
+   as a `ResourceType`. Read the section at the top before choosing; this is a
+   group decision rather than a task.
+2. The frontend's rendering is still only ever checked by a person opening the
+   page.
+3. Detach `AmazonEC2FullAccess` and friends from `EC2_Dude`, so the documented
+   least-privilege policy is the one actually in force and the smoke test
+   proves it.
