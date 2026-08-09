@@ -1,14 +1,15 @@
 """
 main.py
 FastAPI application entrypoint for secure cloud provisioning operations.
-Handles pre-flight validation, orchestration, and sanitized error responses.
+Integrates security scanning engine, pre-flight validation, and sanitized error handling.
 """
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from azure.core.exceptions import ClientAuthenticationError, HttpResponseError
 
+from azure_scanner_engine import run_azure_security_scan
 from azure_crud import (
     create_resource_group,
     create_network_security_group,
@@ -18,7 +19,7 @@ from azure_crud import (
 app = FastAPI(
     title="Secure Cloud Provisioner API",
     version="1.0.0",
-    description="Backend API for validating and deploying Azure infrastructure resources securely."
+    description="Backend API for validating, scanning, and deploying Azure infrastructure resources securely."
 )
 
 
@@ -37,7 +38,7 @@ class AzureDeployRequest(BaseModel):
     storage_account_name: Optional[str] = Field(default=None, description="Azure Storage Account name")
     nsg_name: Optional[str] = Field(default=None, description="Azure Network Security Group name")
     nsg_rules: Optional[List[NSGRule]] = Field(default=None, description="List of NSG rules")
-    storage_config: Optional[dict] = Field(default=None, description="Optional storage configuration overrides")
+    storage_config: Optional[Dict[str, Any]] = Field(default=None, description="Optional storage configuration overrides")
 
 
 @app.get("/")
@@ -45,24 +46,38 @@ def read_root():
     return {"status": "ONLINE", "message": "Secure Cloud Provisioner API is operational"}
 
 
+@app.post("/api/v1/azure/scan")
+def scan_azure_infrastructure(request: AzureDeployRequest):
+    """
+    Dry-run endpoint used by frontend forms to evaluate deployment requests against governance rules.
+    """
+    scan_results = run_azure_security_scan(request.dict())
+    return {
+        "status": "COMPLETED",
+        "passed": scan_results.get("passed", False),
+        "violations": scan_results.get("violations", []),
+        "warnings": scan_results.get("warnings", []),
+        "scanned_payload": scan_results.get("scanned_payload", {})
+    }
+
+
 @app.post("/api/v1/azure/deploy")
 def deploy_azure_infrastructure(request: AzureDeployRequest):
     """
-    Validates configuration requests and provisions Azure resources using azure_crud.py.
-    Intercepts Azure SDK exceptions to sanitize outputs and prevent sensitive metadata leakage.
+    Scans incoming configuration against all security rules (SSH, RDP, Blob Access, HTTPS/TLS).
+    If validation passes, provisions infrastructure using azure_crud.py with sanitized exception handling.
     """
-    # 1. Pre-flight Security Rule Checks
-    if request.nsg_rules:
-        for rule in request.nsg_rules:
-            if (
-                rule.destination_port_range == "22" 
-                and rule.access == "Allow" 
-                and rule.source_address_prefix in ["*", "0.0.0.0/0"]
-            ):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Security Violation: Public SSH access (0.0.0.0/0 on port 22) is restricted by governance policy."
-                )
+    # 1. Full Security Engine Scan
+    payload = request.dict()
+    scan_results = run_azure_security_scan(payload)
+
+    if not scan_results.get("passed", False):
+        violations = scan_results.get("violations", [])
+        formatted_violations = "; ".join(violations) if violations else "Configuration violates governance policies."
+        raise HTTPException(
+            status_code=400,
+            detail=f"Security Violation: Deployment blocked by governance policy. Violations: {formatted_violations}"
+        )
 
     # 2. Infrastructure Deployment Execution
     try:
@@ -93,7 +108,8 @@ def deploy_azure_infrastructure(request: AzureDeployRequest):
         return {
             "status": "SUCCESS",
             "provision_mode": "PROVISIONED_IN_AZURE",
-            "message": "Pre-flight checks passed. Infrastructure deployment authorized.",
+            "message": "Security scan passed. Infrastructure deployment authorized.",
+            "scan_warnings": scan_results.get("warnings", []),
             "resource_group": rg_res.get("name"),
             "location": rg_res.get("location"),
             "network_security_group": nsg_res,
