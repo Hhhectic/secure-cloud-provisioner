@@ -482,17 +482,11 @@ the code was correct and an assumption was not.
   inline: a guardrail that detaches separately from what it guards is not a
   guardrail.
 
-Node runs `frontend/keygen.js` unmodified: WebCrypto, `btoa`, `atob`
-and `TextEncoder` are all globals there, so the browser's key
-generator can be executed and checked against `ssh-keygen` rather
-than mirrored in Python and checked by proxy.
-
-Run the smoke test before believing anything works. It drives the
-registry and `aws/` directly, and since the web page arrived it drives
-the HTTP routes and, behind `--with-blueprint`, the whole bastion
-architecture. Nothing in it executes a line of the frontend's
-JavaScript, which remains the only part with no automated coverage of
-any kind.
+Run the smoke test before believing anything works. It drives the registry
+and `aws/` directly, and since the web page arrived it drives the HTTP routes
+and, behind `--with-blueprint`, the whole bastion architecture. It executes no
+JavaScript at all; the page is covered separately by the two Node suites in
+`frontend/`, described under *Not done*.
 
 ## Style
 
@@ -503,17 +497,29 @@ Severity means something — if everything is critical, nothing is.
 
 ## Not done
 
-- **The frontend's untested half is now its rendering, not its logic.**
+- **The frontend's untested half is its rendering, not its logic.**
   `frontend/` is plain HTML and JS served at `/ui`, with no build step and
-  nothing shipped but two script tags. `keygen.test.mjs` runs the real
-  generator under Node and has `ssh-keygen` derive the public half from the
-  private file it produced, for both the Ed25519 path and the forced RSA
-  fallback. `app.test.mjs` loads `index.html`, `keygen.js` and `app.js` into
-  jsdom and drives them against a stub API, which is the only place the path
-  from a chosen menu value to a request body can be checked at all. jsdom is a
-  devDependency; the page has none. What remains uncovered is whether any of
-  it *looks* right — layout, the modal, whether a button is reachable — and
-  that is still only ever found by a person opening the page.
+  nothing shipped but two script tags. It is tested by Node rather than by
+  pytest, which is why nothing in the smoke test touches it.
+
+  `keygen.test.mjs` runs the real generator and has `ssh-keygen` derive the
+  public half from the private file it produced, for both the Ed25519 path and
+  the forced RSA fallback. That is possible because WebCrypto, `btoa`, `atob`
+  and `TextEncoder` are globals in Node and are the only browser APIs that
+  module touches, so it runs there unmodified — the byte layouts were
+  previously checked by writing the same encoder a second time in Python,
+  which proves the algorithm and not the file a browser loads.
+
+  `app.test.mjs` loads `index.html`, `keygen.js` and `app.js` into jsdom and
+  drives them against a stub API, replacing only `fetch`. It is the one place
+  the path from a chosen menu value to a request body can be checked at all,
+  and a rule that is not the one somebody picked is the failure this whole
+  project exists to prevent. jsdom is a devDependency; the page itself has
+  none.
+
+  What remains uncovered is whether any of it *looks* right — layout, the
+  modal, whether a button is reachable — and that is still only ever found by
+  a person opening the page.
 - **The snapshot audit covers one region.** Snapshots are regional and
   `list_snapshots` sees only the client's region, the same limit as the Access
   Analyzer check below. An account passing this check has been shown to pass
