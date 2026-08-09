@@ -1110,13 +1110,36 @@ def smoke_api(region):
               "the size menu is the allowlist itself, not a copy of it")
 
         # ---- Create, scan, fix, delete, through the routes ---------------
-        created = client.post("/resources/security-group", json={
+        #
+        # This group is deliberately open to the whole internet, because the
+        # rest of the section needs a real finding to scan and then fix. Since
+        # the pre-flight gate arrived that is no longer something the routes
+        # will do quietly, so the refusal is asserted first and the create then
+        # says out loud that it means it. Asking for the open group without the
+        # flag and getting it would be the failure.
+        spec = {
             "name": name,
             "description": "smoke test of the HTTP layer",
             "rules": [{"protocol": "tcp", "from_port": 22, "to_port": 22,
                        "source": "0.0.0.0/0"}],
-        })
-        if not check(created.status_code == 201, "created a group over HTTP"):
+        }
+
+        refused = client.post("/resources/security-group", json=spec)
+        check(refused.status_code == 400,
+              "a group open to the whole internet is refused before creation")
+        if refused.status_code == 400:
+            check(any(w["control"] and w["control"]["id"] == "5.3"
+                      for w in refused.json()["detail"]["warnings"]),
+                  "and the refusal carries the CIS 5.3 finding that caused it")
+
+        listed_now = client.get("/resources/security-group").json()["resources"]
+        check(not any(g["name"] == name for g in listed_now),
+              "and nothing was created by the attempt")
+
+        created = client.post("/resources/security-group?accept_risk=true",
+                              json=spec)
+        if not check(created.status_code == 201,
+                     "created a group over HTTP once the risk was accepted"):
             print(f"        {RED}{created.text}{RESET}")
             return
         group_id = created.json()["resource_id"]
