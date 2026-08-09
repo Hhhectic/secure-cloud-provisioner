@@ -73,10 +73,16 @@ function fakeApi(overrides = {}) {
 
     const handler = overrides[path] || routes[path];
     const body = handler ? handler(options) : {};
+
+    // A handler returning __status is modelling a refusal. The page has a
+    // path that only runs on a non-200 - the server declining to build
+    // something critical - and a stub that can only answer 200 cannot reach
+    // it.
+    const { __status: status = 200, ...rest } = body;
     return {
-      ok: true,
-      status: 200,
-      json: async () => body,
+      ok: status < 400,
+      status,
+      json: async () => (status === 200 ? body : rest),
     };
   }
 
@@ -247,6 +253,76 @@ check($(doc2, "create-body").textContent.includes("audited by this tool"),
       "an audited type offers no create form and says why");
 check($(doc2, "only-ours").disabled,
       "and 'only ones this tool made' is disabled, being meaningless there");
+
+// ------------------------------------------- refusing to build something bad
+
+console.log("\nThe pre-flight refusal");
+console.log("----------------------");
+
+// The server declines the first POST and accepts the second. Nothing else
+// changes, so what is being checked is that the page notices the refusal,
+// shows why, and can then proceed on purpose.
+let posts = 0;
+const { window: win3, document: doc3, sent: sent3 } = await boot({
+  "/resources/security-group": (options) => {
+    if (options.method !== "POST") {
+      return { resource_type: "security-group", resources: [] };
+    }
+    posts += 1;
+    if (posts === 1) {
+      return {
+        __status: 400,
+        detail: {
+          message: "Not created. The settings submitted have 1 critical "
+                   + "problem, listed below.",
+          warnings: [{
+            level: "critical",
+            message: "Anyone on the internet can reach port 22.",
+            rule_id: null, resource_id: null, rule: null, fix: null,
+            control: null,
+          }],
+        },
+      };
+    }
+    return { resource_type: "security-group", resource_id: "sg-anyway",
+             problems: [], settings: {}, warnings: [],
+             counts: { critical: 0, warning: 0, info: 0 } };
+  },
+});
+
+const createBody3 = $(doc3, "create-body");
+const [nameInput3] = createBody3.querySelectorAll("input");
+nameInput3.value = "open-sg";
+
+[...createBody3.querySelectorAll("button")]
+  .find((b) => b.textContent === "Create").click();
+await new Promise((resolve) => setTimeout(resolve, 50));
+
+const out3 = $(doc3, "create-out");
+
+check(out3.textContent.includes("Not created"),
+      "a refused create says so rather than failing silently");
+check(out3.textContent.includes("port 22"),
+      "and shows the finding that caused it, not just a status code");
+check(!out3.textContent.includes("accept_risk"),
+      "without naming the query parameter at a person who cannot send one");
+
+const anyway = [...out3.querySelectorAll("button")]
+  .find((b) => b.textContent === "Create it anyway");
+
+if (check(Boolean(anyway), "and offers a way through, once the reasons are shown")) {
+  const before3 = sent3.length;
+  anyway.click();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  const retry = sent3.slice(before3).find((r) => r.options.method === "POST");
+  if (check(Boolean(retry), "which submits again")) {
+    check(retry.url.includes("accept_risk=true"),
+          "this time saying the risk was accepted");
+    check($(doc3, "create-out").textContent.includes("sg-anyway"),
+          "and the resource is created");
+  }
+}
 
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");
 process.exit(failures ? 1 : 0);

@@ -651,7 +651,7 @@ function collectSpec(inputs) {
   return spec;
 }
 
-async function submitSpec(inputs, dryRun) {
+async function submitSpec(inputs, dryRun, acceptRisk = false) {
   const out = $("create-out");
   out.replaceChildren(text("p", dryRun ? "Checking…" : "Creating…", "muted"));
 
@@ -663,12 +663,27 @@ async function submitSpec(inputs, dryRun) {
 
   const path = dryRun
     ? `/resources/${state.type}/check`
-    : `/resources/${state.type}`;
+    : `/resources/${state.type}` + (acceptRisk ? "?accept_risk=true" : "");
 
   let body;
   try {
     body = await api(path, { method: "POST", body: JSON.stringify(spec) });
   } catch (e) {
+    // The server refuses a create whose pre-flight scan found something
+    // critical. That refusal carries the findings, so it is shown the same way
+    // a scan is rather than as a bare error string, and the button to proceed
+    // appears only here - after the reasons have been rendered. Same bargain as
+    // the cascade delete: the escape hatch exists, and it is not reachable
+    // without first seeing what it costs.
+    if (e.status === 400 && e.detail && e.detail.warnings) {
+      out.replaceChildren(text("p", e.detail.message, "bad"));
+      for (const w of e.detail.warnings) out.append(renderFinding(w, null));
+
+      const anyway = text("button", "Create it anyway", "danger");
+      anyway.onclick = () => submitSpec(inputs, false, true);
+      out.append(anyway);
+      return;
+    }
     out.replaceChildren(text("p", e.message, "bad"));
     return;
   }

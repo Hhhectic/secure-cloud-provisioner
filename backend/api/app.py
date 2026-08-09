@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from api import audit, models, registry
 from aws.s3_buckets import PermissionDenied
 from blueprints import bastion
-from scanner.common import summarize, fixable, worst_level
+from scanner.common import summarize, fixable, worst_level, CRITICAL
 
 app = FastAPI(
     title="Secure Cloud Provisioner",
@@ -327,17 +327,48 @@ def check_spec(resource_type: str, spec: models.ResourceSpec):
 
 @app.post("/resources/{resource_type}", response_model=models.CreateResponse,
           status_code=201)
-def create(resource_type: str, spec: models.ResourceSpec, region: str = "us-east-1"):
+def create(resource_type: str, spec: models.ResourceSpec, region: str = "us-east-1",
+           accept_risk: bool = False):
     """Creates the resource, then reports what is actually live.
 
     The warnings returned are from reading the created resource back, not from
     the submitted form. Those can differ: a bucket may fail to encrypt, a group
     may fail to take its rules. Reporting the request rather than the result
     would be reporting an intention.
+
+    The pre-flight scan runs first and a critical finding stops the create.
+    /check has always been able to say a configuration is dangerous, but saying
+    so and then building it anyway leaves the refusal to whoever read the
+    response - which is nobody, when the caller is a script. accept_risk=true
+    proceeds regardless, because there are legitimate reasons to build a thing
+    this tool disapproves of and being unable to is worse than being warned.
     """
     known = _resource(resource_type)
     _must_be_writable(known)
     client = known.get_client(region)
+
+    blocking = [w for w in known.check_spec(spec.as_dict())
+                if w["level"] == CRITICAL]
+    if blocking and not accept_risk:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                # Read by a person in the browser as well as by a script, so
+                # it names neither the query parameter nor the HTTP status.
+                # /docs advertises accept_risk; the page has a button.
+                "message": (
+                    f"Not created. The settings submitted have "
+                    f"{len(blocking)} critical "
+                    f"{'problem' if len(blocking) == 1 else 'problems'}, "
+                    "listed below. Change them, or say explicitly that you "
+                    "want it built this way."
+                ),
+                # The findings ride along for the same reason the deletion plan
+                # rides along with a refused delete: a caller that is stopped
+                # should learn what it nearly did without having to ask again.
+                "warnings": blocking,
+            },
+        )
 
     ok, result, problems = known.create(client, spec.as_dict())
     if not ok:

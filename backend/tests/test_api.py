@@ -198,7 +198,7 @@ def test_a_scan_reports_the_resource_as_well_as_its_findings(client, vpc_id):
     discarded, so the API could say a bucket's versioning was off without being
     able to say what its versioning was.
     """
-    created = client.post("/resources/security-group",
+    created = client.post("/resources/security-group?accept_risk=true",
                           json=_open_ssh_spec()).json()
 
     body = client.get(f"/resources/security-group/{created['resource_id']}").json()
@@ -209,7 +209,7 @@ def test_a_scan_reports_the_resource_as_well_as_its_findings(client, vpc_id):
 
 
 def test_creating_returns_the_resource_too(client, vpc_id):
-    body = client.post("/resources/security-group", json=_open_ssh_spec()).json()
+    body = client.post("/resources/security-group?accept_risk=true", json=_open_ssh_spec()).json()
 
     assert body["settings"]["name"] == "api-test-sg"
     assert body["settings"]["in_use"] is False
@@ -263,7 +263,7 @@ def test_the_instance_settings_are_not_the_internal_wrapper(client, vpc_id):
 def test_checking_something_not_yet_created_has_no_settings(client):
     """Nothing exists to describe, so the field stays empty rather than
     inventing a description of a thing that has not been made."""
-    body = client.post("/resources/security-group",
+    body = client.post("/resources/security-group?accept_risk=true",
                        json=_open_ssh_spec()).json()
     assert body["settings"] is not None
 
@@ -293,11 +293,92 @@ def test_scanning_something_that_does_not_exist_is_a_404(client, resource_type,
     assert resource_id in resp.json()["detail"]
 
 
+# ------------------------------------------------- The pre-flight refusal
+
+
+def test_a_critical_configuration_is_not_created(client, vpc_id):
+    """The scan already knew this was dangerous. Building it anyway and
+    mentioning the problem afterwards leaves the decision to whoever reads the
+    response, which is nobody when the caller is a script."""
+    resp = client.post("/resources/security-group", json=_open_ssh_spec())
+
+    assert resp.status_code == 400
+    assert "Not created" in resp.json()["detail"]["message"]
+
+
+def test_nothing_is_created_when_the_refusal_fires(client, vpc_id):
+    """The refusal has to happen before AWS is touched, not after."""
+    client.post("/resources/security-group", json=_open_ssh_spec("ghost"))
+
+    listed = client.get("/resources/security-group").json()["resources"]
+    assert not any(g["name"] == "ghost" for g in listed)
+
+
+def test_the_refusal_carries_the_findings_that_caused_it(client, vpc_id):
+    """Same bargain as the deletion plan: a caller that is stopped learns what
+    it nearly did without having to ask a second time."""
+    detail = client.post("/resources/security-group",
+                         json=_open_ssh_spec()).json()["detail"]
+
+    assert len(detail["warnings"]) == 1
+    assert detail["warnings"][0]["level"] == "critical"
+    assert "22" in detail["warnings"][0]["message"]
+
+
+def test_only_critical_findings_block_a_create(client, vpc_id):
+    """A warning is advice. If everything blocked, the flag would be needed
+    every time and would stop meaning anything."""
+    resp = client.post("/resources/network", json={"name": "plain-network"})
+    assert resp.status_code == 201
+
+
+def test_a_safe_configuration_needs_no_permission_to_proceed(client, vpc_id):
+    safe = {"name": "narrow-sg", "vpc_id": vpc_id,
+            "rules": [{"protocol": "tcp", "from_port": 22, "to_port": 22,
+                       "source": MY_IP}]}
+    resp = client.post("/resources/security-group", json=safe)
+
+    assert resp.status_code == 201
+    assert resp.json()["counts"]["critical"] == 0
+
+
+def test_accepting_the_risk_builds_it_anyway(client, vpc_id):
+    """There are legitimate reasons to build something this tool disapproves
+    of, and being unable to is worse than being warned."""
+    resp = client.post("/resources/security-group?accept_risk=true",
+                       json=_open_ssh_spec())
+
+    assert resp.status_code == 201
+    assert resp.json()["counts"]["critical"] == 1
+
+
+def test_accepting_the_risk_does_not_change_what_gets_built(client, vpc_id):
+    """The flag is permission to proceed, not an instruction to build
+    something different."""
+    body = client.post("/resources/security-group?accept_risk=true",
+                       json=_open_ssh_spec()).json()
+
+    scanned = client.get(f"/resources/security-group/{body['resource_id']}").json()
+    assert scanned["counts"]["critical"] == 1
+
+
+def test_an_audited_resource_is_refused_before_the_scan_runs(client, monkeypatch):
+    """405 for a read-only type, not a 400 about its settings. The type cannot
+    be created at all, which is a different answer from 'not like that'."""
+    from dataclasses import replace
+    from api import registry as registry_module
+
+    audited = replace(registry_module.BUCKET, key="audited2", read_only=True)
+    monkeypatch.setitem(registry_module.REGISTRY, "audited2", audited)
+
+    assert client.post("/resources/audited2", json={"name": "x"}).status_code == 405
+
+
 # --------------------------------------------------------------------- Create
 
 
 def test_creating_a_group_reports_what_is_actually_live(client, vpc_id):
-    resp = client.post("/resources/security-group", json=_open_ssh_spec())
+    resp = client.post("/resources/security-group?accept_risk=true", json=_open_ssh_spec())
     assert resp.status_code == 201
 
     body = resp.json()
@@ -307,7 +388,7 @@ def test_creating_a_group_reports_what_is_actually_live(client, vpc_id):
 
 
 def test_created_group_appears_in_the_list_with_a_severity(client, vpc_id):
-    created = client.post("/resources/security-group",
+    created = client.post("/resources/security-group?accept_risk=true",
                           json=_open_ssh_spec()).json()
 
     listed = client.get("/resources/security-group").json()["resources"]
@@ -317,7 +398,7 @@ def test_created_group_appears_in_the_list_with_a_severity(client, vpc_id):
 
 
 def test_list_can_skip_scanning(client, vpc_id):
-    client.post("/resources/security-group", json=_open_ssh_spec())
+    client.post("/resources/security-group?accept_risk=true", json=_open_ssh_spec())
 
     listed = client.get(
         "/resources/security-group", params={"with_scan": False}
@@ -326,7 +407,7 @@ def test_list_can_skip_scanning(client, vpc_id):
 
 
 def test_creating_a_bucket_returns_its_live_settings(client):
-    resp = client.post("/resources/bucket", json={
+    resp = client.post("/resources/bucket?accept_risk=true", json={
         "name": "api-test-bucket", "secure_by_default": False,
     })
     assert resp.status_code == 201
@@ -338,7 +419,7 @@ def test_creating_a_bucket_returns_its_live_settings(client):
 
 def test_fixing_a_group_narrows_the_rule_and_clears_the_finding(client, vpc_id):
     """The demo, driven entirely over HTTP."""
-    created = client.post("/resources/security-group",
+    created = client.post("/resources/security-group?accept_risk=true",
                           json=_open_ssh_spec()).json()
     sg_id = created["resource_id"]
 
@@ -361,7 +442,7 @@ def test_fixing_a_group_narrows_the_rule_and_clears_the_finding(client, vpc_id):
 
 
 def test_fixing_a_bucket_clears_its_criticals(client):
-    created = client.post("/resources/bucket", json={
+    created = client.post("/resources/bucket?accept_risk=true", json={
         "name": "api-test-bucket", "secure_by_default": False,
     }).json()
     name = created["resource_id"]
@@ -378,7 +459,7 @@ def test_fixing_a_bucket_clears_its_criticals(client):
 
 
 def test_fixing_an_unknown_rule_id_is_a_404(client, vpc_id):
-    created = client.post("/resources/security-group",
+    created = client.post("/resources/security-group?accept_risk=true",
                           json=_open_ssh_spec()).json()
 
     resp = client.post(
@@ -395,7 +476,7 @@ def test_fixing_the_same_rule_twice_fails_the_second_time(client, vpc_id):
     This is the stale-page case: two tabs open, both showing the same warning.
     The second click must not act on a rule that is already dealt with.
     """
-    created = client.post("/resources/security-group",
+    created = client.post("/resources/security-group?accept_risk=true",
                           json=_open_ssh_spec()).json()
     sg_id = created["resource_id"]
     rule_id = client.get(
@@ -418,7 +499,7 @@ def test_a_client_supplied_action_is_ignored(client, vpc_id):
     narrow it, not delete it. If this ever fails, the API has become a remote
     execution endpoint for whatever the caller feels like.
     """
-    created = client.post("/resources/security-group",
+    created = client.post("/resources/security-group?accept_risk=true",
                           json=_open_ssh_spec()).json()
     sg_id = created["resource_id"]
     rule_id = client.get(
@@ -445,7 +526,7 @@ def test_a_client_supplied_action_is_ignored(client, vpc_id):
 
 
 def test_deleting_a_group(client, vpc_id):
-    created = client.post("/resources/security-group",
+    created = client.post("/resources/security-group?accept_risk=true",
                           json=_open_ssh_spec()).json()
 
     resp = client.delete(f"/resources/security-group/{created['resource_id']}")
@@ -456,7 +537,7 @@ def test_deleting_a_group(client, vpc_id):
 def test_deleting_a_bucket_with_files_needs_force_and_then_confirmation(client):
     # Unhardened deliberately: the CIS 2.1.1 policy denies non-TLS requests and
     # moto serves plain HTTP, so a hardened bucket refuses put_object in-process.
-    client.post("/resources/bucket", json={"name": "api-test-bucket",
+    client.post("/resources/bucket?accept_risk=true", json={"name": "api-test-bucket",
                                            "secure_by_default": False})
     boto3.client("s3", region_name="us-east-1").put_object(
         Bucket="api-test-bucket", Key="notes.txt", Body=b"hello"
@@ -632,7 +713,7 @@ def test_a_cleanup_token_does_not_work_on_another_type(client):
 def test_an_unforced_cleanup_is_unchanged(client):
     """Without force it refuses anything occupied on its own, so demanding a
     second word for it would be ceremony rather than safety."""
-    client.post("/resources/security-group", json=_open_ssh_spec("tidy"))
+    client.post("/resources/security-group?accept_risk=true", json=_open_ssh_spec("tidy"))
 
     done = client.post("/resources/security-group/cleanup")
     assert done.status_code == 200
@@ -817,8 +898,8 @@ def test_mounting_the_page_did_not_shadow_the_api(client):
 
 
 def test_cleanup_removes_every_managed_group(client, vpc_id):
-    client.post("/resources/security-group", json=_open_ssh_spec("one"))
-    client.post("/resources/security-group", json=_open_ssh_spec("two"))
+    client.post("/resources/security-group?accept_risk=true", json=_open_ssh_spec("one"))
+    client.post("/resources/security-group?accept_risk=true", json=_open_ssh_spec("two"))
 
     results = client.post("/resources/security-group/cleanup").json()["results"]
     assert len(results) == 2
@@ -827,7 +908,7 @@ def test_cleanup_removes_every_managed_group(client, vpc_id):
 
 
 def test_cleanup_leaves_groups_this_tool_did_not_make(client, vpc_id):
-    client.post("/resources/security-group", json=_open_ssh_spec())
+    client.post("/resources/security-group?accept_risk=true", json=_open_ssh_spec())
     ec2 = boto3.client("ec2", region_name="us-east-1")
     ec2.create_security_group(GroupName="not-ours", Description="theirs",
                               VpcId=vpc_id)
