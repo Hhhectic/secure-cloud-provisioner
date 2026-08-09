@@ -222,6 +222,19 @@ publishing somebody's actual disk. It is behind `--with-public-snapshot`, asks
 a second time, and `--clean` removes snapshots unconditionally regardless of
 which flags made them.
 
+**One finding is about money rather than exposure.** `_check_workload` in
+`scanner/instance_rules.py` reads a machine's processor use and says whether it
+is idle, comfortable, working hard or saturated — the second half of KAN-12,
+ported from the CloudWatch harness with only the wording changed. It earns its
+place because a machine nobody uses costs the same as one carrying the service,
+every hour, until somebody notices, and on a small shared account that is a
+likelier loss than most of what the rest of the file reports. Only saturation
+is a warning; idleness is a note, because a standby is idle on purpose. No
+readings is not zero readings: a machine that launched two minutes ago has
+published nothing yet and a stopped one never will, so `read_cpu_usage` returns
+None and the rule stays quiet rather than advising someone to switch off
+something that may be busy.
+
 **An alarm fails by being quiet, which is why it is scanned at all.**
 Everything else here is dangerous when it is doing something; an alarm is
 dangerous when it is doing nothing, and the two look identical in the console.

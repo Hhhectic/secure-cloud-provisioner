@@ -722,3 +722,120 @@ def test_checking_a_private_launch_request_is_clean():
 
 def test_a_missing_instance_produces_no_findings():
     assert check_instance(None) == []
+
+
+# ------------------------------------------------- What the machine is doing
+
+# The plain-language health half of KAN-12, ported from the CloudWatch
+# harness. moto answers get_metric_statistics but never has any data points
+# for it, so everything about a machine that *is* reporting numbers is tested
+# through the rule directly. That is the point of keeping the rules free of
+# boto3: a 400-day-old key and a machine at 90% CPU are both reachable without
+# an account.
+
+
+def _with_usage(average, peak=None, hours=3, **overrides):
+    settings = {
+        "instance_id": "i-demo",
+        "name": "demo",
+        "imdsv2_required": True,
+        "metadata_endpoint_enabled": True,
+        "metadata_hop_limit": 1,
+        "public_ip": None,
+        "root_volume_encrypted": True,
+        "key_name": None,
+        "security_group_ids": [],
+        "ssh_reachable": False,
+        "cpu_usage": None if average is None else {
+            "hours": hours, "samples": 36,
+            "average": average, "peak": peak if peak is not None else average,
+        },
+    }
+    settings.update(overrides)
+    return settings
+
+
+def _workload_finding(settings):
+    found = [w for w in check_instance(settings)
+             if w["rule"]["setting"] in ("idle", "workload_normal",
+                                         "workload_busy", "workload_saturated")]
+    assert len(found) <= 1, "a machine has one workload, so it gets one verdict"
+    return found[0] if found else None
+
+
+def test_a_machine_doing_nothing_is_reported_as_costing_the_same_anyway():
+    found = _workload_finding(_with_usage(1.2, peak=4.0))
+    assert found["rule"]["setting"] == "idle"
+    assert found["level"] == "info"
+    assert "1.2%" in found["message"] and "4.0%" in found["message"]
+    assert "stopping it is free money" in found["message"]
+
+
+def test_an_idle_machine_is_a_note_rather_than_a_fault():
+    """A standby is idle on purpose. This says what is true and leaves the
+    decision alone."""
+    assert _workload_finding(_with_usage(0.0))["level"] == "info"
+
+
+def test_a_comfortable_machine_says_so():
+    assert _workload_finding(_with_usage(20.0))["rule"]["setting"] == "workload_normal"
+
+
+def test_a_hard_working_machine_is_still_only_a_note():
+    found = _workload_finding(_with_usage(60.0))
+    assert found["rule"]["setting"] == "workload_busy"
+    assert found["level"] == "info"
+
+
+def test_a_saturated_machine_is_a_warning_because_it_stops_answering():
+    found = _workload_finding(_with_usage(92.0))
+    assert found["rule"]["setting"] == "workload_saturated"
+    assert found["level"] == "warning"
+    assert "too small" in found["message"]
+
+
+@pytest.mark.parametrize("average,expected", [
+    (4.9, "idle"), (5.0, "workload_normal"),
+    (39.9, "workload_normal"), (40.0, "workload_busy"),
+    (74.9, "workload_busy"), (75.0, "workload_saturated"),
+])
+def test_the_band_edges_land_where_the_harness_put_them(average, expected):
+    assert _workload_finding(_with_usage(average))["rule"]["setting"] == expected
+
+
+def test_a_machine_with_no_readings_is_not_called_idle():
+    """No data is not zero. A machine that launched two minutes ago has
+    published nothing yet, and a stopped one never will; calling either idle
+    would advise switching off something that may be busy."""
+    assert _workload_finding(_with_usage(None)) is None
+
+
+def test_a_reading_with_no_average_is_not_guessed_at():
+    settings = _with_usage(0)
+    settings["cpu_usage"] = {"hours": 3, "samples": 0, "average": None,
+                             "peak": None}
+    assert _workload_finding(settings) is None
+
+
+def test_the_workload_note_does_not_displace_the_security_findings():
+    """Cost is an addition to what this scanner says, not a replacement."""
+    settings = _with_usage(1.0, public_ip="203.0.113.9", imdsv2_required=False)
+    settings_of = {w["rule"]["setting"] for w in check_instance(settings)}
+    assert "idle" in settings_of
+    assert "imdsv2" in settings_of
+
+
+def test_reading_cpu_usage_of_a_machine_with_no_metrics_is_none(ec2):
+    """moto answers the call and has nothing to report, which is also what a
+    just-launched machine looks like against real AWS."""
+    ok, instance_id, _ = ec2i.launch_instance(ec2, "demo", region=REGION)
+    assert ok
+    assert ec2i.read_cpu_usage(ec2, instance_id) is None
+
+
+def test_the_registry_read_carries_the_workload_alongside_the_settings(ec2):
+    ok, instance_id, _ = ec2i.launch_instance(ec2, "demo", region=REGION)
+    assert ok
+
+    settings = registry.INSTANCE.read(ec2, instance_id)
+    assert "cpu_usage" in settings["instance"]

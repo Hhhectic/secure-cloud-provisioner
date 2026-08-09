@@ -523,6 +523,27 @@ def smoke_instance(region):
         check(settings["managed_by_us"],
               "the instance is tagged as created by this tool")
 
+        # What the machine has been doing, which lives in CloudWatch rather
+        # than EC2. moto answers this call and never has a data point for it,
+        # so None is the only answer the offline suite has ever seen - and it
+        # is also the right answer here, because basic metrics are published
+        # every five minutes and this machine is younger than that. The check
+        # is that the call is permitted and the absence is handled, not that a
+        # number came back.
+        usage = ec2i.read_cpu_usage(client, instance_id)
+        if usage is None:
+            ok("no processor readings yet, which is correct for a machine "
+               "this new and is not reported as idle")
+        else:
+            ok(f"processor readings arrived: {usage['average']:.1f}% average "
+               f"over {usage['hours']}h from {usage['samples']} sample(s)")
+            check(not any(w["rule"]["setting"] == "idle"
+                          for w in resource.check(resource.read(client,
+                                                                instance_id))
+                          if w.get("rule"))
+                  or usage["average"] < 5,
+                  "and a machine is only called idle when the numbers say so")
+
         warnings = resource.check(resource.read(client, instance_id))
         criticals = [w for w in warnings if w["level"] == CRITICAL]
         check(criticals == [], "the scanner finds nothing critical")

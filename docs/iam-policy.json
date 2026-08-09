@@ -13,6 +13,7 @@
         "ssm:GetParameter",
         "sts:GetCallerIdentity",
         "cloudwatch:DescribeAlarms",
+        "cloudwatch:GetMetricStatistics",
         "cloudwatch:ListMetrics",
         "cloudwatch:ListTagsForResource",
         "sns:ListSubscriptionsByTopic",

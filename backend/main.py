@@ -163,6 +163,13 @@ def _describe_instance(settings):
     print(f"  public address:  {settings.get('public_ip') or 'none'}")
     print(f"  key pair:       {settings.get('key_name') or 'none'}")
 
+    usage = settings.get("cpu_usage")
+    if usage:
+        print(f"  processor:      {usage['average']:.1f}% average over "
+              f"{usage['hours']}h, {usage['peak']:.1f}% peak")
+    else:
+        print("  processor:      no readings yet (they take about 5 minutes)")
+
     public_ip = settings.get("public_ip")
     private_ip = settings.get("private_ip")
     key_name = settings.get("key_name")

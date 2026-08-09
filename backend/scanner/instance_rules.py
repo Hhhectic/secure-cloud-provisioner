@@ -199,4 +199,78 @@ def check_instance(settings, firewall_warnings=None):
             _target(instance_id, "no_key_pair"),
         ))
 
+    warnings.extend(_check_workload(settings, instance_id, name))
+
     return warnings
+
+
+# How busy a machine has to be before each description applies. The bands come
+# from the CloudWatch harness this was ported from; only the wording changed.
+IDLE_PERCENT = 5
+COMFORTABLE_PERCENT = 40
+BUSY_PERCENT = 75
+
+
+def _check_workload(settings, instance_id, name):
+    """What the machine has actually been doing, from its CPU readings.
+
+    The only finding in this tool about money rather than exposure, and it
+    earns its place: a machine nobody is using costs the same as one carrying
+    the whole service, every hour, until somebody notices. That is a more
+    likely loss on a small account than most of what the rest of this file
+    reports.
+
+    Reported as a note, never a fault. Idleness is not a defect - a standby
+    machine, or one waiting on next term's coursework, is idle on purpose -
+    so this says what is true and leaves the decision alone.
+    """
+    usage = settings.get("cpu_usage")
+    if not usage:
+        # No readings is not the same as no work. A machine that launched two
+        # minutes ago has published nothing yet, and one that is stopped never
+        # will; calling either idle would advise switching off something that
+        # may be busy, or something already off.
+        return []
+
+    average = usage.get("average")
+    peak = usage.get("peak")
+    hours = usage.get("hours")
+
+    if average is None:
+        return []
+
+    measured = (f"{name} averaged {average:.1f}% processor use over the last "
+                f"{hours} hours, peaking at {peak:.1f}%.")
+
+    if average < IDLE_PERCENT:
+        return [_warning(
+            INFO,
+            f"{measured} That is essentially idle. It is charged by the hour "
+            "at the same rate as a machine doing something, so if this is "
+            "finished with, stopping it is free money. If it is a standby, "
+            "this is what a standby looks like.",
+            _target(instance_id, "idle"),
+        )]
+
+    if average < COMFORTABLE_PERCENT:
+        return [_warning(
+            INFO,
+            f"{measured} That is working normally with room to spare.",
+            _target(instance_id, "workload_normal"),
+        )]
+
+    if average < BUSY_PERCENT:
+        return [_warning(
+            INFO,
+            f"{measured} That is working fairly hard but keeping up.",
+            _target(instance_id, "workload_busy"),
+        )]
+
+    return [_warning(
+        WARNING,
+        f"{measured} That is running hot. Sustained use this high usually "
+        "means the machine is too small for what it is being asked to do, and "
+        "a machine at its limit is one that stops answering when something "
+        "unexpected arrives - including anyone trying to reach it legitimately.",
+        _target(instance_id, "workload_saturated"),
+    )]

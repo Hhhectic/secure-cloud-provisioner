@@ -24,6 +24,8 @@ from the metadata service. CIS 5.7 asks for it; this tool does not offer the
 alternative.
 """
 
+from datetime import datetime, timedelta, timezone
+
 import boto3
 from botocore.exceptions import ClientError, WaiterError
 
@@ -41,6 +43,11 @@ ALLOWED_INSTANCE_TYPES = {
 }
 
 DEFAULT_INSTANCE_TYPE = "t3.micro"
+
+# How far back to look when asking what a machine has been doing. Three hours
+# is long enough that a single burst does not decide the answer, and short
+# enough that the answer is about now rather than about last week.
+CPU_WINDOW_HOURS = 3
 
 # Looked up rather than hardcoded: AMI IDs differ per region and are replaced
 # whenever the image is patched, so any literal ID is wrong somewhere and stale
@@ -467,6 +474,49 @@ def _root_volume_encrypted(ec2, instance):
         return volumes[0].get("Encrypted") if volumes else None
     except ClientError:
         return None
+
+
+def read_cpu_usage(ec2, instance_id, hours=CPU_WINDOW_HOURS, now=None):
+    """How hard this machine has been working, or None if nothing is known.
+
+    A free read that creates nothing: AWS publishes basic EC2 metrics every
+    five minutes whether or not anyone looks. It needs a CloudWatch client
+    rather than the EC2 one, built here for the same region, because the
+    registry hands readers a single client and the caller should not have to
+    know that one fact about a machine lives in a different service.
+
+    Returns None rather than zero when there are no data points. They are
+    different: a machine reporting 0% is idle, and a machine reporting nothing
+    has either just launched, or is stopped, or is not being measured. Scoring
+    the second as idle would advise switching off something that may be busy.
+    """
+    now = now or datetime.now(timezone.utc)
+    cloudwatch = boto3.client("cloudwatch", region_name=ec2.meta.region_name)
+
+    try:
+        points = cloudwatch.get_metric_statistics(
+            Namespace="AWS/EC2",
+            MetricName="CPUUtilization",
+            Dimensions=[{"Name": "InstanceId", "Value": instance_id}],
+            StartTime=now - timedelta(hours=hours),
+            EndTime=now,
+            Period=300,
+            Statistics=["Average", "Maximum"],
+        )["Datapoints"]
+    except ClientError:
+        # Not fatal. Every other finding about this machine still stands, and
+        # the rules treat an absent reading as "not known" rather than "idle".
+        return None
+
+    if not points:
+        return None
+
+    return {
+        "hours": hours,
+        "samples": len(points),
+        "average": sum(p["Average"] for p in points) / len(points),
+        "peak": max(p["Maximum"] for p in points),
+    }
 
 
 def read_instance_for_scanning(ec2, instance_id):

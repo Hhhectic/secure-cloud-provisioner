@@ -515,6 +515,12 @@ def _instance_read(client, instance_id):
     if not settings:
         return None
 
+    # What the machine has been doing, which lives in CloudWatch rather than
+    # EC2. Fetched here for the same reason the firewall findings are: the
+    # rules cannot make a cloud call, and a caller asking about a machine
+    # should not have to know its workload is kept in a different service.
+    settings["cpu_usage"] = ec2i.read_cpu_usage(client, instance_id)
+
     firewall = []
     rules = []
     rules = []
