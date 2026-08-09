@@ -17,6 +17,7 @@ from azure.mgmt.storage import StorageManagementClient
 
 
 def get_azure_credentials():
+    """Retrieves Azure credentials from environment variables and initializes ClientSecretCredential."""
     subscription_id = os.getenv("AZURE_SUBSCRIPTION_ID")
     tenant_id = os.getenv("AZURE_TENANT_ID")
     client_id = os.getenv("AZURE_CLIENT_ID")
@@ -31,6 +32,7 @@ def get_azure_credentials():
 
 
 def create_resource_group(group_name: str, location: str):
+    """Creates or updates an Azure Resource Group."""
     credential, subscription_id = get_azure_credentials()
     resource_client = ResourceManagementClient(credential, subscription_id)
     
@@ -42,6 +44,7 @@ def create_resource_group(group_name: str, location: str):
 
 
 def create_network_security_group(group_name: str, location: str, nsg_name: str, nsg_rules: list):
+    """Creates or updates an Azure Network Security Group with nested security rules."""
     credential, subscription_id = get_azure_credentials()
     network_client = NetworkManagementClient(credential, subscription_id)
 
@@ -68,7 +71,6 @@ def create_network_security_group(group_name: str, location: str, nsg_name: str,
         }
     }
 
-    # Dynamically handle method differences across SDK versions
     nsg_ops = network_client.network_security_groups
     if hasattr(nsg_ops, "begin_create_or_update"):
         poller = nsg_ops.begin_create_or_update(group_name, nsg_name, nsg_params)
@@ -80,6 +82,7 @@ def create_network_security_group(group_name: str, location: str, nsg_name: str,
 
 
 def create_storage_account(group_name: str, location: str, account_name: str, storage_config: dict = None):
+    """Creates or updates an Azure Storage Account with enforced security properties (HTTPS-only, disabled blob public access, TLS 1.2)."""
     credential, subscription_id = get_azure_credentials()
     storage_client = StorageManagementClient(credential, subscription_id)
 
@@ -91,11 +94,11 @@ def create_storage_account(group_name: str, location: str, account_name: str, st
         "kind": config.get("kind", "StorageV2"),
         "properties": {
             "allowBlobPublicAccess": config.get("allow_blob_public_access", False),
-            "supportsHttpsTrafficOnly": config.get("supports_https_traffic_only", True)
+            "supportsHttpsTrafficOnly": config.get("supports_https_traffic_only", True),
+            "minimumTlsVersion": config.get("minimum_tls_version", "TLS1_2")
         }
     }
 
-    # Dynamically handle method differences across SDK versions
     stg_ops = storage_client.storage_accounts
     if hasattr(stg_ops, "begin_create"):
         poller = stg_ops.begin_create(group_name, account_name, parameters)
