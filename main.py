@@ -55,9 +55,8 @@ def scan_azure_infrastructure(request: AzureDeployRequest):
     return {
         "status": "COMPLETED",
         "passed": scan_results.get("passed", False),
-        "violations": scan_results.get("violations", []),
-        "warnings": scan_results.get("warnings", []),
-        "scanned_payload": scan_results.get("scanned_payload", {})
+        "total_warnings": scan_results.get("total_warnings", 0),
+        "warnings": scan_results.get("warnings", [])
     }
 
 
@@ -72,11 +71,14 @@ def deploy_azure_infrastructure(request: AzureDeployRequest):
     scan_results = run_azure_security_scan(payload)
 
     if not scan_results.get("passed", False):
-        violations = scan_results.get("violations", [])
-        formatted_violations = "; ".join(violations) if violations else "Configuration violates governance policies."
+        warnings = scan_results.get("warnings", [])
+        formatted_warnings = "; ".join(w.get("title", "Governance Violation") for w in warnings) if warnings else "Configuration violates governance policies."
         raise HTTPException(
             status_code=400,
-            detail=f"Security Violation: Deployment blocked by governance policy. Violations: {formatted_violations}"
+            detail={
+                "message": f"Deployment blocked: {formatted_warnings}",
+                "warnings": warnings
+            }
         )
 
     # 2. Infrastructure Deployment Execution
