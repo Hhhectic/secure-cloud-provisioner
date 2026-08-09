@@ -32,6 +32,24 @@ ONE-TIME CONSOLE STEP: billing metrics are not published until someone
   There is no API for that toggle. Step 2 detects it and tells you.
 """
 
+# This file came from a notebook and still runs top to bottom: the statements
+# below are at module level, so they execute on import, and by step 5 they are
+# creating an SNS topic and real alarms. That is correct for something run with
+# `python -m`, and a trap anywhere it can be imported - which is why it moved
+# out of backend/aws/, an importable package, and into scripts/ beside the
+# other things that talk to a live account.
+#
+# The guard is here rather than as a 400-line reindent into main() because the
+# reindent would risk quietly changing a teammate's working script to buy the
+# same property. Importing this module is a mistake; saying so is enough.
+if __name__ != "__main__":
+    raise RuntimeError(
+        "cloudwatch_harness runs as a script, not as an import. It creates an "
+        "SNS topic and CloudWatch alarms as it goes, so importing it would "
+        "provision them as a side effect. Run it with "
+        "`python scripts/cloudwatch_harness.py`."
+    )
+
 # ============================================================
 # 1. Install and connect
 # ============================================================
