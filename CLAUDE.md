@@ -59,6 +59,17 @@ calls only its routes, so the page covers half the tool the README describes.
 
 Both halves work. They have simply never been introduced.
 
+**Check `group/main` before judging the Azure code.** The Azure files on this
+branch are the ones the initial commit carried and are several commits behind;
+the working version lives on `group/main` and differs in all five files. Read
+against the stale copy, the Azure half looks broken — `azure_scanner` imports a
+function name that does not exist, the engine imports another, `azure_crud`
+provisions a resource group and a storage account as import-time side effects,
+and a wide-open NSG rule written in lower case scores clean. Every one of those
+is fixed on `group/main`, which imports cleanly, and which carries
+`test_azure_scanner.py` — six tests, passing. Anyone reviewing the Azure work
+from this branch alone will report bugs that were fixed weeks ago.
+
 **The README is the scope, and it is one tool:** *"provisions AWS and Azure
 resources through guided forms and flags unsecure configurations before
 deployment."* Against that, the AWS half is complete and past its ticket — KAN-8
@@ -72,7 +83,9 @@ only drives one of them.
 Mounting one app inside the other is an afternoon. `app.mount("/aws", ...)` or
 the reverse, one process, one port, and the frontend can reach both. It solves
 the demo and nothing else: there would still be two scanners disagreeing about
-what a finding looks like.
+what a finding looks like. One process also means one dependency set, so the
+Azure SDK becomes a hard requirement of starting the AWS half — today the two
+halves can at least fail independently.
 
 Making Azure a `ResourceType` in `api/registry.py` is the version worth doing.
 `scanner/common.py` has claimed since the first commit that its warning shape is
@@ -131,21 +144,36 @@ so a checkout without either still gets a green suite — CI installs both and
 asserts they are not skipping, because a skip and a pass look the same in a
 tick.
 
-The Azure half runs from the repository root and is a separate process:
+The Azure half runs from the repository root, is a separate process, and needs
+a different set of dependencies:
 
 ```bash
+pip install -r requirements.txt          # on group/main: the Azure SDK
 uvicorn main:app --reload --port 8001    # Azure scan and deploy
+python -m pytest test_azure_scanner.py   # on group/main: six tests
 ```
 
-It has no test suite, no `/ui`, and shares nothing with `backend/` but the
-repository. Nothing below this line applies to it.
+`.venv` holds boto3 and fastapi, not `azure-identity` or the three
+`azure-mgmt-*` packages, so that uvicorn line fails on a checkout set up for
+the AWS half. `main.py` imports `azure_crud` at module scope, which pulls the
+Azure SDK in before anything runs — so `/api/v1/azure/scan`, which needs
+neither credentials nor the SDK, cannot start without them either. Worth
+knowing before a demo: one `pip install` stands between the two halves and
+running side by side.
+
+It has no `/ui`, and shares nothing with `backend/` but the repository.
+Nothing below this line applies to it.
 
 ## Layout
 
 ```
 main.py                 the Azure app. Separate FastAPI instance, root of repo
 azure_scanner*.py       the Azure scanner, separate from backend/scanner/
+azure_crud.py           Azure provisioning. Functions on group/main; on this
+                        branch it still runs at import and creates real things
 security_messages.py    Azure's warning text
+test_azure_scanner.py   on group/main only. Six tests, no cloud calls
+requirements.txt        on group/main only. The Azure SDK, not boto3
 
 backend/
   scanner/     pure rule logic, no boto3 anywhere, no cloud calls
