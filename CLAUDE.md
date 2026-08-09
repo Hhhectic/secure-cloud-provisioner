@@ -182,7 +182,8 @@ backend/
   blueprints/  compositions of several resources into a correct architecture
   scripts/     live smoke test and demo helpers, plus the CloudWatch harness
 frontend/      the page: two plain scripts, no build step, no shipped deps
-docs/          IAM policy (three files, see iam-setup.md), bastion walkthrough
+docs/          IAM policy (three files, see iam-setup.md), bastion walkthrough,
+               benchmark.md: what Prowler finds that this does not
 ```
 
 `backend/providers/aws.py` is the empty placeholder this repository scaffolded
@@ -520,6 +521,21 @@ Severity means something — if everything is critical, nothing is.
   What remains uncovered is whether any of it *looks* right — layout, the
   modal, whether a button is reachable — and that is still only ever found by
   a person opening the page.
+- **Benchmarked against Prowler; four real gaps and one design hole.**
+  `docs/benchmark.md` compares this tool's findings against Prowler 5.37.1 on
+  the same account. Eight findings agree. Not covered at all: a bucket policy
+  granting another account access, password expiry, per-user hardware MFA, and
+  resources spread across regions. Two apparent gaps were not gaps — MFA Delete
+  sits behind versioning because it cannot be enabled without it, and CIS 1.9
+  correctly stays quiet for a user with no console password.
+
+  The hole worth building for is that neither tool can tell a bucket that is
+  public by mistake from one that is public on purpose. The demo account holds
+  a personal site that is deliberately world-readable, and both scanners call
+  it critical, correctly. Prowler has suppression files; this has nothing, so
+  two correct findings will sit there being ignored until somebody stops
+  reading the list. Deleting the rule would be the wrong fix.
+
 - **The snapshot audit covers one region.** Snapshots are regional and
   `list_snapshots` sees only the client's region, the same limit as the Access
   Analyzer check below. An account passing this check has been shown to pass
