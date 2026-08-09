@@ -233,7 +233,13 @@ is a warning; idleness is a note, because a standby is idle on purpose. No
 readings is not zero readings: a machine that launched two minutes ago has
 published nothing yet and a stopped one never will, so `read_cpu_usage` returns
 None and the rule stays quiet rather than advising someone to switch off
-something that may be busy.
+something that may be busy. Verified against a real machine launched with
+user-data pegging both cores: readings climbed 0% → 50% → 66.7% → 83.2% as
+CloudWatch published, and the saturated band fired at the top. The same scan
+reported the machine as having a public address and an unencrypted disk,
+because that launch was raw boto3 rather than `launch_instance` — a reminder
+that the two settings the tool always states are the two an ordinary
+`run_instances` call gets wrong by omission.
 
 **An alarm fails by being quiet, which is why it is scanned at all.**
 Everything else here is dangerous when it is doing something; an alarm is
