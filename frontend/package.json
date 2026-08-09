@@ -7,6 +7,7 @@
     "test": "node keygen.test.mjs && node app.test.mjs"
   },
   "devDependencies": {
-    "jsdom": "^24.0.0"
+    "jsdom": "^24.0.0",
+    "playwright": "^1.62.1"
   }
 }

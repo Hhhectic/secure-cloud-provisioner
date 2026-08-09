@@ -28,6 +28,13 @@ h3 { font-size: .85rem; margin: .8rem 0 .3rem; }
 nav { display: flex; gap: .3rem; flex-wrap: wrap; margin: 1rem 0; }
 nav button.active { background: #1a1a1a; color: #fff; }
 
+/* The generic hover below sets a light background and comes later, so it won
+   on background while .active kept the white text: the selected tab turned
+   white-on-near-white for exactly as long as the pointer sat on it, which is
+   whenever somebody is about to click something else. Found by a real browser;
+   jsdom has no cursor and computes no styles. */
+nav button.active:hover { background: #1a1a1a; color: #fff; }
+
 main { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; align-items: start; }
 @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
 section { border: 1px solid #ccc; background: #fff; padding: .8rem; }

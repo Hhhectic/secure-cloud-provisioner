@@ -482,8 +482,12 @@ async function buildCreateForm() {
     }
 
     wrap.append(el);
+
+    // Only where the control cannot say it itself. A text box already shows
+    // the hint as its placeholder, and repeating it underneath printed every
+    // caption twice - "name / a name for this alarm / a name for this alarm".
     let hintEl = null;
-    if (hint && kind !== "checkbox" && kind !== "textarea") {
+    if (hint && (kind === "menu" || kind === "multi")) {
       hintEl = text("span", hint, "hint");
       wrap.append(hintEl);
     }
