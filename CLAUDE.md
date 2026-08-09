@@ -3,6 +3,45 @@
 Provisions AWS resources with safe defaults, explains what is unsafe about them
 in plain language, and fixes what it can. Capstone project.
 
+## Reviewing the AWS branch
+
+`aws-provisioner-and-web-interface` fills the `backend/` scaffold this
+repository already had: `backend/main.py`, `backend/scanner/rules.py` and
+`backend/providers/aws.py` were empty placeholders. Nothing existing was
+removed or rewritten — the Azure work, `main.py`, README and LICENSE are
+untouched, and `.gitignore` keeps this repository's template in full with
+private-key patterns appended.
+
+Read it in this order, which is roughly hardest-to-undo first:
+
+1. **`scanner/`** — the rules, and the only part with no cloud calls in it.
+   Start at `common.py`; every rule returns that one shape and that is why
+   the API has one set of routes rather than one per resource type.
+2. **`api/registry.py`** — the seam. Adding a resource type is an `aws/`
+   module, a `scanner/` module and one entry here. No route changes.
+3. **`api/app.py`** — the routes, plus the middleware. Every destructive
+   path is guarded; see *Destroying something needs it named twice*.
+4. **`frontend/`** — plain HTML and two scripts, no build step.
+5. **`docs/iam-setup.md`** — why the policy is three files, and how to stop
+   using a long-lived access key.
+
+**Two things the group should decide rather than inherit:**
+
+- This repository scaffolded `backend/providers/aws.py`, one module per
+  provider. The AWS work is arranged as `backend/aws/` with a module per
+  resource type and `backend/scanner/` beside it, because the rules have to
+  stay free of boto3 to be testable without an account. `providers/aws.py` is
+  left empty and untouched. Which shape Azure adopts is a conversation.
+- The Azure scanner and `scanner/` are solving the same problem twice. The
+  warning contract in `scanner/common.py` was built to be provider-agnostic
+  and nothing about it is AWS-specific.
+
+**One operational hazard, worth agreeing on before a demo.** We share one AWS
+account, and cleanup deletes by *tag*, not by author: `make_vulnerable.py
+--clean`, the cleanup button and the smoke test's sweep will each destroy
+resources a teammate created. `--region` is supported everywhere, so a region
+each is free isolation.
+
 ## Running things
 
 ```bash
@@ -11,15 +50,25 @@ source ../.venv/bin/activate
 
 pytest -v                                   # offline, moto, no credentials
 python main.py                              # the CLI
-uvicorn api.app:app --reload --host 127.0.0.1   # API + /docs
+uvicorn api.app:app --reload --host 127.0.0.1   # API, /docs and the page at /ui
 python scripts/smoke_test.py                # live AWS, free
 python scripts/smoke_test.py --with-instances   # live, launches a t3.micro
+python scripts/smoke_test.py --with-blueprint   # live, the whole bastion, two t3.micro
 python scripts/make_vulnerable.py           # deliberately weak demo resources
+python scripts/make_vulnerable.py --with-public-snapshot   # also publishes a blank snapshot
 python scripts/make_vulnerable.py --clean   # remove everything tagged as ours
 ```
 
 Everything runs from `backend/`. `pytest.ini` sets `pythonpath = .`, and
-uvicorn resolves imports from the working directory.
+uvicorn resolves imports from the working directory. The page is served by the
+same process at <http://127.0.0.1:8000/ui>, so there is no second server and no
+CORS between them.
+
+The frontend tests need Node, and the jsdom half additionally needs
+`npm install` in `frontend/`. Both skip themselves when their tools are absent,
+so a checkout without either still gets a green suite — CI installs both and
+asserts they are not skipping, because a skip and a pass look the same in a
+tick.
 
 ## Layout
 
@@ -29,7 +78,8 @@ aws/         all boto3, one module per resource type (iam.py reads only)
 api/         FastAPI over a resource registry, generic across types
 blueprints/  compositions of several resources into a correct architecture
 scripts/     live smoke test and demo helpers
-docs/        IAM policy (two files, see iam-setup.md), bastion walkthrough
+frontend/    the page: two plain scripts, no build step, no shipped deps
+docs/        IAM policy (three files, see iam-setup.md), bastion walkthrough
 ```
 
 `scanner/` must never import from `aws/`. That separation is what lets the
