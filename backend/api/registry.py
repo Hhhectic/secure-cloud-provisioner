@@ -153,11 +153,13 @@ class ResourceType:
     # live account lookup. A menu hardcoded in JavaScript would be a second
     # copy of all three, wrong at a different time from the first.
     #
-    # A choice may carry "when": {other_field: value}, meaning it only applies
-    # while that field holds that value. An alarm's threshold is the case that
-    # forced it — dollars against CPUUtilization is not untidy, it is wrong:
-    # "$20" offered next to Server CPU reads as money and creates an alarm at
-    # 20%, which fires on an idle machine and gets muted within a week.
+    # A choice may carry anything else the form needs alongside its value and
+    # label; the page reads the whole object. An alarm's metric carries the
+    # unit its threshold is measured in, because a bare number is meaningless
+    # without it: 20 is twenty dollars under billing and twenty percent under
+    # CPU, and offering the wrong one is not untidy but wrong — those amounts
+    # are valid for CPUUtilization, so "$20" would create an alarm at 20% that
+    # fires on an idle machine.
     #
     # None means this type has nothing to offer and the form is plain text.
     options: Optional[Callable] = None
@@ -904,36 +906,26 @@ def _alarm_options(client):
     metric name; these are the ones where the defaults, the period and the
     missing-data handling are all decided for you and decided correctly.
     """
+    # A threshold is typed rather than chosen. Any number is legitimate, and
+    # three guesses at the useful ones are worse than a box - the menu that
+    # was here offered dollars while Server CPU was selected, which is not a
+    # cosmetic mismatch: those numbers are valid for CPUUtilization, so "$20"
+    # would have succeeded and created an alarm at 20 percent.
+    #
+    # What the menu did carry, and a bare number cannot, is the unit. So the
+    # unit travels on the metric, which is the thing that decides it, and the
+    # form shows it beside the box.
     return {
         "namespace": [
             {"value": alarms.BILLING_NAMESPACE,
-             "label": "Account spending — tells you before the bill does"},
+             "label": "Account spending — tells you before the bill does",
+             "unit": "US dollars. The alarm fires when the estimated bill "
+                     "for the month passes this."},
             {"value": alarms.CPU_NAMESPACE,
-             "label": "Server CPU — tells you a machine is working hard"},
-        ],
-        # A threshold means nothing without the metric it belongs to. These
-        # carry "when", so the form shows only the ones that make sense for
-        # whatever is being watched: offering dollars against CPUUtilization
-        # is not merely untidy, it reads as $20 and creates an alarm at 20%
-        # that fires on an idle machine and gets muted within a week.
-        "threshold": [
-            {"value": "5", "label": "$5 — a free-tier project has slipped",
-             "when": {"namespace": alarms.BILLING_NAMESPACE}},
-            {"value": "20", "label": "$20",
-             "when": {"namespace": alarms.BILLING_NAMESPACE}},
-            {"value": "50", "label": "$50",
-             "when": {"namespace": alarms.BILLING_NAMESPACE}},
-
-            # The scanner's own bands, so the number somebody picks here is
-            # the number it will use back at them when it describes the
-            # machine.
-            {"value": str(BUSY_PERCENT),
-             "label": f"{BUSY_PERCENT}% — the band this tool calls working hard",
-             "when": {"namespace": alarms.CPU_NAMESPACE}},
-            {"value": "85", "label": "85%",
-             "when": {"namespace": alarms.CPU_NAMESPACE}},
-            {"value": "95", "label": "95% — saturated, work is queueing",
-             "when": {"namespace": alarms.CPU_NAMESPACE}},
+             "label": "Server CPU — tells you a machine is working hard",
+             "unit": f"percent, 0 to 100. This tool calls {BUSY_PERCENT}% "
+                     "working hard, so a threshold near there fires when a "
+                     "machine stops coping."},
         ],
     }
 

@@ -67,17 +67,14 @@ function fakeApi(overrides = {}) {
     "/resources/key-pair": () => ({ resource_type: "key-pair", resources: [] }),
     "/resources/network": () => ({ resource_type: "network", resources: [] }),
     "/resources/snapshot/options": () => ({ options: {} }),
+    // The unit travels on the metric, because the metric is what decides it.
     "/resources/alarm/options": () => ({
       options: {
         namespace: [
-          { value: "AWS/Billing", label: "Account spending" },
-          { value: "AWS/EC2", label: "Server CPU" },
-        ],
-        threshold: [
-          { value: "5", label: "$5", when: { namespace: "AWS/Billing" } },
-          { value: "20", label: "$20", when: { namespace: "AWS/Billing" } },
-          { value: "75", label: "75% — working hard", when: { namespace: "AWS/EC2" } },
-          { value: "95", label: "95% — saturated", when: { namespace: "AWS/EC2" } },
+          { value: "AWS/Billing", label: "Account spending",
+            unit: "US dollars. The alarm fires when the estimated bill passes this." },
+          { value: "AWS/EC2", label: "Server CPU",
+            unit: "percent, 0 to 100." },
         ],
       },
     }),
@@ -364,9 +361,11 @@ const { document: doc4, sent: sent4 } = await boot({
       : { resource_type: "alarm", resources: [] },
   "/resources/alarm/options": () => ({
     options: {
-      namespace: [{ value: "AWS/Billing", label: "Account spending" },
-                  { value: "AWS/EC2", label: "Server CPU" }],
-      threshold: [{ value: "5", label: "$5" }, { value: "20", label: "$20" }],
+      namespace: [
+        { value: "AWS/Billing", label: "Account spending",
+          unit: "US dollars." },
+        { value: "AWS/EC2", label: "Server CPU", unit: "percent, 0 to 100." },
+      ],
     },
   }),
 });
@@ -374,17 +373,21 @@ const { document: doc4, sent: sent4 } = await boot({
 const alarmBody = $(doc4, "create-body");
 const alarmSelects = [...alarmBody.querySelectorAll("select")];
 
-check(alarmSelects.length >= 2,
-      "the alarm form offers menus rather than a lone name box");
+const fieldNamed = (body, name) => [...body.querySelectorAll(".field")]
+  .find((r) => r.querySelector("label")?.textContent === name);
+
+check(alarmSelects.length >= 1,
+      "the alarm form offers a metric menu rather than a lone name box");
 check(alarmBody.textContent.includes("confirmation link"),
       "and explains that an unconfirmed address receives nothing");
 
-const [alarmName] = alarmBody.querySelectorAll("input");
-alarmName.value = "spend";
+fieldNamed(alarmBody, "name").querySelector("input").value = "spend";
 setSelect(alarmSelects.find((s) =>
   [...s.options].some((o) => o.value === "AWS/Billing")), "AWS/Billing");
-setSelect(alarmSelects.find((s) =>
-  [...s.options].some((o) => o.value === "5")), "5");
+
+// Typed, not chosen: any number is legitimate and only the unit is decided
+// for you.
+fieldNamed(alarmBody, "threshold").querySelector("input").value = "5";
 
 const before4 = sent4.length;
 [...alarmBody.querySelectorAll("button")]
@@ -402,42 +405,43 @@ if (check(Boolean(alarmPost), "and submits what was chosen")) {
         + "failure this type exists to prevent");
 }
 
-// ------------------------------------------------- a threshold needs its metric
+// ------------------------------------------------- a threshold needs its unit
 
-console.log("\nAlarm thresholds follow the metric");
-console.log("----------------------------------");
+console.log("\nAlarm thresholds are typed, and say what they mean");
+console.log("-------------------------------------------------");
 
-const { document: alarmDoc, window: alarmWin } = await boot();
-[...$(alarmDoc, "types").children].find((b) => b.dataset.key === "alarm").click();
+const { document: bandDoc, window: bandWin } = await boot();
+[...$(bandDoc, "types").children].find((b) => b.dataset.key === "alarm").click();
 await new Promise((resolve) => setTimeout(resolve, 50));
 
-const bandForm = $(alarmDoc, "create-body");
-const bandSelects = [...bandForm.querySelectorAll("select")];
-const bandMetric = bandSelects.find((s) =>
-  [...s.options].some((o) => o.value === "AWS/EC2"));
-const bandThreshold = bandSelects.find((s) => s !== bandMetric);
+const bandForm = $(bandDoc, "create-body");
+const bandRows = [...bandForm.querySelectorAll(".field")];
+const thresholdRow = bandRows.find((r) =>
+  r.querySelector("label")?.textContent === "threshold");
 
-const bandLabels = () => [...bandThreshold.options].map((o) => o.textContent);
+check(Boolean(thresholdRow), "the form has a threshold field");
+check(!thresholdRow.querySelector("select"),
+      "which is typed rather than chosen, because any number is legitimate");
+
+const unitHint = () => thresholdRow.querySelector(".hint").textContent;
+const bandMetric = bandForm.querySelector("select");
+
+check(unitHint().includes("choose what to watch first"),
+      "and says the number is meaningless until a metric is picked");
 
 bandMetric.value = "AWS/Billing";
-bandMetric.dispatchEvent(new alarmWin.Event("change", { bubbles: true }));
+bandMetric.dispatchEvent(new bandWin.Event("change", { bubbles: true }));
 await new Promise((resolve) => setTimeout(resolve, 20));
-
-check(bandLabels().some((l) => l.includes("$")),
-      "watching spending offers thresholds in dollars");
-check(!bandLabels().some((l) => l.includes("%")),
-      "and none in percent");
+check(unitHint().includes("dollars"),
+      "watching spending measures the threshold in dollars");
 
 bandMetric.value = "AWS/EC2";
-bandMetric.dispatchEvent(new alarmWin.Event("change", { bubbles: true }));
+bandMetric.dispatchEvent(new bandWin.Event("change", { bubbles: true }));
 await new Promise((resolve) => setTimeout(resolve, 20));
-
-check(bandLabels().some((l) => l.includes("%")),
-      "switching to CPU offers thresholds in percent");
-check(!bandLabels().some((l) => l.includes("$")),
-      "and the dollar amounts are gone, not merely greyed out");
-check(bandThreshold.value === "",
-      "the previous number is cleared, since 20 means $20 or 20% and not both");
+check(unitHint().includes("percent"),
+      "switching to CPU measures it in percent");
+check(!unitHint().includes("dollars"),
+      "and stops saying dollars, which is how 20 came to mean two things");
 
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");
 process.exit(failures ? 1 : 0);

@@ -871,39 +871,42 @@ def test_reading_from_another_site_is_not_blocked_here(client):
     assert fine.status_code == 200
 
 
-def test_a_threshold_only_appears_for_the_metric_it_belongs_to(client):
+def test_a_threshold_is_typed_and_the_metric_says_what_it_means(client):
     """Reported from a screenshot: dollars offered against Server CPU.
 
-    A threshold is meaningless without its metric. Picking "$20" while
-    watching CPUUtilization does not fail - it succeeds, creating an alarm at
-    20 percent that fires on an idle machine and gets muted within a week.
-    The number was valid; only the label was a lie.
+    A menu of three guesses was the wrong shape for a number that can be
+    anything, and the wrong content besides - those amounts are valid for
+    CPUUtilization, so "$20" would have succeeded and created an alarm at 20
+    percent, which fires on an idle machine and gets muted within a week.
+
+    So the threshold is typed. What the menu did carry, and a bare box cannot,
+    is the unit, and that now travels on the metric because the metric is what
+    decides it.
     """
     from aws import alarms
 
     body = client.get("/resources/alarm/options").json()["options"]
 
-    for choice in body["threshold"]:
-        assert "when" in choice, f"{choice} applies to every metric"
-        namespace = choice["when"]["namespace"]
+    assert "threshold" not in body, "a threshold is typed, not chosen"
 
-        if namespace == alarms.BILLING_NAMESPACE:
-            assert "$" in choice["label"]
-        else:
-            assert "%" in choice["label"]
-            assert "$" not in choice["label"]
+    units = {c["value"]: c.get("unit") for c in body["namespace"]}
+    assert all(units.values()), "every metric has to say what its number means"
+
+    assert "dollar" in units[alarms.BILLING_NAMESPACE].lower()
+    assert "percent" in units[alarms.CPU_NAMESPACE].lower()
+    assert "dollar" not in units[alarms.CPU_NAMESPACE].lower()
 
 
-def test_the_cpu_thresholds_are_the_bands_the_scanner_uses(client):
-    """So the number picked here is the number described back later."""
+def test_the_cpu_unit_names_the_band_the_scanner_uses(client):
+    """So the number typed here is the number described back later."""
     from scanner.instance_rules import BUSY_PERCENT
     from aws import alarms
 
     body = client.get("/resources/alarm/options").json()["options"]
-    cpu = [c["value"] for c in body["threshold"]
-           if c["when"]["namespace"] == alarms.CPU_NAMESPACE]
+    cpu = next(c for c in body["namespace"]
+               if c["value"] == alarms.CPU_NAMESPACE)
 
-    assert str(BUSY_PERCENT) in cpu
+    assert str(BUSY_PERCENT) in cpu["unit"]
 
 
 # --------------------------------------------------------------- The page
