@@ -79,12 +79,35 @@ function choice(options, { allowOther = true, blank = "— choose —", other = 
   free.className = "hidden";
   free.size = 22;
 
-  // blank: null means the field has a sensible default and does not need an
-  // empty first row. Passing a caption here that also appears in the options
-  // is how the protocol menu ended up listing TCP twice.
-  if (blank !== null) select.append(new Option(blank, ""));
-  for (const o of options) select.append(new Option(o.label, o.value));
-  if (allowOther) select.append(new Option(other, "__other__"));
+  // A choice may carry "when": {field: value} and applies only while that
+  // field holds that value. Rebuilt rather than hidden, because a disabled
+  // option that still reads "$20" next to Server CPU is the same lie in
+  // grey.
+  function fill(formValues = {}) {
+    const applies = options.filter((o) =>
+      !o.when || Object.entries(o.when)
+        .every(([field, value]) => formValues[field] === value));
+
+    const chosen = select.value;
+    select.replaceChildren();
+
+    // blank: null means the field has a sensible default and does not need an
+    // empty first row. Passing a caption here that also appears in the
+    // options is how the protocol menu ended up listing TCP twice.
+    if (blank !== null) select.append(new Option(blank, ""));
+    for (const o of applies) select.append(new Option(o.label, o.value));
+    if (allowOther) select.append(new Option(other, "__other__"));
+
+    // Keep the selection only if it still means the same thing. A threshold
+    // of 20 is $20 under billing and 20% under CPU, so carrying it across is
+    // worse than clearing it.
+    select.value = [...select.options].some((o) => o.value === chosen)
+      ? chosen : "";
+  }
+
+  fill();
+  wrap.refresh = fill;
+  wrap.dependsOn = [...new Set(options.flatMap((o) => Object.keys(o.when || {})))];
 
   select.onchange = () => {
     const isOther = select.value === "__other__";
@@ -466,6 +489,27 @@ async function buildCreateForm() {
     if (note) box.append(text("p", note, "note"));
 
     inputs[name] = { kind, el };
+  }
+
+  // A menu whose choices depend on another field has to be rebuilt when that
+  // field changes, or it keeps offering answers to a question nobody is
+  // asking any more.
+  const dependents = Object.values(inputs).filter(
+    ({ el }) => el && Array.isArray(el.dependsOn) && el.dependsOn.length);
+
+  if (dependents.length) {
+    const refreshDependents = () => {
+      const current = {};
+      for (const [field, { kind, el }] of Object.entries(inputs)) {
+        if (kind === "checkbox") current[field] = el.checked;
+        else if (typeof el.value === "function") current[field] = el.value();
+        else if (el.value !== undefined) current[field] = el.value;
+      }
+      for (const { el } of dependents) el.refresh(current);
+    };
+
+    box.addEventListener("change", refreshDependents);
+    refreshDependents();
   }
 
   if (state.type === "key-pair") box.append(keygenControls(inputs));

@@ -871,6 +871,41 @@ def test_reading_from_another_site_is_not_blocked_here(client):
     assert fine.status_code == 200
 
 
+def test_a_threshold_only_appears_for_the_metric_it_belongs_to(client):
+    """Reported from a screenshot: dollars offered against Server CPU.
+
+    A threshold is meaningless without its metric. Picking "$20" while
+    watching CPUUtilization does not fail - it succeeds, creating an alarm at
+    20 percent that fires on an idle machine and gets muted within a week.
+    The number was valid; only the label was a lie.
+    """
+    from aws import alarms
+
+    body = client.get("/resources/alarm/options").json()["options"]
+
+    for choice in body["threshold"]:
+        assert "when" in choice, f"{choice} applies to every metric"
+        namespace = choice["when"]["namespace"]
+
+        if namespace == alarms.BILLING_NAMESPACE:
+            assert "$" in choice["label"]
+        else:
+            assert "%" in choice["label"]
+            assert "$" not in choice["label"]
+
+
+def test_the_cpu_thresholds_are_the_bands_the_scanner_uses(client):
+    """So the number picked here is the number described back later."""
+    from scanner.instance_rules import BUSY_PERCENT
+    from aws import alarms
+
+    body = client.get("/resources/alarm/options").json()["options"]
+    cpu = [c["value"] for c in body["threshold"]
+           if c["when"]["namespace"] == alarms.CPU_NAMESPACE]
+
+    assert str(BUSY_PERCENT) in cpu
+
+
 # --------------------------------------------------------------- The page
 
 

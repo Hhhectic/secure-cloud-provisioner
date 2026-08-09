@@ -42,7 +42,7 @@ from scanner.rules import (
 )
 from scanner.s3_rules import check_bucket_settings
 from scanner.key_pair_rules import check_key_pair
-from scanner.instance_rules import check_instance
+from scanner.instance_rules import check_instance, BUSY_PERCENT
 from scanner.vpc_rules import check_vpc
 from scanner.iam_rules import check_account
 from scanner.alarm_rules import check_alarm, check_alarm_spec
@@ -152,6 +152,12 @@ class ResourceType:
     # scanner's own words, and the networks a group can be placed in are a
     # live account lookup. A menu hardcoded in JavaScript would be a second
     # copy of all three, wrong at a different time from the first.
+    #
+    # A choice may carry "when": {other_field: value}, meaning it only applies
+    # while that field holds that value. An alarm's threshold is the case that
+    # forced it — dollars against CPUUtilization is not untidy, it is wrong:
+    # "$20" offered next to Server CPU reads as money and creates an alarm at
+    # 20%, which fires on an idle machine and gets muted within a week.
     #
     # None means this type has nothing to offer and the form is plain text.
     options: Optional[Callable] = None
@@ -905,10 +911,29 @@ def _alarm_options(client):
             {"value": alarms.CPU_NAMESPACE,
              "label": "Server CPU — tells you a machine is working hard"},
         ],
+        # A threshold means nothing without the metric it belongs to. These
+        # carry "when", so the form shows only the ones that make sense for
+        # whatever is being watched: offering dollars against CPUUtilization
+        # is not merely untidy, it reads as $20 and creates an alarm at 20%
+        # that fires on an idle machine and gets muted within a week.
         "threshold": [
-            {"value": "5", "label": "$5 — a free-tier project has slipped"},
-            {"value": "20", "label": "$20"},
-            {"value": "50", "label": "$50"},
+            {"value": "5", "label": "$5 — a free-tier project has slipped",
+             "when": {"namespace": alarms.BILLING_NAMESPACE}},
+            {"value": "20", "label": "$20",
+             "when": {"namespace": alarms.BILLING_NAMESPACE}},
+            {"value": "50", "label": "$50",
+             "when": {"namespace": alarms.BILLING_NAMESPACE}},
+
+            # The scanner's own bands, so the number somebody picks here is
+            # the number it will use back at them when it describes the
+            # machine.
+            {"value": str(BUSY_PERCENT),
+             "label": f"{BUSY_PERCENT}% — the band this tool calls working hard",
+             "when": {"namespace": alarms.CPU_NAMESPACE}},
+            {"value": "85", "label": "85%",
+             "when": {"namespace": alarms.CPU_NAMESPACE}},
+            {"value": "95", "label": "95% — saturated, work is queueing",
+             "when": {"namespace": alarms.CPU_NAMESPACE}},
         ],
     }
 

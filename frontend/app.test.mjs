@@ -41,6 +41,8 @@ function fakeApi(overrides = {}) {
           id_label: "Group ID", read_only: false },
         { key: "snapshot", label: "Disk backup",
           id_label: "Snapshot ID", read_only: true },
+        { key: "alarm", label: "Alarm", id_label: "Alarm name",
+          read_only: false },
       ],
     }),
     "/resources/security-group/options": () => ({
@@ -65,6 +67,21 @@ function fakeApi(overrides = {}) {
     "/resources/key-pair": () => ({ resource_type: "key-pair", resources: [] }),
     "/resources/network": () => ({ resource_type: "network", resources: [] }),
     "/resources/snapshot/options": () => ({ options: {} }),
+    "/resources/alarm/options": () => ({
+      options: {
+        namespace: [
+          { value: "AWS/Billing", label: "Account spending" },
+          { value: "AWS/EC2", label: "Server CPU" },
+        ],
+        threshold: [
+          { value: "5", label: "$5", when: { namespace: "AWS/Billing" } },
+          { value: "20", label: "$20", when: { namespace: "AWS/Billing" } },
+          { value: "75", label: "75% — working hard", when: { namespace: "AWS/EC2" } },
+          { value: "95", label: "95% — saturated", when: { namespace: "AWS/EC2" } },
+        ],
+      },
+    }),
+    "/resources/alarm": () => ({ resource_type: "alarm", resources: [] }),
   };
 
   async function fetchStub(url, options = {}) {
@@ -138,7 +155,7 @@ const { window, document, sent } = await boot();
 
 check($(document, "health").textContent === "API up",
       "the health pill reflects a reachable API");
-check($(document, "types").children.length === 2,
+check($(document, "types").children.length === 3,
       "a tab appears for every resource type the API advertises");
 check([...$(document, "types").children]
         .some((b) => b.textContent.includes("audit only")),
@@ -384,6 +401,43 @@ if (check(Boolean(alarmPost), "and submits what was chosen")) {
         "with notification on by default, since a silent alarm is the "
         + "failure this type exists to prevent");
 }
+
+// ------------------------------------------------- a threshold needs its metric
+
+console.log("\nAlarm thresholds follow the metric");
+console.log("----------------------------------");
+
+const { document: alarmDoc, window: alarmWin } = await boot();
+[...$(alarmDoc, "types").children].find((b) => b.dataset.key === "alarm").click();
+await new Promise((resolve) => setTimeout(resolve, 50));
+
+const bandForm = $(alarmDoc, "create-body");
+const bandSelects = [...bandForm.querySelectorAll("select")];
+const bandMetric = bandSelects.find((s) =>
+  [...s.options].some((o) => o.value === "AWS/EC2"));
+const bandThreshold = bandSelects.find((s) => s !== bandMetric);
+
+const bandLabels = () => [...bandThreshold.options].map((o) => o.textContent);
+
+bandMetric.value = "AWS/Billing";
+bandMetric.dispatchEvent(new alarmWin.Event("change", { bubbles: true }));
+await new Promise((resolve) => setTimeout(resolve, 20));
+
+check(bandLabels().some((l) => l.includes("$")),
+      "watching spending offers thresholds in dollars");
+check(!bandLabels().some((l) => l.includes("%")),
+      "and none in percent");
+
+bandMetric.value = "AWS/EC2";
+bandMetric.dispatchEvent(new alarmWin.Event("change", { bubbles: true }));
+await new Promise((resolve) => setTimeout(resolve, 20));
+
+check(bandLabels().some((l) => l.includes("%")),
+      "switching to CPU offers thresholds in percent");
+check(!bandLabels().some((l) => l.includes("$")),
+      "and the dollar amounts are gone, not merely greyed out");
+check(bandThreshold.value === "",
+      "the previous number is cleared, since 20 means $20 or 20% and not both");
 
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");
 process.exit(failures ? 1 : 0);
