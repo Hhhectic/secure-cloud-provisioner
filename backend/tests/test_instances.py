@@ -839,3 +839,32 @@ def test_the_registry_read_carries_the_workload_alongside_the_settings(ec2):
 
     settings = registry.INSTANCE.read(ec2, instance_id)
     assert "cpu_usage" in settings["instance"]
+
+
+def test_a_short_window_gets_the_finest_readings_that_exist():
+    """Basic EC2 metrics are published every five minutes, so asking for
+    anything finer returns the same numbers spread more thinly."""
+    assert ec2i.period_for_window(3) == 300
+    assert ec2i.period_for_window(1) == 300
+
+
+def test_a_long_window_widens_the_period_instead_of_being_refused():
+    """AWS refuses a request for more than 1440 data points, and refuses it as
+    a ClientError - which this module turns into "no readings". So a fortnight
+    at five-minute sampling would have reported a busy machine as unmeasured
+    rather than erroring. Found against a real account; moto accepts any
+    combination and would never have shown it.
+    """
+    for hours in (24, 120, 336, 720):
+        period = ec2i.period_for_window(hours)
+        assert hours * 3600 / period <= 1440, f"{hours}h asks for too many"
+        assert period % 60 == 0, "AWS requires a multiple of 60"
+
+
+def test_the_widening_starts_before_the_hard_limit_rather_than_at_it():
+    """120 hours at five-minute sampling is exactly 1440 points, which is the
+    number AWS says is too many. The period widens a little before that,
+    because a check that only holds at the exact boundary is one that breaks
+    the first time the boundary moves."""
+    assert ec2i.period_for_window(116) == 300
+    assert ec2i.period_for_window(120) > 300

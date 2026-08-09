@@ -374,6 +374,13 @@ the code was correct and an assumption was not.
   runs against the fake. `_ReportStub` in `test_iam.py` models the raising
   version, with an injected clock so the timeout is exercised without spending
   real seconds.
+- **`GetMetricStatistics` refuses more than 1440 data points, as a
+  `ClientError`.** `read_cpu_usage` turns a `ClientError` into "no readings",
+  so a window wider than five days at five-minute sampling reported a busy
+  machine as unmeasured rather than failing. `period_for_window` widens the
+  sampling period to stay under the limit instead. moto accepts any
+  combination of period and window, so nothing offline could have shown this;
+  it surfaced from asking a real account for a fortnight of history.
 - **moto confirms an email subscription instantly; AWS does not.** A real
   email subscription comes back as the literal string `PendingConfirmation`
   until somebody opens the message and clicks, and delivers nothing until then.

@@ -24,6 +24,7 @@ from the metadata service. CIS 5.7 asks for it; this tool does not offer the
 alternative.
 """
 
+import math
 from datetime import datetime, timedelta, timezone
 
 import boto3
@@ -48,6 +49,17 @@ DEFAULT_INSTANCE_TYPE = "t3.micro"
 # is long enough that a single burst does not decide the answer, and short
 # enough that the answer is about now rather than about last week.
 CPU_WINDOW_HOURS = 3
+
+# Basic EC2 metrics are published every five minutes, so asking for anything
+# finer returns the same numbers spread more thinly.
+BASE_PERIOD_SECONDS = 300
+
+# GetMetricStatistics refuses a request for more than 1440 data points, and
+# refuses it as a ClientError - which this module turns into "no readings",
+# meaning a window wider than five days would silently report a busy machine
+# as unmeasured. The period is widened to stay under the limit instead. Left
+# short of 1440 so the boundary is not the thing being relied on.
+MAX_DATA_POINTS = 1400
 
 # Looked up rather than hardcoded: AMI IDs differ per region and are replaced
 # whenever the image is patched, so any literal ID is wrong somewhere and stale
@@ -476,6 +488,20 @@ def _root_volume_encrypted(ec2, instance):
         return None
 
 
+def period_for_window(hours):
+    """A sampling period that keeps the request inside AWS's own limits.
+
+    Two limits meet here. AWS refuses a request for more than 1440 data
+    points, and basic EC2 metrics only exist every five minutes, so the period
+    is the larger of "fine enough to be useful" and "coarse enough to be
+    allowed". Asking for three hours gets five-minute samples; asking for a
+    fortnight gets fifteen-minute ones and an answer rather than a refusal
+    that this module would have reported as silence.
+    """
+    needed = math.ceil(hours * 3600 / MAX_DATA_POINTS / 60) * 60
+    return max(BASE_PERIOD_SECONDS, needed)
+
+
 def read_cpu_usage(ec2, instance_id, hours=CPU_WINDOW_HOURS, now=None):
     """How hard this machine has been working, or None if nothing is known.
 
@@ -500,7 +526,7 @@ def read_cpu_usage(ec2, instance_id, hours=CPU_WINDOW_HOURS, now=None):
             Dimensions=[{"Name": "InstanceId", "Value": instance_id}],
             StartTime=now - timedelta(hours=hours),
             EndTime=now,
-            Period=300,
+            Period=period_for_window(hours),
             Statistics=["Average", "Maximum"],
         )["Datapoints"]
     except ClientError:
