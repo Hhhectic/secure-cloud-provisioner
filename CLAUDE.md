@@ -101,11 +101,19 @@ uvicorn api.app:app --reload --host 127.0.0.1   # API, /docs and the page at /ui
 python scripts/smoke_test.py                # live AWS, free
 python scripts/smoke_test.py --with-instances   # live, launches a t3.micro
 python scripts/smoke_test.py --with-blueprint   # live, the whole bastion, two t3.micro
+python scripts/smoke_test.py --with-alarm-email you@example.com  # live, sends one email
 python scripts/make_vulnerable.py           # deliberately weak demo resources
 python scripts/make_vulnerable.py --with-public-snapshot   # also publishes a blank snapshot
 python scripts/make_vulnerable.py --clean   # remove everything tagged as ours
 python scripts/cloudwatch_harness.py        # live, free tier, creates alarms
 ```
+
+The alarm section of the smoke test runs on every pass — ten alarms are free
+forever and it creates at most one, skipping itself if the account is already
+near the limit. `--with-alarm-email` is separate because subscribing an address
+sends a real confirmation email to a real person, and the state it produces
+(`PendingConfirmation`, an alarm that reaches nobody) is the one thing moto
+cannot show.
 
 `cloudwatch_harness.py` came from a notebook and still runs top to bottom, so
 importing it would create an SNS topic and two alarms as a side effect. It

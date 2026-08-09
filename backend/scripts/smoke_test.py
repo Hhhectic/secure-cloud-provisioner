@@ -50,6 +50,7 @@ from aws import instances as ec2i
 from aws import security_groups as sg_module
 from aws import snapshots
 from aws import vpcs
+from aws import alarms
 from aws.s3_buckets import PermissionDenied
 from scanner.common import (summarize, fixable, cited, print_warnings,
                             CRITICAL)
@@ -1252,6 +1253,237 @@ def smoke_snapshots(region):
         print_warnings(findings)
 
 
+# ------------------------------------------------------------------- Alarms
+
+
+def smoke_alarms(region, with_email=None):
+    """Alarms against the real account. Free, and creates at most two.
+
+    Ten alarms are free forever and an SNS topic costs nothing, so this runs
+    on every pass. It is worth running because more of this module rests on
+    unverified assumptions about AWS than any other: moto implements neither
+    call that switches an alarm's notifications on or off, publishes no
+    billing metrics at all, and marks an email subscription confirmed the
+    instant it is made, which is the one thing the unconfirmed-subscriber
+    finding exists to catch.
+
+    --with-alarm-email sends a real confirmation email to a real person, so
+    the subscription half is opt-in. Everything else here is silent.
+    """
+    heading("Alarms")
+
+    resource = registry.ALARM
+    client = resource.get_client(region)
+    created = []
+    topic_arn = None
+
+    try:
+        # ---- How many already exist, and can we still afford one? ----------
+        existing = alarms.count_alarms(client)
+        print(f"        {DIM}{existing} alarm(s) already in {region}; the "
+              f"first {alarms.FREE_TIER_ALARM_LIMIT} are free{RESET}")
+
+        if existing >= alarms.FREE_TIER_ALARM_LIMIT - 1:
+            note(f"{existing} alarms already exist, so creating more would "
+                 f"start a monthly charge. The creating half of this section "
+                 f"is skipped; the refusal below is the behaviour that matters.")
+            ok_refused, message, _ = alarms.create_alarm(
+                client, name="scp-smoke-should-refuse", namespace="AWS/EC2",
+                metric_name="CPUUtilization", threshold=80.0, region=region)
+            check(not ok_refused,
+                  "and the eleventh alarm is refused rather than billed")
+            return
+
+        # ---- Reading something that is not there ----------------------------
+        #
+        # describe_alarms answers an unknown name with an empty list rather
+        # than by raising, which is the opposite of most of AWS. If that ever
+        # changed, every 404 in the routes would become a 500.
+        check(resource.read(client, f"scp-no-such-alarm-{suffix()}") is None,
+              "an alarm that does not exist reads back as nothing, not an error")
+
+        # ---- Does this account publish spending figures at all? -------------
+        #
+        # moto answers this with an empty list every time, so 'not_enabled' is
+        # the only answer the offline suite has ever seen.
+        status = alarms.billing_metrics_available(
+            alarms.get_client(alarms.BILLING_REGION))
+        if status == "ready":
+            ok("this account publishes spending figures, so a billing alarm "
+               "will receive data")
+        elif status == "not_enabled":
+            note("'Receive Billing Alerts' is off for this account, so a "
+                 "spending alarm will sit with no data until somebody turns "
+                 "it on in the Billing console. There is no API for that "
+                 "switch.")
+        else:
+            note(f"could not tell whether spending figures are published: "
+                 f"{status}")
+
+        # ---- The refusal that only makes sense against a real region --------
+        if region != alarms.BILLING_REGION:
+            refused, message, _ = alarms.create_alarm(
+                client, name=f"scp-smoke-doomed-{suffix()}",
+                namespace=alarms.BILLING_NAMESPACE,
+                metric_name=alarms.BILLING_METRIC, threshold=5.0, region=region)
+            check(not refused and alarms.BILLING_REGION in message,
+                  f"a spending alarm is refused in {region} rather than built "
+                  f"somewhere it could never receive data")
+        else:
+            other = "eu-west-2"
+            refused, message, _ = alarms.create_alarm(
+                alarms.get_client(other), name=f"scp-smoke-doomed-{suffix()}",
+                namespace=alarms.BILLING_NAMESPACE,
+                metric_name=alarms.BILLING_METRIC, threshold=5.0, region=other)
+            check(not refused and alarms.BILLING_REGION in message,
+                  f"a spending alarm is refused in {other} rather than built "
+                  f"somewhere it could never receive data")
+
+        # ---- Build one for real ---------------------------------------------
+        name = f"scp-smoke-cpu-{suffix()}"
+        made, result, problems = alarms.create_alarm(
+            client, name=name, namespace=alarms.CPU_NAMESPACE,
+            metric_name=alarms.CPU_METRIC, threshold=80.0, region=region,
+            notify=True, email=with_email)
+
+        if not check(made, f"created an alarm: {result}"):
+            fail(result)
+            return
+        created.append(name)
+        for p in problems:
+            note(p)
+
+        settings = resource.read(client, name)
+        if not check(settings is not None, "and it reads back"):
+            return
+
+        # A brand new alarm has no data yet, so AWS starts it here. Worth
+        # asserting because it is the same state a permanently dead alarm sits
+        # in, and telling them apart is the whole point of the scanner.
+        print(f"        {DIM}state on creation: {settings['state']}{RESET}")
+        check(settings["evaluation_periods"] == 2,
+              "a CPU alarm needs two readings, so one spike does not set it off")
+        check(settings["period"] == 300, "and checks every five minutes")
+
+        # ---- Tags, which describe_alarms does not return --------------------
+        #
+        # The analogue of the DescribeTags lesson: only_ours depends entirely
+        # on a separate call, and if that call stopped working every alarm in
+        # the account would look like one this tool created.
+        ours = {a["id"] for a in resource.list_all(client, only_ours=True)}
+        every = {a["id"] for a in resource.list_all(client, only_ours=False)}
+        check(name in ours, "the new alarm is recognised as one this tool made")
+        check(ours <= every, "and 'only ours' is a subset of everything")
+        if len(every) > len(ours):
+            ok(f"{len(every) - len(ours)} alarm(s) in this account are "
+               f"correctly not claimed as ours")
+        elif existing:
+            note("every alarm in this account carries this tool's tag, so the "
+                 "filter cannot be shown to exclude anything here")
+
+        # ---- Who would actually hear it -------------------------------------
+        topic_arn = (settings.get("alarm_actions") or [None])[0]
+        subs = settings.get("subscriptions")
+
+        if with_email:
+            # The finding moto can never produce. AWS returns the literal
+            # string PendingConfirmation until somebody opens the email.
+            if check(subs is not None and len(subs) > 0,
+                     f"{with_email} is subscribed to the alert topic"):
+                pending = [s for s in subs if not s["confirmed"]]
+                if pending:
+                    ok("and AWS reports it unconfirmed, which is what the "
+                       "offline suite has to use a stub to see")
+                    findings = resource.check(settings)
+                    check(any(w["rule"]["setting"] in
+                              ("no_confirmed_subscribers",
+                               "unconfirmed_subscribers")
+                              for w in findings),
+                          "and the scanner says the alarm reaches nobody yet")
+                else:
+                    note("the subscription is already confirmed, so this "
+                         "address has been through this before")
+        else:
+            check(subs == [],
+                  "with no address given, the topic exists and nobody is on it")
+            findings = resource.check(settings)
+            check(any(w["rule"]["setting"] == "no_subscribers"
+                      for w in findings),
+                  "and the scanner calls that out rather than passing it")
+
+        # ---- The two calls moto does not implement --------------------------
+        #
+        # NotImplementedError is caught alongside ClientError because moto
+        # raises it for these two, and a bare NotImplementedError is not a
+        # ClientError - the same shape as the ParamValidationError lesson.
+        # Against AWS neither is raised; catching both means a dry run of this
+        # script against the fake reports a note instead of abandoning
+        # everything after this point.
+        try:
+            client.disable_alarm_actions(AlarmNames=[name])
+            muted = resource.read(client, name)
+            check(muted["actions_enabled"] is False,
+                  "notifications can be switched off, which moto cannot do")
+
+            finding = next(w for w in resource.check(muted)
+                           if w["rule"]["setting"] == "actions_disabled")
+            fixed, message = resource.fix(client, name, finding, {})
+            check(fixed, "and the fix switches them back on")
+            check(resource.read(client, name)["actions_enabled"] is True,
+                  "which the alarm confirms when read back")
+        except NotImplementedError:
+            note("this endpoint does not implement switching alarm actions "
+                 "on or off, which means this is not a real AWS account")
+        except ClientError as e:
+            fail(f"toggling alarm actions failed: "
+                 f"{e.response['Error']['Message']}")
+
+        # ---- The routes, against the real account ---------------------------
+        _smoke_alarm_routes(region)
+
+    finally:
+        if created and not KEEP:
+            for name in created:
+                deleted, message = alarms.delete_alarm(client, name)
+                check(deleted, f"deleted {name}")
+        elif created:
+            note(f"--keep is set, so {len(created)} alarm(s) were left behind")
+
+        if topic_arn:
+            # Deliberately not deleted. The topic is shared by every alarm this
+            # tool makes, a teammate's alarm may be pointed at it, and removing
+            # it would silently take their notifications with it. The IAM
+            # policy denies sns:DeleteTopic for the same reason.
+            print(f"        {DIM}the alert topic is left in place; other "
+                  f"alarms may be using it{RESET}")
+
+
+def _smoke_alarm_routes(region):
+    """The pre-flight refusal, over HTTP, against the real account."""
+    from fastapi.testclient import TestClient
+    from api.app import app
+
+    client = TestClient(app, base_url="http://127.0.0.1:8000")
+
+    refused = client.post(f"/resources/alarm?region={region}", json={
+        "name": f"scp-smoke-silent-{suffix()}",
+        "namespace": alarms.CPU_NAMESPACE,
+        "metric_name": alarms.CPU_METRIC,
+        "threshold": 80.0,
+        "notify": False,
+    })
+
+    check(refused.status_code == 400,
+          "the API refuses to build an alarm that would tell nobody")
+    if refused.status_code == 400:
+        detail = refused.json()["detail"]
+        check(any("tell no one" in w["message"] for w in detail["warnings"]),
+              "and the refusal carries the finding that caused it")
+
+    listed = client.get(f"/resources/alarm?region={region}&only_ours=true")
+    check(listed.status_code == 200, "and alarms list over HTTP")
+
+
 # ---------------------------------------------------------------------- Sweep
 
 
@@ -1298,6 +1530,10 @@ def main():
                         help="do not delete what this script creates")
     parser.add_argument("--with-instances", action="store_true",
                         help="also launch and terminate a real t3.micro")
+    parser.add_argument("--with-alarm-email", metavar="ADDRESS",
+                        help="subscribe this address to the alert topic. "
+                             "Sends a real confirmation email, which is the "
+                             "only way to see the state moto cannot produce")
     parser.add_argument("--with-blueprint", action="store_true",
                         help="also build and tear down the whole bastion "
                              "architecture, which launches two t3.micro")
@@ -1335,6 +1571,9 @@ def main():
 
         # Read-only and free, so these always run.
         smoke_account_audit(args.region)
+
+        # Free, and creates at most two alarms inside the always-free ten.
+        smoke_alarms(args.region, with_email=args.with_alarm_email)
         smoke_snapshots(args.region)
 
         # The HTTP layer, which everything above reaches one level below.
