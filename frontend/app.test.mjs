@@ -324,5 +324,66 @@ if (check(Boolean(anyway), "and offers a way through, once the reasons are shown
   }
 }
 
+// ----------------------------------------------------------------- alarms
+
+console.log("\nThe alarm form");
+console.log("--------------");
+
+// A type whose fields are not in FIELDS falls back to a lone name box, which
+// would submit an alarm with no threshold and be refused for it. This checks
+// the page knows the shape of the type rather than merely listing it.
+const { document: doc4, sent: sent4 } = await boot({
+  "/resources": () => ({
+    resources: [
+      { key: "alarm", label: "Alarm", id_label: "Alarm name",
+        read_only: false },
+    ],
+  }),
+  "/resources/alarm": (options) =>
+    options.method === "POST"
+      ? { resource_type: "alarm", resource_id: "spend", problems: [],
+          settings: {}, warnings: [],
+          counts: { critical: 0, warning: 0, info: 0 } }
+      : { resource_type: "alarm", resources: [] },
+  "/resources/alarm/options": () => ({
+    options: {
+      namespace: [{ value: "AWS/Billing", label: "Account spending" },
+                  { value: "AWS/EC2", label: "Server CPU" }],
+      threshold: [{ value: "5", label: "$5" }, { value: "20", label: "$20" }],
+    },
+  }),
+});
+
+const alarmBody = $(doc4, "create-body");
+const alarmSelects = [...alarmBody.querySelectorAll("select")];
+
+check(alarmSelects.length >= 2,
+      "the alarm form offers menus rather than a lone name box");
+check(alarmBody.textContent.includes("confirmation link"),
+      "and explains that an unconfirmed address receives nothing");
+
+const [alarmName] = alarmBody.querySelectorAll("input");
+alarmName.value = "spend";
+setSelect(alarmSelects.find((s) =>
+  [...s.options].some((o) => o.value === "AWS/Billing")), "AWS/Billing");
+setSelect(alarmSelects.find((s) =>
+  [...s.options].some((o) => o.value === "5")), "5");
+
+const before4 = sent4.length;
+[...alarmBody.querySelectorAll("button")]
+  .find((b) => b.textContent === "Create").click();
+await new Promise((resolve) => setTimeout(resolve, 50));
+
+const alarmPost = sent4.slice(before4).find((r) => r.options.method === "POST");
+if (check(Boolean(alarmPost), "and submits what was chosen")) {
+  const spec = JSON.parse(alarmPost.options.body);
+  check(spec.namespace === "AWS/Billing", "carrying what to watch");
+  check(spec.threshold === "5" || spec.threshold === 5,
+        "and the number that sets it off");
+  check(spec.notify === true,
+        "with notification on by default, since a silent alarm is the "
+        + "failure this type exists to prevent");
+}
+
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");
 process.exit(failures ? 1 : 0);

@@ -35,6 +35,7 @@ from aws.s3_buckets import (
 from aws import key_pairs
 from aws import security_groups
 from aws import snapshots
+from aws import alarms
 from aws import vpcs
 from api import registry
 from blueprints import bastion
@@ -1033,6 +1034,99 @@ def snapshot_menu(ec2):
     print("change and where.")
 
 
+def alarm_menu(cloudwatch):
+    """Alarms, which are the one thing here that fails by staying quiet.
+
+    Everything else this tool builds is dangerous when it is doing something.
+    An alarm is dangerous when it is doing nothing, and looks identical either
+    way, so the scan is offered on every path through this menu rather than as
+    a separate choice.
+    """
+    print("\n--- Alarms ---")
+    print("1. Watch account spending")
+    print("2. Watch a server's CPU")
+    print("3. Scan an existing alarm")
+    print("4. Delete one")
+    print("5. Remove all alarms this tool made")
+    choice = input("\nSelect action (1-5): ").strip()
+
+    resource = registry.ALARM
+
+    if choice in ("1", "2"):
+        billing = choice == "1"
+        name = input("Alarm name: ").strip()
+        if not name:
+            print("A name is required.")
+            return
+
+        raw = input("Tell me when it goes above "
+                    f"{'$' if billing else ''}: ").strip()
+        try:
+            threshold = float(raw)
+        except ValueError:
+            print("That is not a number.")
+            return
+
+        email = input("Email to alert (blank for none): ").strip()
+        if not email:
+            print("\n  Without an address this alarm has nowhere to send a")
+            print("  message. It will turn red and tell nobody. Continuing.")
+
+        spec = {
+            "name": name,
+            "namespace": alarms.BILLING_NAMESPACE if billing
+            else alarms.CPU_NAMESPACE,
+            "metric_name": alarms.BILLING_METRIC if billing
+            else alarms.CPU_METRIC,
+            "threshold": threshold,
+            "region": REGION,
+            "notify": True,
+            "email": email or None,
+        }
+
+        # Same pre-flight the API runs, so the CLI and the page refuse the
+        # same things. A spending alarm in the wrong region is caught here
+        # before anything is created.
+        warnings = resource.check_spec(spec)
+        if warnings:
+            _report(warnings)
+            if input("\nCreate it anyway? (y/N): ").strip().lower() != "y":
+                print("Nothing was created.")
+                return
+
+        ok, result, problems = resource.create(cloudwatch, spec)
+        print(f"\nCreated {result}" if ok else f"\nRefused: {result}")
+        for p in problems:
+            print(f"  [!] {p}")
+
+        if ok:
+            _report(resource.check(resource.read(cloudwatch, result)))
+
+    elif choice == "3":
+        found = resource.list_all(cloudwatch, only_ours=False)
+        if not found:
+            print("No alarms exist in this region. Nothing is being watched.")
+            return
+        chosen = _choose(found, lambda a: a["name"], "Select alarm to scan")
+        if chosen:
+            _report(resource.check(resource.read(cloudwatch, chosen["id"])))
+
+    elif choice == "4":
+        found = resource.list_all(cloudwatch, only_ours=True)
+        if not found:
+            print("No alarms made by this tool.")
+            return
+        chosen = _choose(found, lambda a: a["name"], "Select alarm to delete")
+        if chosen:
+            ok, msg = resource.delete(cloudwatch, chosen["id"], {})
+            print(msg)
+
+    elif choice == "5":
+        if input("Remove ALL alarms this tool made? (y/N): ").strip().lower() == "y":
+            for name, ok, msg in resource.cleanup(cloudwatch, {}):
+                print(f"[{name}] -> {msg}")
+
+
 def main():
     print("=== Secure Cloud Provisioner ===")
     print("1. Security Groups (network)")
@@ -1043,7 +1137,8 @@ def main():
     print("6. Blueprints - build a whole architecture at once")
     print("7. Account access - audit only, changes nothing")
     print("8. Disk backups - audit only, changes nothing")
-    resource = input("\nSelect resource type (1-8): ").strip()
+    print("9. Alarms - tell me when spending or load goes up")
+    resource = input("\nSelect resource type (1-9): ").strip()
 
     try:
         if resource == "1":
@@ -1062,6 +1157,8 @@ def main():
             account_menu(registry.IAM.get_client(REGION))
         elif resource == "8":
             snapshot_menu(registry.SNAPSHOT.get_client(REGION))
+        elif resource == "9":
+            alarm_menu(registry.ALARM.get_client(REGION))
         else:
             print("Not a valid selection.")
     except PermissionDenied as e:

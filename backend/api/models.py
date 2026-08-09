@@ -70,6 +70,23 @@ class ResourceSpec(BaseModel):
     cidr: Optional[str] = None
     with_nat_gateway: bool = False
 
+    # Alarm. threshold has no default and is not optional in practice: an
+    # alarm without one is reported critical by the scanner and refused by the
+    # create route, which is a better answer than a number this module
+    # invented. notify defaults to on because an alarm that tells nobody is
+    # the single most common way monitoring is useless, and defaulting to the
+    # broken case to save a field would be choosing it for the user.
+    namespace: Optional[str] = None
+    metric_name: Optional[str] = None
+    threshold: Optional[float] = None
+    period: Optional[int] = Field(default=None, ge=60)
+    evaluation_periods: int = Field(default=2, ge=1, le=100)
+    treat_missing_data: Optional[
+        Literal["missing", "ignore", "breaching", "notBreaching"]] = None
+    dimensions: Optional[list[dict]] = None
+    notify: bool = True
+    email: Optional[str] = None
+
     def as_dict(self):
         """Plain dict for the registry adapters, which predate these models."""
         spec = self.model_dump(exclude_none=True)

@@ -369,6 +369,17 @@ const FIELDS = {
     ["cidr", "menu", "address range"],
     ["with_nat_gateway", "checkbox", false],
   ],
+  "alarm": [
+    ["name", "text", "a name for this alarm"],
+    ["namespace", "menu", "what it watches"],
+    ["threshold", "menu", "the number that sets it off"],
+    ["email", "text", "where to send the alert",
+     "AWS emails this address a confirmation link when the alarm is " +
+     "created, and delivers nothing to it until somebody clicks it. An " +
+     "alarm whose only address never confirmed is as silent as one with no " +
+     "address at all, so the scan reports that separately once it exists."],
+    ["notify", "checkbox", true],
+  ],
 };
 
 async function buildCreateForm() {

@@ -214,6 +214,21 @@ publishing somebody's actual disk. It is behind `--with-public-snapshot`, asks
 a second time, and `--clean` removes snapshots unconditionally regardless of
 which flags made them.
 
+**An alarm fails by being quiet, which is why it is scanned at all.**
+Everything else here is dangerous when it is doing something; an alarm is
+dangerous when it is doing nothing, and the two look identical in the console.
+`scanner/alarm_rules.py` reports the three separate ways to be silent — no
+destination, a destination nobody subscribed to, and a subscriber who never
+clicked the confirmation link — because each is fixed somewhere different.
+`aws/alarms.py` reads the SNS topic alongside the alarm for that reason: the
+rules cannot judge whether an alarm can speak without knowing who is listening.
+Two things are refusals rather than findings, both matching existing patterns
+here: a billing alarm outside `us-east-1` cannot ever receive data, and the
+eleventh alarm starts a monthly charge the way a NAT gateway does. Nothing in
+this scanner carries a citation — CIS section 4 is metric filters over
+CloudTrail, a different mechanism, and citing it would claim a check this does
+not perform.
+
 **A critical finding stops the create.** `POST /resources/{type}` runs
 `check_spec` before it provisions and refuses on anything critical;
 `accept_risk=true` proceeds anyway. `/check` could always say a configuration
@@ -338,6 +353,19 @@ the code was correct and an assumption was not.
   runs against the fake. `_ReportStub` in `test_iam.py` models the raising
   version, with an injected clock so the timeout is exercised without spending
   real seconds.
+- **moto confirms an email subscription instantly; AWS does not.** A real
+  email subscription comes back as the literal string `PendingConfirmation`
+  until somebody opens the message and clicks, and delivers nothing until then.
+  moto hands back a real subscription ARN immediately, so every subscriber it
+  reports is confirmed and the finding for an alarm nobody will ever hear
+  cannot fire against the fake. `_PendingSubscription` in `test_alarms.py`
+  models AWS.
+- **moto implements neither `EnableAlarmActions` nor `DisableAlarmActions`,**
+  though it honours `ActionsEnabled` on `PutMetricAlarm`. The tempting fix is
+  to flip the flag by rewriting the whole alarm, which moto would accept — and
+  which is worse, because `PutMetricAlarm` replaces an alarm entirely and every
+  field not resent reverts to a default. The one-purpose call stays, and the
+  test asserts the call rather than its effect.
 - **moto sometimes passes the broken version.** It does not enforce the
   cross-VPC rejection that group-derived placement works around, so the old
   code — reaching for the account default while holding a group from elsewhere

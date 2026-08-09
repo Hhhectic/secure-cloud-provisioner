@@ -11,7 +11,36 @@
         "s3:ListAllMyBuckets",
         "ec2:Describe*",
         "ssm:GetParameter",
-        "sts:GetCallerIdentity"
+        "sts:GetCallerIdentity",
+        "cloudwatch:DescribeAlarms",
+        "cloudwatch:ListMetrics",
+        "cloudwatch:ListTagsForResource",
+        "sns:ListSubscriptionsByTopic",
+        "sns:GetTopicAttributes"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ManageTheAlarmsThisToolCreates",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutMetricAlarm",
+        "cloudwatch:DeleteAlarms",
+        "cloudwatch:TagResource",
+        "cloudwatch:EnableAlarmActions",
+        "cloudwatch:DisableAlarmActions",
+        "sns:CreateTopic",
+        "sns:Subscribe",
+        "sns:TagResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RefuseDeletingTheTopicOthersMayBeUsing",
+      "Effect": "Deny",
+      "Action": [
+        "sns:DeleteTopic",
+        "sns:Unsubscribe"
       ],
       "Resource": "*"
     },

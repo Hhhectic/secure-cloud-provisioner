@@ -29,6 +29,7 @@ from aws import s3_buckets as s3
 from aws import key_pairs as kp
 from aws import instances as ec2i
 from aws import vpcs
+from aws import alarms
 from aws import iam
 from aws import snapshots
 from scanner.rules import (
@@ -44,6 +45,7 @@ from scanner.key_pair_rules import check_key_pair
 from scanner.instance_rules import check_instance
 from scanner.vpc_rules import check_vpc
 from scanner.iam_rules import check_account
+from scanner.alarm_rules import check_alarm, check_alarm_spec
 from scanner.snapshot_rules import check_snapshot
 
 DEFAULT_REGION = "us-east-1"
@@ -854,12 +856,92 @@ SNAPSHOT = ResourceType(
 )
 
 
+# --------------------------------------------------------------------- Alarms
+
+
+def _alarm_create(client, spec):
+    return alarms.create_alarm(
+        client,
+        name=spec["name"],
+        namespace=spec.get("namespace") or alarms.BILLING_NAMESPACE,
+        metric_name=spec.get("metric_name") or alarms.BILLING_METRIC,
+        threshold=spec.get("threshold"),
+        region=spec.get("region"),
+        period=spec.get("period"),
+        evaluation_periods=spec.get("evaluation_periods", 2),
+        treat_missing_data=spec.get("treat_missing_data"),
+        dimensions=spec.get("dimensions"),
+        notify=spec.get("notify", True),
+        email=spec.get("email"),
+        description=spec.get("description"),
+    )
+
+
+def _alarm_list(client, only_ours):
+    return [
+        {"id": a["AlarmName"], "name": a["AlarmName"]}
+        for a in alarms.list_alarms(client, only_ours=only_ours)
+    ]
+
+
+def _alarm_options(client):
+    """What the form should offer.
+
+    The two metrics here are the two this tool has an opinion about. Anything
+    else CloudWatch can watch is still reachable by typing a namespace and a
+    metric name; these are the ones where the defaults, the period and the
+    missing-data handling are all decided for you and decided correctly.
+    """
+    return {
+        "namespace": [
+            {"value": alarms.BILLING_NAMESPACE,
+             "label": "Account spending — tells you before the bill does"},
+            {"value": alarms.CPU_NAMESPACE,
+             "label": "Server CPU — tells you a machine is working hard"},
+        ],
+        "threshold": [
+            {"value": "5", "label": "$5 — a free-tier project has slipped"},
+            {"value": "20", "label": "$20"},
+            {"value": "50", "label": "$50"},
+        ],
+    }
+
+
+def _alarm_fix(client, resource_id, warning, options):
+    return alarms.apply_fix(client, resource_id, warning)
+
+
+def _alarm_delete(client, resource_id, options):
+    return alarms.delete_alarm(client, resource_id)
+
+
+def _alarm_cleanup(client, options):
+    return alarms.cleanup_all_managed_alarms(client)
+
+
+ALARM = ResourceType(
+    key="alarm",
+    label="Alarm",
+    id_label="Alarm name",
+    get_client=alarms.get_client,
+    create=_alarm_create,
+    list_all=_alarm_list,
+    read=alarms.read_alarm_for_scanning,
+    check=check_alarm,
+    check_spec=check_alarm_spec,
+    options=_alarm_options,
+    fix=_alarm_fix,
+    delete=_alarm_delete,
+    cleanup=_alarm_cleanup,
+)
+
+
 # Networks last: cleanup runs in registry order, and a VPC cannot be deleted
 # until the things inside it are gone. IAM sits before them rather than at the
 # end, because it creates and deletes nothing and so has no place in a cleanup
 # ordering at all - putting it last would suggest it did.
 REGISTRY = {r.key: r for r in (SECURITY_GROUP, BUCKET, KEY_PAIR, INSTANCE, IAM,
-                               SNAPSHOT, VPC)}
+                               SNAPSHOT, ALARM, VPC)}
 
 
 def get(resource_type):

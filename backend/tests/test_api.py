@@ -53,7 +53,7 @@ def test_health(client):
 def test_resource_types_are_advertised(client):
     keys = {r["key"] for r in client.get("/resources").json()["resources"]}
     assert keys == {"security-group", "bucket", "key-pair", "instance",
-                    "network", "iam", "snapshot"}
+                    "network", "iam", "snapshot", "alarm"}
 
 
 def test_every_resource_says_whether_it_can_be_changed(client):
