@@ -71,10 +71,8 @@ function fakeApi(overrides = {}) {
     "/resources/alarm/options": () => ({
       options: {
         namespace: [
-          { value: "AWS/Billing", label: "Account spending",
-            unit: "US dollars. The alarm fires when the estimated bill passes this." },
-          { value: "AWS/EC2", label: "Server CPU",
-            unit: "percent, 0 to 100." },
+          { value: "AWS/Billing", label: "Account spending ($)" },
+          { value: "AWS/EC2", label: "CPU usage (%)" },
         ],
       },
     }),
@@ -362,9 +360,8 @@ const { document: doc4, sent: sent4 } = await boot({
   "/resources/alarm/options": () => ({
     options: {
       namespace: [
-        { value: "AWS/Billing", label: "Account spending",
-          unit: "US dollars." },
-        { value: "AWS/EC2", label: "Server CPU", unit: "percent, 0 to 100." },
+        { value: "AWS/Billing", label: "Account spending ($)" },
+        { value: "AWS/EC2", label: "CPU usage (%)" },
       ],
     },
   }),
@@ -387,7 +384,7 @@ setSelect(alarmSelects.find((s) =>
 
 // Typed, not chosen: any number is legitimate and only the unit is decided
 // for you.
-fieldNamed(alarmBody, "threshold").querySelector("input").value = "5";
+fieldNamed(alarmBody, "alert above").querySelector("input").value = "5";
 
 const before4 = sent4.length;
 [...alarmBody.querySelectorAll("button")]
@@ -405,43 +402,41 @@ if (check(Boolean(alarmPost), "and submits what was chosen")) {
         + "failure this type exists to prevent");
 }
 
-// ------------------------------------------------- a threshold needs its unit
+// ------------------------------------------------- the unit is in the label
 
-console.log("\nAlarm thresholds are typed, and say what they mean");
-console.log("-------------------------------------------------");
+console.log("\nAlarm thresholds are typed, and the metric names the unit");
+console.log("--------------------------------------------------------");
 
-const { document: bandDoc, window: bandWin } = await boot();
+const { document: bandDoc } = await boot();
 [...$(bandDoc, "types").children].find((b) => b.dataset.key === "alarm").click();
 await new Promise((resolve) => setTimeout(resolve, 50));
 
 const bandForm = $(bandDoc, "create-body");
-const bandRows = [...bandForm.querySelectorAll(".field")];
-const thresholdRow = bandRows.find((r) =>
-  r.querySelector("label")?.textContent === "threshold");
+const fieldRow = (name) => [...bandForm.querySelectorAll(".field")]
+  .find((r) => r.querySelector("label")?.textContent === name);
 
-check(Boolean(thresholdRow), "the form has a threshold field");
+check(Boolean(fieldRow("alert above")),
+      "the threshold is captioned as the question it asks, not as its API name");
+check(!fieldRow("namespace"),
+      "and 'namespace' does not reach the screen, being a CloudWatch word");
+
+const thresholdRow = fieldRow("alert above");
 check(!thresholdRow.querySelector("select"),
-      "which is typed rather than chosen, because any number is legitimate");
+      "the threshold is typed, because any number is legitimate");
+check(!thresholdRow.querySelector(".hint"),
+      "with no sentence under it, since the metric already says the unit");
 
-const unitHint = () => thresholdRow.querySelector(".hint").textContent;
-const bandMetric = bandForm.querySelector("select");
-
-check(unitHint().includes("choose what to watch first"),
-      "and says the number is meaningless until a metric is picked");
-
-bandMetric.value = "AWS/Billing";
-bandMetric.dispatchEvent(new bandWin.Event("change", { bubbles: true }));
-await new Promise((resolve) => setTimeout(resolve, 20));
-check(unitHint().includes("dollars"),
-      "watching spending measures the threshold in dollars");
-
-bandMetric.value = "AWS/EC2";
-bandMetric.dispatchEvent(new bandWin.Event("change", { bubbles: true }));
-await new Promise((resolve) => setTimeout(resolve, 20));
-check(unitHint().includes("percent"),
-      "switching to CPU measures it in percent");
-check(!unitHint().includes("dollars"),
-      "and stops saying dollars, which is how 20 came to mean two things");
+// Real choices only. The blank first row is "— choose —", which would make
+// the dash assertion below pass for the wrong reason.
+const metricLabels = [...fieldRow("watch").querySelectorAll("option")]
+  .filter((o) => o.value && o.value !== "__other__")
+  .map((o) => o.textContent);
+check(metricLabels.some((l) => l.includes("($)")),
+      "spending says its unit in the label");
+check(metricLabels.some((l) => l.includes("(%)")),
+      "and so does CPU");
+check(!metricLabels.some((l) => l.includes("—")),
+      "without a dash and an explanation trailing off the end of the menu");
 
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");
 process.exit(failures ? 1 : 0);

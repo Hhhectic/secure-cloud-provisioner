@@ -562,7 +562,14 @@ def test_the_form_offers_the_two_metrics_this_tool_has_an_opinion_about(api):
     options = api.get("/resources/alarm/options").json()["options"]
     assert [o["value"] for o in options["namespace"]] == ["AWS/Billing",
                                                           "AWS/EC2"]
-    assert any("before the bill" in o["label"] for o in options["namespace"])
+    # The label carries the unit, because a threshold is a bare number and 20
+    # means twenty dollars under one metric and twenty percent under the other.
+    labels = {o["value"]: o["label"] for o in options["namespace"]}
+    assert "($)" in labels["AWS/Billing"]
+    assert "(%)" in labels["AWS/EC2"]
+
+    # And a threshold is typed rather than chosen: any number is legitimate.
+    assert "threshold" not in options
     # notify is a checkbox on the page, so a menu of true/false here would be
     # a second way to ask the same question, wrong the moment one of them moves.
     assert "notify" not in options

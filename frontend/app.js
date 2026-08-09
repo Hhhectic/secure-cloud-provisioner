@@ -86,11 +86,6 @@ function choice(options, { allowOther = true, blank = "— choose —", other = 
   for (const o of options) select.append(new Option(o.label, o.value));
   if (allowOther) select.append(new Option(other, "__other__"));
 
-  // The whole choice, not just its value, so a caller can read anything else
-  // the API attached to it — an alarm namespace carries the unit its
-  // threshold is measured in.
-  wrap.selected = () => options.find((o) => o.value === select.value) || null;
-
   select.onchange = () => {
     const isOther = select.value === "__other__";
     free.classList.toggle("hidden", !isOther);
@@ -337,6 +332,29 @@ function renderFinding(w, resourceId) {
 // Only the fields each resource actually reads. The API takes one spec model
 // for every type and each adapter ignores what does not apply to it, but
 // showing a bucket a field about subnets would suggest it meant something.
+/* What a field is called in the API, and what it should be called on screen.
+
+   The spec field names belong to AWS and to the routes; "namespace" is a
+   CloudWatch word for what a person would call "watch", and vpc_id is an
+   identifier where the question is "which network". Anything absent here
+   falls back to its own name with the underscores taken out, which is right
+   for name, description and email. */
+const LABELS = {
+  namespace: "watch",
+  threshold: "alert above",
+  vpc_id: "network",
+  cidr: "address range",
+  security_group_ids: "firewalls",
+  subnet_id: "subnet",
+  instance_type: "size",
+  key_name: "key pair",
+  assign_public_ip: "give it a public address",
+  with_nat_gateway: "add a NAT gateway",
+  secure_by_default: "secure defaults",
+  public_key: "public key",
+  notify: "email me when it fires",
+};
+
 // kind is how the field is asked for. "menu" and "multi" are filled from
 // GET /resources/{type}/options, so the choices come from the account and
 // from the allowlists the tool already enforces.
@@ -376,13 +394,16 @@ const FIELDS = {
   ],
   "alarm": [
     ["name", "text", "a name for this alarm"],
-    ["namespace", "menu", "what it watches"],
-    ["threshold", "text", "choose what to watch first — it decides what this number means"],
+    // No hint on either of these: the caption asks the question and the
+    // metric's own label carries the unit, so anything here would be a third
+    // telling of the same thing.
+    ["namespace", "menu", ""],
+    ["threshold", "text", ""],
     ["email", "text", "where to send the alert",
-     "AWS emails this address a confirmation link when the alarm is " +
-     "created, and delivers nothing to it until somebody clicks it. An " +
-     "alarm whose only address never confirmed is as silent as one with no " +
-     "address at all, so the scan reports that separately once it exists."],
+     "AWS emails this address a confirmation link, and delivers nothing to " +
+     "it until somebody clicks. An alarm whose only address never confirmed " +
+     "is as silent as one with no address at all, and the scan reports that " +
+     "separately once it exists."],
     ["notify", "checkbox", true],
   ],
 };
@@ -418,7 +439,7 @@ async function buildCreateForm() {
   for (const [name, kind, hint, note] of fields) {
     const wrap = document.createElement("div");
     wrap.className = "field";
-    const caption = text("label", name.replace(/_/g, " "));
+    const caption = text("label", LABELS[name] || name.replace(/_/g, " "));
     wrap.append(caption);
 
     if (kind === "rules") {
@@ -473,25 +494,6 @@ async function buildCreateForm() {
     if (note) box.append(text("p", note, "note"));
 
     inputs[name] = { kind, el, hint: hintEl };
-  }
-
-  // A threshold is a bare number and means nothing without its unit: 20 is
-  // twenty dollars under billing and twenty percent under CPU. The unit
-  // travels on the metric, so the hint beside the box follows whatever is
-  // being watched rather than being written twice in this file.
-  if (inputs.namespace && inputs.threshold) {
-    const explainUnit = () => {
-      const chosen = inputs.namespace.el.selected
-        ? inputs.namespace.el.selected() : null;
-      const hint = inputs.threshold.hint;
-      if (!hint) return;
-      hint.textContent = chosen && chosen.unit
-        ? chosen.unit
-        : "choose what to watch first — it decides what this number means";
-    };
-
-    box.addEventListener("change", explainUnit);
-    explainUnit();
   }
 
   if (state.type === "key-pair") box.append(keygenControls(inputs));

@@ -871,17 +871,16 @@ def test_reading_from_another_site_is_not_blocked_here(client):
     assert fine.status_code == 200
 
 
-def test_a_threshold_is_typed_and_the_metric_says_what_it_means(client):
-    """Reported from a screenshot: dollars offered against Server CPU.
+def test_the_metric_says_its_own_unit(client):
+    """Reported twice from screenshots.
 
-    A menu of three guesses was the wrong shape for a number that can be
-    anything, and the wrong content besides - those amounts are valid for
-    CPUUtilization, so "$20" would have succeeded and created an alarm at 20
-    percent, which fires on an idle machine and gets muted within a week.
+    First as a menu of dollar amounts offered while CPU was selected - not a
+    cosmetic mismatch, because those numbers are valid for CPUUtilization and
+    "$20" would have created an alarm at 20 percent. Then as a sentence under
+    the box, which was a line of prose to convey one character.
 
-    So the threshold is typed. What the menu did carry, and a bare box cannot,
-    is the unit, and that now travels on the metric because the metric is what
-    decides it.
+    The unit is in the label now, where it is already being read, and a
+    threshold is typed because any number is legitimate.
     """
     from aws import alarms
 
@@ -889,24 +888,16 @@ def test_a_threshold_is_typed_and_the_metric_says_what_it_means(client):
 
     assert "threshold" not in body, "a threshold is typed, not chosen"
 
-    units = {c["value"]: c.get("unit") for c in body["namespace"]}
-    assert all(units.values()), "every metric has to say what its number means"
-
-    assert "dollar" in units[alarms.BILLING_NAMESPACE].lower()
-    assert "percent" in units[alarms.CPU_NAMESPACE].lower()
-    assert "dollar" not in units[alarms.CPU_NAMESPACE].lower()
+    labels = {c["value"]: c["label"] for c in body["namespace"]}
+    assert "($)" in labels[alarms.BILLING_NAMESPACE]
+    assert "(%)" in labels[alarms.CPU_NAMESPACE]
 
 
-def test_the_cpu_unit_names_the_band_the_scanner_uses(client):
-    """So the number typed here is the number described back later."""
-    from scanner.instance_rules import BUSY_PERCENT
-    from aws import alarms
-
+def test_the_metric_labels_stay_short_enough_to_read(client):
+    """They sit in a menu, where anything long is simply cut off."""
     body = client.get("/resources/alarm/options").json()["options"]
-    cpu = next(c for c in body["namespace"]
-               if c["value"] == alarms.CPU_NAMESPACE)
-
-    assert str(BUSY_PERCENT) in cpu["unit"]
+    for choice in body["namespace"]:
+        assert len(choice["label"]) <= 30, choice["label"]
 
 
 # --------------------------------------------------------------- The page

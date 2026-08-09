@@ -906,26 +906,19 @@ def _alarm_options(client):
     metric name; these are the ones where the defaults, the period and the
     missing-data handling are all decided for you and decided correctly.
     """
-    # A threshold is typed rather than chosen. Any number is legitimate, and
-    # three guesses at the useful ones are worse than a box - the menu that
-    # was here offered dollars while Server CPU was selected, which is not a
-    # cosmetic mismatch: those numbers are valid for CPUUtilization, so "$20"
-    # would have succeeded and created an alarm at 20 percent.
+    # The unit is in the label because that is where it is already being read.
     #
-    # What the menu did carry, and a bare number cannot, is the unit. So the
-    # unit travels on the metric, which is the thing that decides it, and the
-    # form shows it beside the box.
+    # It has been in three places now. A menu of dollar amounts, which offered
+    # "$20" while CPU was selected and would have created an alarm at 20
+    # percent. Then a sentence under the box, which was a line of prose to say
+    # one character. "Account spending ($)" is shorter than both and cannot
+    # drift from the thing it describes, because it is the same string.
     return {
         "namespace": [
             {"value": alarms.BILLING_NAMESPACE,
-             "label": "Account spending — tells you before the bill does",
-             "unit": "US dollars. The alarm fires when the estimated bill "
-                     "for the month passes this."},
+             "label": "Account spending ($)"},
             {"value": alarms.CPU_NAMESPACE,
-             "label": "Server CPU — tells you a machine is working hard",
-             "unit": f"percent, 0 to 100. This tool calls {BUSY_PERCENT}% "
-                     "working hard, so a threshold near there fires when a "
-                     "machine stops coping."},
+             "label": "CPU usage (%)"},
         ],
     }
 
