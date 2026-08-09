@@ -351,6 +351,22 @@ list: for a bucket, whose forced delete empties it first, "nothing else would
 be destroyed" would be a lie told in front of the most destructive button
 there is.
 
+**An acknowledgement makes a finding quieter, never absent.** Intent is not
+in the control plane: a bucket readable by the world looks identical whether
+it is a leak or a personal website, and benchmarking against Prowler made that
+concrete — both tools call a deliberately public CV site critical and both are
+right. `scanner/acknowledged.py` takes the answer from the only place it
+exists, which is a person, and writes it down. An acknowledged finding keeps
+its level, its place in the list and its entry in the counts, and gains a
+fourth tally of its own; the page dims it and says who accepted it and why. A
+suppression that empties the screen is how people stop reading the screen.
+There are no wildcards, entries expire, and the acknowledgements are
+themselves audited — one that has lapsed or that matches nothing is reported.
+Nothing in the tool writes the file: an endpoint that created acknowledgements
+would be a remote "stop reporting this" API on a service holding credentials
+with no login, and one cross-site POST from being the thing the middleware in
+`api/app.py` exists to stop.
+
 **Fixes are re-derived server-side.** `POST /fix` takes a `rule_id` and nothing
 else. The server re-reads the resource, re-runs the scanner, and finds the
 warning itself. Accepting an action from the caller would make the API a remote
