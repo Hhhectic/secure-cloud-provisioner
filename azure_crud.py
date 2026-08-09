@@ -6,7 +6,13 @@ Includes pre-flight authentication verification and sanitized exceptions.
 
 import os
 from azure.identity import ClientSecretCredential
-from azure.mgmt.resource.resources import ResourceManagementClient
+
+# Robust import handling for ResourceManagementClient across SDK versions
+try:
+    from azure.mgmt.resource import ResourceManagementClient
+except ImportError:
+    from azure.mgmt.resource.resources import ResourceManagementClient
+
 from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.storage import StorageManagementClient
 from azure.core.exceptions import ClientAuthenticationError, HttpResponseError
@@ -28,7 +34,7 @@ def get_azure_credentials():
         client_secret=client_secret
     )
 
-    # Force immediate token acquisition against the ARM scope
+    # Force immediate token acquisition against the ARM scope (clean URI string)
     credential.get_token("https://management.azure.com/.default")
 
     return credential, subscription_id
@@ -60,7 +66,7 @@ def create_network_security_group(
     rules: list = None
 ) -> dict:
     """
-    Provisions an Azure Network Security Group with custom security rules.
+    Provisions an Azure Network Security Group with custom security rules using nested Azure ARM properties format.
     """
     credential, subscription_id = get_azure_credentials()
     network_client = NetworkManagementClient(credential, subscription_id)
@@ -70,19 +76,23 @@ def create_network_security_group(
         for idx, rule in enumerate(rules):
             formatted_rules.append({
                 "name": rule.get("name", f"rule-{idx}"),
-                "protocol": rule.get("protocol", "Tcp"),
-                "source_port_range": "*",
-                "destination_port_range": rule.get("destination_port_range", "22"),
-                "source_address_prefix": rule.get("source_address_prefix", "*"),
-                "destination_address_prefix": "*",
-                "access": rule.get("access", "Allow"),
-                "priority": 100 + idx,
-                "direction": rule.get("direction", "Inbound")
+                "properties": {
+                    "protocol": rule.get("protocol", "Tcp"),
+                    "sourcePortRange": "*",
+                    "destinationPortRange": rule.get("destination_port_range", rule.get("destinationPortRange", "22")),
+                    "sourceAddressPrefix": rule.get("source_address_prefix", rule.get("sourceAddressPrefix", "*")),
+                    "destinationAddressPrefix": "*",
+                    "access": rule.get("access", "Allow"),
+                    "priority": 100 + idx,
+                    "direction": rule.get("direction", "Inbound")
+                }
             })
 
     nsg_params = {
         "location": location,
-        "security_rules": formatted_rules
+        "properties": {
+            "securityRules": formatted_rules
+        }
     }
 
     poller = network_client.network_security_groups.begin_create_or_update(
@@ -106,7 +116,7 @@ def create_storage_account(
     storage_config: dict = None
 ) -> dict:
     """
-    Provisions an Azure Storage Account.
+    Provisions an Azure Storage Account using nested Azure ARM properties format.
     """
     credential, subscription_id = get_azure_credentials()
     storage_client = StorageManagementClient(credential, subscription_id)
@@ -119,9 +129,11 @@ def create_storage_account(
         "sku": {"name": sku_name},
         "kind": kind,
         "location": location,
-        "enable_https_traffic_only": config.get("enable_https_traffic_only", True),
-        "allow_blob_public_access": config.get("allow_blob_public_access", False),
-        "minimum_tls_version": config.get("minimum_tls_version", "TLS1_2")
+        "properties": {
+            "supportsHttpsTrafficOnly": config.get("supports_https_traffic_only", config.get("enable_https_traffic_only", True)),
+            "allowBlobPublicAccess": config.get("allow_blob_public_access", config.get("allowBlobPublicAccess", False)),
+            "minimumTlsVersion": config.get("minimum_tls_version", config.get("minimumTlsVersion", "TLS1_2"))
+        }
     }
 
     poller = storage_client.storage_accounts.begin_create(

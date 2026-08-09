@@ -4,6 +4,9 @@ FastAPI application entrypoint for secure cloud provisioning operations.
 Integrates security scanning engine, pre-flight validation, and sanitized error handling.
 """
 
+from dotenv import load_dotenv
+load_dotenv()  # Automatically loads environment variables from .env file
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
