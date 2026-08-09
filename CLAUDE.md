@@ -104,7 +104,13 @@ python scripts/smoke_test.py --with-blueprint   # live, the whole bastion, two t
 python scripts/make_vulnerable.py           # deliberately weak demo resources
 python scripts/make_vulnerable.py --with-public-snapshot   # also publishes a blank snapshot
 python scripts/make_vulnerable.py --clean   # remove everything tagged as ours
+python scripts/cloudwatch_harness.py        # live, free tier, creates alarms
 ```
+
+`cloudwatch_harness.py` came from a notebook and still runs top to bottom, so
+importing it would create an SNS topic and two alarms as a side effect. It
+refuses to be imported and says so. Everything it makes is inside the always-free
+tier, and it deletes what it made at the end.
 
 Everything runs from `backend/`. `pytest.ini` sets `pythonpath = .`, and
 uvicorn resolves imports from the working directory. The page is served by the
@@ -138,7 +144,7 @@ backend/
   aws/         all boto3, one module per resource type (iam.py reads only)
   api/         FastAPI over a resource registry, generic across types
   blueprints/  compositions of several resources into a correct architecture
-  scripts/     live smoke test and demo helpers
+  scripts/     live smoke test and demo helpers, plus the CloudWatch harness
 frontend/      the page: two plain scripts, no build step, no shipped deps
 docs/          IAM policy (three files, see iam-setup.md), bastion walkthrough
 ```
@@ -207,6 +213,17 @@ those before the permission changes, because the failure it prevents is
 publishing somebody's actual disk. It is behind `--with-public-snapshot`, asks
 a second time, and `--clean` removes snapshots unconditionally regardless of
 which flags made them.
+
+**A critical finding stops the create.** `POST /resources/{type}` runs
+`check_spec` before it provisions and refuses on anything critical;
+`accept_risk=true` proceeds anyway. `/check` could always say a configuration
+was dangerous, but saying so and building it regardless leaves the decision to
+whoever reads the response, which is nobody when the caller is a script. Only
+critical blocks — if warnings did too, the flag would be needed every time and
+would stop meaning anything. The refusal carries the findings, and the page
+renders them before offering *Create it anyway*, so the way through is not
+reachable without seeing the cost. This came from AbuRadid's `aws/deploy.py`
+and is the one thing that branch had which this one did not.
 
 **Guardrails are refusals, not warnings.** Instance types are an allowlist the
 tool physically cannot exceed, mirrored as an IAM `Deny`. NAT gateways are
