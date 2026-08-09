@@ -260,8 +260,13 @@ async function showDetail(id) {
   body.append(text("h3", `${known.id_label}: ${id}`));
 
   const counts = data.counts;
+  // The acknowledged tally sits beside the severities, never subtracted from
+  // them. A reader who cannot see that two of these criticals were already
+  // decided on will either act on them again or stop reading the list.
   body.append(text("p",
-    `${counts.critical} critical, ${counts.warning} warning, ${counts.info} informational`));
+    `${counts.critical} critical, ${counts.warning} warning, ` +
+    `${counts.info} informational` +
+    (counts.acknowledged ? ` — ${counts.acknowledged} acknowledged` : "")));
 
   body.append(text("h3", "Findings"));
   if (!data.warnings.length) {
@@ -278,8 +283,22 @@ async function showDetail(id) {
 function renderFinding(w, resourceId) {
   const box = document.createElement("div");
   box.className = `finding ${w.level}`;
-  box.append(text("div", w.level, "level"));
+  if (w.acknowledged) box.classList.add("acknowledged");
+
+  const level = text("div", w.level, "level");
+  if (w.acknowledged) level.textContent += " — acknowledged";
+  box.append(level);
   box.append(text("div", w.message));
+
+  // Dimmed and labelled, never dropped. Something you cannot see is something
+  // you cannot review, and the point of an acknowledgement is that somebody
+  // decided to live with this, not that it stopped being true.
+  if (w.acknowledged) {
+    const a = w.acknowledged;
+    box.append(text("div",
+      `${a.by} accepted this${a.on ? " on " + a.on : ""}` +
+      `${a.until ? ", until " + a.until : ""}: ${a.reason}`, "ack"));
+  }
 
   if (w.control) {
     box.append(text("div",

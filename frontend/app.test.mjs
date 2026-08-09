@@ -438,5 +438,47 @@ check(metricLabels.some((l) => l.includes("(%)")),
 check(!metricLabels.some((l) => l.includes("—")),
       "without a dash and an explanation trailing off the end of the menu");
 
+// ------------------------------------------- an acknowledged finding
+
+console.log("\nAn acknowledged finding");
+console.log("-----------------------");
+
+const ackWarning = {
+  level: "critical", message: "this bucket is public",
+  rule_id: "b:public_policy", resource_id: "b", rule: {}, fix: null,
+  acknowledged: { reason: "a website, on purpose", by: "richard",
+                  on: "2026-08-09", until: "2027-02-09" },
+};
+
+const { document: ackDoc } = await boot({
+  "/resources/security-group/sg-1": () => ({
+    resource_type: "security-group", resource_id: "sg-1", settings: {},
+    warnings: [ackWarning],
+    counts: { critical: 1, warning: 0, info: 0, acknowledged: 1 },
+  }),
+  "/resources/security-group": () => ({
+    resource_type: "security-group",
+    resources: [{ id: "sg-1", name: "demo" }],
+  }),
+});
+
+await ackDoc.querySelector("#list tr.clickable").click();
+await new Promise((r) => setTimeout(r, 60));
+
+const detail = $(ackDoc, "detail-body");
+const finding = detail.querySelector(".finding");
+
+check(Boolean(finding), "the finding is rendered at all, not dropped");
+check(finding.classList.contains("critical"),
+      "and keeps its severity, because an acknowledged critical is still one");
+check(finding.classList.contains("acknowledged"),
+      "marked as acknowledged so it can be told apart");
+check(detail.textContent.includes("richard"),
+      "naming who accepted it");
+check(detail.textContent.includes("a website, on purpose"),
+      "and why");
+check(detail.textContent.includes("1 acknowledged"),
+      "and the tally says so, rather than quietly subtracting it");
+
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");
 process.exit(failures ? 1 : 0);

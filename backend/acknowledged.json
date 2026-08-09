@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "Findings somebody has looked at and decided to live with.",
+    "",
+    "Nothing in this tool writes this file. It is edited by hand and committed,",
+    "so every entry is a diff with an author on it. An acknowledgement does not",
+    "hide a finding: it keeps its level and its place in the list, and is",
+    "counted separately as well. See scanner/acknowledged.py.",
+    "",
+    "rule_id must match exactly. There are no wildcards, because one pattern",
+    "silencing a whole class of finding is how these go wrong.",
+    "",
+    "An entry with no 'until' expires 180 days after 'on'. Past that the finding",
+    "returns at full volume and the stale entry is itself reported."
+  ],
+  "acknowledgements": [
+    {
+      "rule_id": "richard-huo-resume-2026:public_policy",
+      "reason": "A personal CV site. Static website hosting is on with index.html as the index document, and the only objects are index.html and style.css. It is meant to be readable by anyone.",
+      "by": "richard",
+      "on": "2026-08-09",
+      "until": "2027-02-09"
+    },
+    {
+      "rule_id": "richard-huo-resume-2026:public_access_block",
+      "reason": "The four blocks have to be off for the public website policy above to take effect. Acknowledged together with it, and only for as long as it is.",
+      "by": "richard",
+      "on": "2026-08-09",
+      "until": "2027-02-09"
+    }
+  ]
+}

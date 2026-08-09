@@ -101,6 +101,9 @@ select { font: inherit; padding: .25rem; border: 1px solid #999; background: #ff
 .keygen { border: 1px dashed #999; padding: .6rem; margin: .6rem 0; background: #fcfcfc; }
 .keygen .warn { margin: .5rem 0 0; }
 
+.finding.acknowledged { opacity: .62; border-left-style: dashed; }
+.ack { font-size: .8rem; color: #555; margin-top: .3rem; font-style: italic; }
+
 .muted { color: #666; }
 .mono-block { background: #f4f4f4; padding: .5rem; overflow-x: auto; white-space: pre-wrap;
               word-break: break-word; max-height: 22rem; }

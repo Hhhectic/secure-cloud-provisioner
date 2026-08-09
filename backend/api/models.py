@@ -120,6 +120,13 @@ class Warning_(BaseModel):
     rule: Optional[Any] = None
     fix: Optional[dict] = None
 
+    # Who decided to live with this, and why. Declared here because a response
+    # model silently drops anything it does not name: the scanner was marking
+    # findings, summarize() was counting them, and the page received none of
+    # it. An acknowledgement that does not reach the reader is a suppression,
+    # which is exactly what scanner/acknowledged.py refuses to be.
+    acknowledged: Optional[dict] = None
+
 
 class ScanResponse(BaseModel):
     resource_type: str

@@ -47,10 +47,18 @@ def warning(level, message, rule=None, fix=None, resource_id=None, control=None)
 
 
 def summarize(warnings):
-    """Aggregates warning totals by severity level."""
-    counts = {CRITICAL: 0, WARNING: 0, INFO: 0}
+    """Aggregates warning totals by severity level.
+
+    "acknowledged" counts findings somebody has decided to live with. It sits
+    alongside the severities rather than being subtracted from them: an
+    acknowledged critical is still a critical, and a tally that quietly
+    excluded it would be the thing scanner/acknowledged.py exists to avoid.
+    """
+    counts = {CRITICAL: 0, WARNING: 0, INFO: 0, "acknowledged": 0}
     for w in warnings:
         counts[w["level"]] = counts.get(w["level"], 0) + 1
+        if w.get("acknowledged"):
+            counts["acknowledged"] += 1
     return counts
 
 
