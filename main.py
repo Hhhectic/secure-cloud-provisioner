@@ -118,7 +118,7 @@ def deploy_azure_infrastructure(request: AzureDeployRequest):
             "storage_account": storage_res
         }
 
-    except ClientAuthenticationError:
+    except (ClientAuthenticationError, ValueError):
         # Sanitizes credential failures (hides raw Azure Entra ID Trace IDs, Tenant IDs, Client IDs)
         raise HTTPException(
             status_code=401,
