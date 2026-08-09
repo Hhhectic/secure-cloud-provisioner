@@ -4,9 +4,13 @@ FastAPI web server exposing REST API endpoints for cloud pre-flight scanning and
 """
 
 import os
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+
+# Load environment variables from .env file immediately on startup
+load_dotenv()
 
 from azure_scanner_engine import run_azure_security_scan
 from azure_crud import create_resource_group, create_network_security_group, create_storage_account
