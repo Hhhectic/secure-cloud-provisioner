@@ -160,14 +160,55 @@ security groups to one address; auto-detection failed here and the file was
 written by hand from `sg.my_public_ip()`. Without it a deliberately
 vulnerable machine is exposed to everyone.
 
+## How much of what CloudGoat plants does it actually find
+
+Counting findings is the wrong measure, and flattering. Every scenario produces
+findings, because every scenario deploys real infrastructure with real
+weaknesses in it, and this tool is good at spotting those. The narrower
+question is the one that matters: did it name the thing the scenario was built
+around?
+
+| | Scenarios |
+|---|---|
+| Named the planted vulnerability | 3 |
+| Named part of the chain, not the escalation | 2 |
+| Reported something real that was not the point | 8 |
+
+The eight are not noise. On `iam_privesc_by_attachment` the tool reported
+IMDSv1 and an unencrypted disk; both are true and neither is the scenario,
+which is a user who can attach a policy to a role and then assume it. On
+`iam_privesc_by_ec2` — pass a role to EC2 and inherit it — it reported flow
+logs and a subnet setting. `lambda_privesc`, `federated_console_takeover` and
+`data_secrets` are the same shape: correct findings, wrong ones.
+`detection_evasion` produced nothing about alarms at all.
+
+Two of the eight are legitimately out of scope and should be read as correct
+silence rather than as misses: `secrets_in_the_cloud` and
+`iam_privesc_by_key_rotation` turn on Secrets Manager and DynamoDB, which this
+tool does not claim to scan and does not pretend to.
+
+The rest share a single cause, and it is already the first item under *Next*:
+the tool reports that a role is attached and never what it grants. Every
+CloudGoat scenario is a chain of role to something. This sees the first link
+and none of the corridor.
+
 ## What it caught
+
+Enabling conditions, reliably — and in two scenarios that is the whole attack.
 
 **The pivot, in four scenarios.** CIS 5.7 - the metadata service handing out
 the instance's credentials to anything running on it - fired as critical on
 `iam_privesc_by_attachment`, `ec2_ssrf` and `data_secrets`, and as a warning
-on `federated_console_takeover`. That is the entry point those scenarios are
-built around: reach the metadata service, take the role, move on. The tool
-names it before anybody exploits it.
+on `federated_console_takeover`.
+
+The distinction worth drawing is where that finding is the attack rather than
+a step near it. In `ec2_ssrf` and `cloud_breach_s3` the metadata service *is*
+the path: reach it, take the role, read the bucket. Those are genuine
+end-to-end catches — the tool names the vulnerability the scenario exists to
+teach, before anybody exploits it. In the other two, 5.7 is true and present
+and the escalation happens somewhere the tool cannot see, so naming it is
+closer to noticing an unlocked window in a building whose front door is also
+open.
 
 **Two public buckets.** `s3_version_rollback_via_cfn` produced four
 criticals - the policy and the four blocks, on each of two buckets.

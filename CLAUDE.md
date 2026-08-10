@@ -573,9 +573,17 @@ Severity means something — if everything is critical, nothing is.
   not gaps, and the reasoning is written down so nobody re-files them.
 
   CloudGoat is the other direction — deliberately broken infrastructure, 13 of
-  29 scenarios run. The tool named the pivot (CIS 5.7, the metadata service
-  handing out instance credentials) in four separate scenarios, which is the
-  entry point those exercises are built around.
+  29 scenarios run. Of those 13 it named the planted vulnerability in 3, named
+  part of the chain in 2, and reported something real that was not the point in
+  8. Two of the 8 are correct silence on services this tool does not scan. The
+  rest have one cause, which is the next item below: every CloudGoat scenario
+  is a chain of role to something, and this sees the first link only.
+
+  Do not quote the four CIS 5.7 hits as a result on their own. The metadata
+  service fired in four scenarios, but it is the actual attack path in two
+  (`ec2_ssrf`, `cloud_breach_s3`) and merely true in the others. Enabling
+  conditions are what this tool is reliably good at; escalation paths are what
+  CloudGoat is built to teach, and that is the half it misses.
 
 - **Nothing reports what an attached role can reach.** The largest remaining
   gap, and both benchmarks found it from different angles. This tool says an
