@@ -23,6 +23,19 @@
         "access-analyzer:ListAnalyzers"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "ReadRolesToSayWhatEachOneCanReach",
+      "Effect": "Allow",
+      "Action": [
+        "iam:ListRoles",
+        "iam:GetRole",
+        "iam:ListRolePolicies",
+        "iam:GetRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole"
+      ],
+      "Resource": "*"
     }
   ]
 }

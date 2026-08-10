@@ -337,6 +337,21 @@ policy that names its reads individually is not flagged — that is somebody who
 thought about it, and it is the shape of this tool's own audit policy. Found
 by running CloudGoat against a real account; see `docs/benchmark.md`.
 
+**A role is judged by its corridor, not its door alone.** Every other scanner
+here judges a setting; `scanner/role_rules.py` judges a route, and the danger
+is rarely one permission. `iam:PassRole` grants nothing and `ec2:RunInstances`
+grants nothing, but together they let the holder start a machine carrying a
+more powerful role and read its credentials from the metadata service — which
+is CloudGoat's `iam_privesc_by_ec2` exactly. So the rules match combinations
+across the union of a role's policies: an escalation assembled from one inline
+policy and one attached one works as well as one written in a single statement.
+Where the role can be reached from is folded into each finding rather than
+reported separately, because "this can become administrator" and "this can
+become administrator and is on a machine answering HTTP requests" are not the
+same finding. Only unconditional `Allow` counts and `NotAction` is skipped, for
+the reason `grants_full_admin` already gives. Nothing is cited but full admin:
+CIS has no control for escalation paths.
+
 **A skipped check is a finding, not a silence.** Every IAM check runs
 independently and a failure lands in `unreadable` rather than aborting the
 scan, exactly as `s3_buckets` does per setting. `iam_rules` reports those
@@ -585,13 +600,12 @@ Severity means something — if everything is critical, nothing is.
   conditions are what this tool is reliably good at; escalation paths are what
   CloudGoat is built to teach, and that is the half it misses.
 
-- **Nothing reports what an attached role can reach.** The largest remaining
-  gap, and both benchmarks found it from different angles. This tool says an
-  instance profile is attached and never what it grants, so on every CloudGoat
-  privilege-escalation chain it sees the first link and none of the rest.
-  Prowler's `s3_bucket_cross_account_access` is the same shape. Closing it
-  means reading role policies and saying what they reach, which is a new
-  `scanner/` module rather than a rule.
+- **Role reachability covers identity, not resources.** `scanner/role_rules.py`
+  now says what a role can reach, which was the largest gap and is why the
+  `role` type exists. What it does not cover is the other direction: Prowler's
+  `s3_bucket_cross_account_access` asks who can reach *into* a bucket, and that
+  lives in the bucket's own policy rather than in any role. Same shape, other
+  end, still open.
 
 - **The alarm scanner has no external benchmark.** `detection_evasion` is the
   only CloudGoat scenario creating CloudWatch alarms and CloudTrail, and this
@@ -648,9 +662,11 @@ programs. Everything in *Not done* above other than that is a refinement.
 
 ## Next
 
-1. **Report what an attached role can reach.** The biggest gap, found
-   independently by both benchmarks. A new `scanner/` module reading role
-   policies, not another rule in an existing one.
+1. **Re-run CloudGoat now that roles are read.** The 3-of-13 figure in
+   `docs/benchmark.md` predates `scanner/role_rules.py`, and the eight misses
+   were mostly the gap it closes. Re-running is what turns a claim into a
+   measurement, and the scenarios are already known to deploy and destroy
+   cleanly.
 2. Decide how Azure and AWS become one application — mount, or register Azure
    as a `ResourceType`. Read the section at the top before choosing; this is a
    group decision rather than a task.

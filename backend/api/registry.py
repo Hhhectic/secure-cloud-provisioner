@@ -32,6 +32,7 @@ from aws import vpcs
 from aws import alarms
 from aws import iam
 from aws import snapshots
+from aws import roles
 from scanner.rules import (
     check_firewall_rules,
     check_group_usage,
@@ -47,6 +48,7 @@ from scanner.vpc_rules import check_vpc
 from scanner.iam_rules import check_account
 from scanner.alarm_rules import check_alarm, check_alarm_spec
 from scanner.snapshot_rules import check_snapshot
+from scanner.role_rules import check_role
 
 DEFAULT_REGION = "us-east-1"
 
@@ -956,7 +958,50 @@ ALARM = ResourceType(
 # until the things inside it are gone. IAM sits before them rather than at the
 # end, because it creates and deletes nothing and so has no place in a cleanup
 # ordering at all - putting it last would suggest it did.
+# ---------------------------------------------------------------------- Roles
+
+
+def _role_list(client, only_ours):
+    """Roles somebody in this account wrote.
+
+    only_ours excludes the roles AWS creates for its own services. An account
+    has dozens, nobody chose their contents and nobody can change them, so
+    including them by default would bury the handful a person actually wrote.
+    """
+    return [
+        {"id": r["RoleName"], "name": r["RoleName"]}
+        for r in roles.list_roles(client, only_ours=only_ours)
+    ]
+
+
+def _role_check_spec(spec):
+    """Nothing to check: this tool does not create roles."""
+    return []
+
+
+def _role_fix(client, resource_id, warning, options):
+    return roles.apply_fix(client, resource_id, warning)
+
+
+ROLE = ResourceType(
+    key="role",
+    label="Role",
+    id_label="Role name",
+    get_client=roles.get_client,
+    list_all=_role_list,
+    read=roles.read_role_for_scanning,
+    check=check_role,
+    describe=roles.describe_role,
+    check_spec=_role_check_spec,
+    fix=_role_fix,
+    # Audited, never provisioned. Creating a role is not a security operation,
+    # and changing one decides who can enter the account.
+    read_only=True,
+)
+
+
 REGISTRY = {r.key: r for r in (SECURITY_GROUP, BUCKET, KEY_PAIR, INSTANCE, IAM,
+                               ROLE,
                                SNAPSHOT, ALARM, VPC)}
 
 
