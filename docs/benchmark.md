@@ -235,6 +235,77 @@ tag. The newest rule set still has no external benchmark.
 notes. Its vulnerability is in Secrets Manager and a key-rotation path, which
 this tool does not scan. That is the right answer, not a miss.
 
+## Re-run after roles and users were read
+
+The figures above were measured before `scanner/role_rules.py` and
+`scanner/escalation.py` existed, when the tool reported that an instance
+profile was attached and never what it granted. Ten of the thirteen scenarios
+were deployed, scanned and destroyed again afterwards. The three not repeated
+are `s3_version_rollback_via_cfn`, deliberately skipped because its buckets
+carry Object Lock to 2099 and its teardown is the one known to leave things
+behind, plus `data_secrets` and `secrets_in_the_cloud`.
+
+| | Before | After |
+|---|---|---|
+| Named the planted vulnerability | 3 | **5** |
+| Named part of the chain | 2 | **2** |
+| Reported something real that was not the point | 5 | **2** |
+| Correct silence, out of scope | — | 1 |
+
+Counted over the ten re-run, not the original thirteen, so the two columns are
+comparable only in shape. The change attributable to reading identities is
+narrower than the totals suggest and is worth stating exactly: **two scenarios
+went from missed to named, and two from missed to partial.** Nothing else moved.
+
+### The two that went from missed to named
+
+**`lambda_privesc`.** Both ends, in two findings. `cg-lambdaManager-role` "can
+hand any role in this account to something it starts, and can create a
+function", and `cg-debug-role` "can do anything in this account". That is the
+scenario: assume the manager role, run a function carrying the debug role, take
+its credentials. The tool previously reported neither.
+
+**`iam_privesc_by_rollback`.** "`raynor` can roll a policy back to an older
+version that granted more." The escalation is one API call and changes nothing
+about the shape of the account, which is what made it invisible before.
+
+### The two that went from missed to partial
+
+Both name the *sink* and not the route to it, and in both the sink is the
+thing worth fixing - removing it breaks the chain whichever way somebody
+arrives.
+
+**`iam_privesc_by_ec2`.** Reports `cg_ec2_role` as full administrative access
+attached to a running machine, with the metadata service named. It does not
+trace the three hops that lead there, and the reason is that each is
+individually narrow and correctly declined: the user holds `sts:AssumeRole` on
+one named role ARN, and the role it reaches holds `ec2:ModifyInstanceAttribute`
+behind a `StringNotEquals` condition. Flagging a single named ARN would put a
+finding on most correctly-built infrastructure, and counting conditioned
+statements means evaluating IAM's policy language against a request that does
+not exist. Both limits are deliberate and both cost a detection here.
+
+**`iam_privesc_by_attachment`.** Reports `cg-ec2-mighty-role` as full
+administrative access, and does not name the actor's ability to attach a policy
+to a role. Why the attach permission did not match was not established before
+the scenario was destroyed; answering it needs a redeploy rather than a guess.
+
+### What is still missed, and why it is not a rule away
+
+**`detection_evasion`** produced six findings, none about alarms or about the
+escalation - unchanged, and for the reason already recorded: `aws/alarms.py`
+enumerates only alarms carrying this tool's own tag.
+
+**`federated_console_takeover`** produced one note about the initial user and
+nothing about the federation path.
+
+Both remaining misses, and both partials, share a shape the identity work does
+not reach. This tool judges one identity's policies at a time. A chain is a
+graph - who can assume what, and what that reaches in turn - and following it
+means traversing edges rather than matching statements. That is a different
+program from this one, and worth knowing before "role reachability" is read as
+"detects privilege escalation".
+
 ## Two hazards worth knowing before anyone repeats this
 
 **`cloudgoat destroy` can report success and leave things behind.**
@@ -243,6 +314,19 @@ no error. The buckets have Object Lock in GOVERNANCE mode with retention to
 2099-12-31, so ordinary deletion is impossible - they need
 `BypassGovernanceRetention`, which Terraform does not attempt. Check the
 account afterwards rather than trusting the summary.
+
+**`cloudgoat destroy` also prompts, and dies silently when nothing answers.**
+Piping `/dev/null` into it produces an `EOFError` traceback, destroys nothing,
+and can still leave the wrapper reporting success - which happened here, with a
+deliberately vulnerable instance carrying an administrator role left running
+until the account was checked directly. `yes y |` answers it. Check the account
+after every teardown rather than reading the summary, which is the same advice
+the next paragraph gives for a different failure.
+
+**Two setup details that are not in CloudGoat's own instructions.** It reads
+`whitelist.txt` and `config.yml` from its *package* directory, not the working
+directory, and `config.yml` must be a YAML list - `- default-profile: cloudgoat`
+- because a bare mapping crashes with `'str' object has no attribute 'keys'`.
 
 **Those leftovers then contaminate every later scan.** Scenarios run after it
 picked up the orphaned buckets as their own findings, which is why raw

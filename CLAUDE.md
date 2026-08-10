@@ -674,11 +674,14 @@ programs. Everything in *Not done* above other than that is a refinement.
 
 ## Next
 
-1. **Re-run CloudGoat now that roles are read.** The 3-of-13 figure in
-   `docs/benchmark.md` predates `scanner/role_rules.py`, and the eight misses
-   were mostly the gap it closes. Re-running is what turns a claim into a
-   measurement, and the scenarios are already known to deploy and destroy
-   cleanly.
+1. **Follow a chain, not one identity at a time.** The CloudGoat re-run is
+   done and `docs/benchmark.md` has it: two scenarios went from missed to
+   named, two from missed to partial, and both remaining misses plus both
+   partials share one shape. This tool judges an identity's own policies. A
+   privilege-escalation chain is a graph — who can assume what, and what that
+   reaches in turn — and following it means traversing edges rather than
+   matching statements. Everything cheap in that direction is now done; what
+   is left is a different program and should be started as one.
 2. Decide how Azure and AWS become one application — mount, or register Azure
    as a `ResourceType`. Read the section at the top before choosing; this is a
    group decision rather than a task.
