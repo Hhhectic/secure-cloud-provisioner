@@ -33,6 +33,28 @@ class FirewallRule(BaseModel):
         return to_port
 
 
+class AzureSecurityRule(BaseModel):
+    """One Azure network security group rule as a form would submit it.
+
+    Separate from FirewallRule because the two clouds genuinely describe a
+    firewall rule differently - Azure names a direction and an access decision
+    on every rule and writes ports as a string range, where AWS splits from
+    and to into integers and infers direction from which list the rule is in.
+    Forcing one model to carry both would mean a rule where half the fields are
+    null whichever cloud you are using.
+    """
+
+    name: Optional[str] = None
+    direction: Literal["Inbound", "Outbound"] = "Inbound"
+    access: Literal["Allow", "Deny"] = "Allow"
+    protocol: str = "*"
+    source_address_prefix: str
+    destination_port_range: str
+    # Azure evaluates rules in priority order and reserves everything below
+    # 100 for its own defaults.
+    priority: Optional[int] = Field(default=None, ge=100, le=4096)
+
+
 class ResourceSpec(BaseModel):
     """Everything either resource type might need to be created.
 
@@ -70,6 +92,11 @@ class ResourceSpec(BaseModel):
     cidr: Optional[str] = None
     with_nat_gateway: bool = False
 
+    # Azure. A separate rule list rather than reusing `rules`, because the
+    # two clouds describe a firewall rule differently enough that one model
+    # would be half-null whichever one you were using.
+    azure_rules: Optional[list[AzureSecurityRule]] = None
+
     # Alarm. threshold has no default and is not optional in practice: an
     # alarm without one is reported critical by the scanner and refused by the
     # create route, which is a better answer than a number this module
@@ -92,6 +119,8 @@ class ResourceSpec(BaseModel):
         spec = self.model_dump(exclude_none=True)
         if self.rules is not None:
             spec["rules"] = [r.model_dump() for r in self.rules]
+        if self.azure_rules is not None:
+            spec["azure_rules"] = [r.model_dump() for r in self.azure_rules]
         return spec
 
 

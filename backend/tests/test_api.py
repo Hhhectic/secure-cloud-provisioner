@@ -53,7 +53,8 @@ def test_health(client):
 def test_resource_types_are_advertised(client):
     keys = {r["key"] for r in client.get("/resources").json()["resources"]}
     assert keys == {"security-group", "bucket", "key-pair", "instance",
-                    "network", "iam", "snapshot", "alarm", "role"}
+                    "network", "iam", "snapshot", "alarm", "role",
+                    "azure-nsg", "azure-storage"}
 
 
 def test_every_resource_says_whether_it_can_be_changed(client):
@@ -77,6 +78,8 @@ def test_the_audited_types_are_advertised_as_read_only(client):
     assert entries["iam"]["read_only"] is True
     assert entries["snapshot"]["read_only"] is True
     assert entries["role"]["read_only"] is True
+    assert entries["azure-nsg"]["read_only"] is True
+    assert entries["azure-storage"]["read_only"] is True
 
 
 def test_an_audited_resource_refuses_the_destructive_routes(client, monkeypatch):

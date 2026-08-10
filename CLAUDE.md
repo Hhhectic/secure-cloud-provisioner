@@ -349,6 +349,32 @@ ones inherited through a group, because arriving that way is the recommended
 arrangement and an escalation assembled there is if anything likelier than one
 pinned to a person.
 
+**Azure is a `ResourceType`, and the contract held.** `scanner/common.py` has
+claimed since the first commit that its warning shape is provider-agnostic, and
+`api/app.py` has had one set of routes on the strength of it. Registering
+`azure-nsg` and `azure-storage` is the first evidence either statement is true:
+two entries in `api/registry.py`, no route changes, no change to
+`scanner/common.py`. An Azure finding is counted and rendered by code that does
+not know which cloud it just described.
+
+**The Azure package cannot be called `azure`, and the SDK is imported lazily.**
+Two constraints, both invisible until they bite, both verified rather than
+assumed. The SDK owns `azure` as a namespace package, and `pytest.ini` puts
+`backend/` on the path — so `backend/azure/` would become the top-level `azure`
+module and every `import azure.identity` in the process would resolve to it and
+fail. Hence `backend/az/`. And every SDK import happens inside a function,
+because `api/registry.py` imports every provider module at startup: a
+module-level import would make the Azure SDK a hard requirement of starting the
+AWS half, which is the exact objection recorded against mounting the two
+applications into one process. `test_azure.py` asserts both properties directly
+rather than inferring them from the suite passing.
+
+**Nothing in the Azure rules carries a CIS citation.** CIS AWS Foundations is
+an AWS benchmark; citing it against a storage account would borrow authority
+that does not extend there. The CIS Microsoft Azure Foundations Benchmark is a
+separate document nobody here has read, and inventing IDs from it would be the
+fabricated citation `scanner/controls.py` warns about.
+
 **A role is judged by its corridor, not its door alone.** Every other scanner
 here judges a setting; `scanner/role_rules.py` judges a route, and the danger
 is rarely one permission. `iam:PassRole` grants nothing and `ec2:RunInstances`
@@ -682,9 +708,14 @@ programs. Everything in *Not done* above other than that is a refinement.
    reaches in turn — and following it means traversing edges rather than
    matching statements. Everything cheap in that direction is now done; what
    is left is a different program and should be started as one.
-2. Decide how Azure and AWS become one application — mount, or register Azure
-   as a `ResourceType`. Read the section at the top before choosing; this is a
-   group decision rather than a task.
+2. **Finish the Azure half.** It is registered and read-only: `az/nsg.py` and
+   `az/storage.py` list and scan, and provisioning is deliberately not wired
+   in. `azure_crud.py` on `group/main` has working create functions for
+   resource groups, storage accounts and NSGs; giving them a `create` adapter
+   is the same block of work every AWS type already has. Nothing here has run
+   against a real subscription, because the SDK is not installed in `.venv` —
+   that is the next thing to change, and until it does the Azure findings are
+   tested logic rather than measured behaviour.
 3. Detach `AmazonEC2FullAccess` and friends from `EC2_Dude`, so the documented
    least-privilege policy is the one actually in force and the smoke test
    proves it. Already done for EC2 and S3; SNS, CloudWatch and SSM remain and

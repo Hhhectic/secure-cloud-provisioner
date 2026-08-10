@@ -31,6 +31,7 @@ from fastapi.staticfiles import StaticFiles
 
 from api import audit, models, registry
 from aws.s3_buckets import PermissionDenied
+from az.common import AzureNotConfigured
 from blueprints import bastion
 from scanner import acknowledged
 from scanner.common import summarize, fixable, worst_level, CRITICAL
@@ -174,6 +175,27 @@ async def _permission_denied(request, exc):
                 "and try again."
             ),
             "missing_permission": exc.permission,
+        },
+    )
+
+
+@app.exception_handler(AzureNotConfigured)
+async def _azure_not_configured(request, exc):
+    """Turns an absent Azure SDK or credential into a 503 that says so.
+
+    503 rather than 500: nothing is broken. This deployment simply cannot
+    reach Azure, which is an ordinary state - the two halves have separate
+    dependencies and the AWS half is deliberately able to start without the
+    Azure ones. A traceback about `azure.mgmt.network` would tell somebody
+    running the AWS half nothing they could act on.
+    """
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": str(exc),
+            "provider": "azure",
         },
     )
 

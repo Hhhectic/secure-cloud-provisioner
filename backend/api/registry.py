@@ -33,6 +33,8 @@ from aws import alarms
 from aws import iam
 from aws import snapshots
 from aws import roles
+from az import nsg as az_nsg
+from az import storage as az_storage
 from scanner.rules import (
     check_firewall_rules,
     check_group_usage,
@@ -49,6 +51,9 @@ from scanner.iam_rules import check_account
 from scanner.alarm_rules import check_alarm, check_alarm_spec
 from scanner.snapshot_rules import check_snapshot
 from scanner.role_rules import check_role
+from scanner.azure_nsg_rules import check_nsg, check_nsg_spec
+from scanner.azure_storage_rules import (check_storage_account,
+                                         check_storage_spec)
 
 DEFAULT_REGION = "us-east-1"
 
@@ -1000,8 +1005,70 @@ ROLE = ResourceType(
 )
 
 
+# ---------------------------------------------------------------- Azure
+#
+# The second provider, and the first evidence that the warning contract in
+# scanner/common.py is what it has claimed to be since the first commit. Two
+# entries here, no changes to api/app.py, no changes to scanner/common.py -
+# which is the whole argument for having built it this way, finally testable
+# rather than asserted.
+#
+# Read-only in this first pass. Azure provisioning exists on group/main and is
+# deliberately not wired in yet: proving a second cloud fits the registry is
+# one claim, and a create path nobody has run against a real subscription
+# would be another one entirely.
+
+
+def _az_nsg_list(client, only_ours):
+    return [{"id": g["id"], "name": g["name"]}
+            for g in az_nsg.list_nsgs(client, only_ours=only_ours)]
+
+
+def _az_nsg_fix(client, resource_id, warning, options):
+    return az_nsg.apply_fix(client, resource_id, warning)
+
+
+AZURE_NSG = ResourceType(
+    key="azure-nsg",
+    label="Azure network security group",
+    id_label="Group name",
+    get_client=az_nsg.get_client,
+    list_all=_az_nsg_list,
+    read=az_nsg.read_nsg_for_scanning,
+    check=check_nsg,
+    describe=az_nsg.describe_nsg,
+    check_spec=check_nsg_spec,
+    fix=_az_nsg_fix,
+    read_only=True,
+)
+
+
+def _az_storage_list(client, only_ours):
+    return [{"id": a["id"], "name": a["name"]}
+            for a in az_storage.list_accounts(client, only_ours=only_ours)]
+
+
+def _az_storage_fix(client, resource_id, warning, options):
+    return az_storage.apply_fix(client, resource_id, warning)
+
+
+AZURE_STORAGE = ResourceType(
+    key="azure-storage",
+    label="Azure storage account",
+    id_label="Account name",
+    get_client=az_storage.get_client,
+    list_all=_az_storage_list,
+    read=az_storage.read_account_for_scanning,
+    check=check_storage_account,
+    describe=az_storage.describe_account,
+    check_spec=check_storage_spec,
+    fix=_az_storage_fix,
+    read_only=True,
+)
+
+
 REGISTRY = {r.key: r for r in (SECURITY_GROUP, BUCKET, KEY_PAIR, INSTANCE, IAM,
-                               ROLE,
+                               ROLE, AZURE_NSG, AZURE_STORAGE,
                                SNAPSHOT, ALARM, VPC)}
 
 
