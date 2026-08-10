@@ -953,3 +953,36 @@ def test_cleanup_leaves_groups_this_tool_did_not_make(client, vpc_id):
                                              "with_scan": False}
     ).json()["resources"]
     assert "not-ours" in [r["name"] for r in everything]
+
+
+def test_each_type_says_how_its_list_can_be_narrowed(client):
+    """Whether a list can be filtered is a different question from whether the
+    resource can be changed, and the page used to infer one from the other.
+
+    That held while the audited types were IAM and snapshots. Roles broke it:
+    the filter is meaningful there, it just means "written by somebody here"
+    rather than "made by this tool" - so the role list showed AWS's own
+    service roles with no way to hide them.
+    """
+    entries = {r["key"]: r for r in client.get("/resources").json()["resources"]}
+
+    # Tagged by this tool, so the default wording is right.
+    for key in ("security-group", "bucket", "instance", "alarm", "snapshot"):
+        assert entries[key]["only_ours_label"] == "only ones this tool made"
+
+    # Meaningful, but not by tag - this tool creates no roles at all.
+    assert entries["role"]["only_ours_label"] == "only ones somebody here wrote"
+
+    # Nothing to narrow: one account, and two Azure types nothing here creates.
+    for key in ("iam", "azure-nsg", "azure-storage"):
+        assert entries[key]["only_ours_label"] is None
+
+
+def test_a_filterable_type_is_not_decided_by_whether_it_is_read_only(client):
+    """The regression this guards: snapshots and roles are both audited and
+    both filterable, so read_only cannot be the signal."""
+    entries = {r["key"]: r for r in client.get("/resources").json()["resources"]}
+
+    for key in ("snapshot", "role"):
+        assert entries[key]["read_only"] is True
+        assert entries[key]["only_ours_label"] is not None

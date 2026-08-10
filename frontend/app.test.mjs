@@ -30,21 +30,32 @@ const check = (condition, message) => {
 
 /* The stub API. Answers enough for the page to boot, and records every
  * request so a test can assert on what was actually sent. */
+// The types the stub advertises. Named so the tab-count assertion can be
+// derived from it instead of hardcoding a number that goes stale the moment
+// somebody adds one.
+const STUB_TYPES = [
+  { key: "security-group", label: "Security group",
+    id_label: "Group ID", read_only: false,
+    only_ours_label: "only ones this tool made" },
+  // Audited and still filterable, which is the pair that broke the old rule:
+  // the page used to disable the box for anything read_only.
+  { key: "snapshot", label: "Disk backup",
+    id_label: "Snapshot ID", read_only: true,
+    only_ours_label: "only ones this tool made" },
+  // Audited with nothing to narrow by.
+  { key: "iam", label: "Account access", id_label: "Account ID",
+    read_only: true, only_ours_label: null },
+  { key: "alarm", label: "Alarm", id_label: "Alarm name",
+    read_only: false, only_ours_label: "only ones this tool made" },
+];
+
+
 function fakeApi(overrides = {}) {
   const sent = [];
 
   const routes = {
     "/health": () => ({ status: "ok" }),
-    "/resources": () => ({
-      resources: [
-        { key: "security-group", label: "Security group",
-          id_label: "Group ID", read_only: false },
-        { key: "snapshot", label: "Disk backup",
-          id_label: "Snapshot ID", read_only: true },
-        { key: "alarm", label: "Alarm", id_label: "Alarm name",
-          read_only: false },
-      ],
-    }),
+    "/resources": () => ({ resources: STUB_TYPES }),
     "/resources/security-group/options": () => ({
       options: {
         vpc_id: [{ value: "vpc-1", label: "demo" }],
@@ -64,6 +75,8 @@ function fakeApi(overrides = {}) {
             counts: { critical: 0, warning: 0, info: 0 } }
         : { resource_type: "security-group", resources: [] },
     "/resources/snapshot": () => ({ resource_type: "snapshot", resources: [] }),
+    "/resources/iam": () => ({ resource_type: "iam", resources: [] }),
+    "/resources/iam/options": () => ({ options: {} }),
     "/resources/key-pair": () => ({ resource_type: "key-pair", resources: [] }),
     "/resources/network": () => ({ resource_type: "network", resources: [] }),
     "/resources/snapshot/options": () => ({ options: {} }),
@@ -150,7 +163,9 @@ const { window, document, sent } = await boot();
 
 check($(document, "health").textContent === "API up",
       "the health pill reflects a reachable API");
-check($(document, "types").children.length === 3,
+// Counted from the stub rather than written as a number, so adding a type to
+// the stub cannot silently make this assertion about something else.
+check($(document, "types").children.length === STUB_TYPES.length,
       "a tab appears for every resource type the API advertises");
 check([...$(document, "types").children]
         .some((b) => b.textContent.includes("audit only")),
@@ -263,8 +278,20 @@ await new Promise((resolve) => setTimeout(resolve, 50));
 
 check($(doc2, "create-body").textContent.includes("audited by this tool"),
       "an audited type offers no create form and says why");
+check(!$(doc2, "only-ours").disabled,
+      "but its list can still be narrowed, because being unable to change a "
+      + "thing does not mean being unable to filter it");
+
+// The pair the old rule got wrong. read_only was the signal for both
+// questions, so an audited type that genuinely honours the filter lost it.
+const iamTab = [...$(doc2, "types").children].find((b) => b.dataset.key === "iam");
+iamTab.click();
+await new Promise((resolve) => setTimeout(resolve, 50));
+
 check($(doc2, "only-ours").disabled,
-      "and 'only ones this tool made' is disabled, being meaningless there");
+      "a type with nothing to narrow by disables the box");
+check($(doc2, "only-ours-label").textContent.includes("nothing to narrow"),
+      "and says so rather than leaving a label that means nothing");
 
 // ------------------------------------------- refusing to build something bad
 

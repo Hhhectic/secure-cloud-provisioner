@@ -276,11 +276,17 @@ def list_resource_types():
 
     read_only is advertised so a caller can leave out the buttons that would
     only be refused, rather than offering them and explaining afterwards.
+
+    only_ours_label goes with it, because whether a list can be narrowed is
+    not the same question as whether a resource can be changed. The page used
+    to assume it was, which left the role list showing AWS's own service roles
+    with no way to hide them.
     """
     return {
         "resources": [
             {"key": r.key, "label": r.label, "id_label": r.id_label,
-             "read_only": r.read_only}
+             "read_only": r.read_only,
+             "only_ours_label": r.only_ours_label}
             for r in registry.REGISTRY.values()
         ]
     }

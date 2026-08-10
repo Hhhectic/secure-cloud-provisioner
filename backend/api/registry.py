@@ -186,6 +186,20 @@ class ResourceType:
     # empties it first.
     plan_deletion: Optional[Callable] = None
 
+    # What the checkbox that narrows the list should say, or None if this
+    # type has no meaningful way to narrow it.
+    #
+    # The page used to infer this from read_only: audited types got the box
+    # disabled, on the reasoning that nothing tags an account. That held while
+    # the audited types were IAM and snapshots, and broke the moment roles
+    # arrived - a role filter is meaningful, it just means "written by somebody
+    # here" rather than "made by this tool", and the page had no way to say so.
+    # Snapshots were caught by the same rule despite genuinely honouring the
+    # tag, so make_vulnerable's demo snapshots could not be picked out either.
+    #
+    # The default suits every type that filters by this tool's own tag.
+    only_ours_label: Optional[str] = "only ones this tool made"
+
     # What the resource looks like, as opposed to what is wrong with it.
     #
     # read() returns whatever check() needs, which for two resources is a
@@ -820,6 +834,8 @@ IAM = ResourceType(
     describe=iam.describe_account,
     check_spec=_iam_check_spec,
     fix=_iam_fix,
+    # One account. There is nothing to narrow it to.
+    only_ours_label=None,
     # Audited, never provisioned. create, delete and cleanup stay unimplemented
     # and the routes answer 405 with a sentence about why.
     read_only=True,
@@ -999,6 +1015,10 @@ ROLE = ResourceType(
     describe=roles.describe_role,
     check_spec=_role_check_spec,
     fix=_role_fix,
+    # Not by tag: this tool creates no roles. The useful distinction is
+    # between roles somebody chose the contents of and the dozens AWS makes
+    # for its own services, which cannot be changed and bury the rest.
+    only_ours_label="only ones somebody here wrote",
     # Audited, never provisioned. Creating a role is not a security operation,
     # and changing one decides who can enter the account.
     read_only=True,
@@ -1039,6 +1059,10 @@ AZURE_NSG = ResourceType(
     describe=az_nsg.describe_nsg,
     check_spec=check_nsg_spec,
     fix=_az_nsg_fix,
+    # Nothing here creates Azure resources, so there is no tag to filter on
+    # and the reader ignores the flag. Offering the box would be offering a
+    # control that does nothing.
+    only_ours_label=None,
     read_only=True,
 )
 
@@ -1063,6 +1087,10 @@ AZURE_STORAGE = ResourceType(
     describe=az_storage.describe_account,
     check_spec=check_storage_spec,
     fix=_az_storage_fix,
+    # Nothing here creates Azure resources, so there is no tag to filter on
+    # and the reader ignores the flag. Offering the box would be offering a
+    # control that does nothing.
+    only_ours_label=None,
     read_only=True,
 )
 

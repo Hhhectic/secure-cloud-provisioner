@@ -150,12 +150,18 @@ function selectType(key) {
     b.classList.toggle("active", b.dataset.key === key);
   }
 
-  // "Only ones this tool made" is meaningless for a type it never makes, and
-  // leaving it ticked on an audited type shows an empty list for something
-  // the account is full of.
-  const audited = state.types.find((t) => t.key === key).read_only;
-  $("only-ours").checked = !audited;
-  $("only-ours").disabled = audited;
+  // How this list can be narrowed, and what to call it, come from the server
+  // rather than from read_only. They are different questions: a role cannot
+  // be changed by this tool and can still be filtered usefully, and inferring
+  // one from the other left the role list showing AWS's own service roles
+  // with no way to hide them.
+  const filterLabel = state.types.find((t) => t.key === key).only_ours_label;
+  const box = $("only-ours");
+
+  box.disabled = !filterLabel;
+  box.checked = Boolean(filterLabel);
+  $("only-ours-label").textContent =
+    filterLabel || "nothing to narrow this list by";
 
   $("detail-body").replaceChildren(text("p", "Pick something from the list.", "muted"));
   buildCreateForm();
