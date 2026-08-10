@@ -64,3 +64,14 @@ jobs:
           AWS_SESSION_TOKEN: testing
           AWS_DEFAULT_REGION: us-east-1
         run: pytest -q
+
+      - name: Run the Azure half's own suite
+        # Added when the two halves were merged. CI ran only backend/ before
+        # that, so azure_scanner's six tests had never run here at all - a
+        # green tick meant half the repository was tested.
+        #
+        # Run from the root because that is where those modules live, and
+        # without installing the Azure SDK: test_azure_scanner.py exercises
+        # the rule logic, which touches no cloud. If it ever needs the SDK,
+        # that is a sign a rule has grown a dependency it should not have.
+        run: pytest test_azure_scanner.py -q

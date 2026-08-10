@@ -1,47 +1,34 @@
 """
 azure_scanner_engine.py
-Unified security scanner engine module for Azure infrastructure.
-Combines all individual Azure scanner rules into a single engine call.
+Aggregates individual scanner checks into a unified pre-flight security scanner result.
 """
 
-from azure_scanner import scan_azure_deployment
-
+from azure_scanner import (
+    check_nsg_ssh_rule, 
+    check_storage_public_access, 
+    check_storage_https_only
+)
 
 def run_azure_security_scan(payload: dict) -> dict:
     """
-    Evaluates a full deployment payload against all Azure security rules.
-    Returns a unified pass/fail scanner result object.
+    Evaluates a deployment payload against all Azure pre-flight security rules.
+    Returns a unified scanner result containing pass/fail status and warning details.
     """
-    scan_results = scan_azure_deployment(payload)
-    
-    is_passed = scan_results.get("is_safe", False)
-    warnings = scan_results.get("warnings", [])
-    
+    warnings = []
+
+    # Extract configuration blocks from payload
+    nsg_rules = payload.get("nsg_rules", [])
+    storage_config = payload.get("storage_config", {})
+
+    # Execute scanner checks
+    warnings.extend(check_nsg_ssh_rule(nsg_rules))
+    warnings.extend(check_storage_public_access(storage_config))
+    warnings.extend(check_storage_https_only(storage_config))
+
+    is_passed = len(warnings) == 0
+
     return {
-        "status": "PASS" if is_passed else "FAIL",
         "passed": is_passed,
         "total_warnings": len(warnings),
-        "warnings": warnings,
-        "provider": "Azure"
+        "warnings": warnings
     }
-
-
-if __name__ == "__main__":
-    # Test execution when run directly
-    sample_payload = {
-        "nsg_rules": [
-            {
-                "access": "allow",
-                "direction": "inbound",
-                "source_address_prefix": "*",
-                "destination_port_range": "22"
-            }
-        ],
-        "storage_config": {
-            "allow_blob_public_access": True
-        }
-    }
-    
-    result = run_azure_security_scan(sample_payload)
-    print("Scanner Engine Test Output:")
-    print(result)

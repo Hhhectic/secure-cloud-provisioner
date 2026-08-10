@@ -1,68 +1,44 @@
 """
 security_messages.py
-Central repository for plain-language security feedback messages.
-Translates technical cloud rule IDs into clear explanations and actionable remediation steps.
+Centralized dictionary store providing plain-language feedback and mitigation advice for security findings.
 """
 
-# Plain-language security advice dictionary
 SECURITY_MESSAGES = {
-    # Azure Network Rules
     "AZURE_NSG_OPEN_SSH": {
-        "title": "Unrestricted SSH Access (Port 22)",
+        "rule_id": "AZURE_NSG_OPEN_SSH",
         "severity": "HIGH",
-        "description": "Your Network Security Group allows inbound SSH traffic from any IP address on the internet (0.0.0.0/0).",
-        "impact": "Attackers can continuously attempt to guess passwords or exploit SSH vulnerabilities to gain remote control of your server.",
-        "remediation": "Restrict Port 22 access to specific, trusted IP addresses (like your home or work network)."
+        "title": "Management Port Exposed to Public Internet",
+        "description": "Your Network Security Group rule allows unrestricted inbound traffic on port 22 (SSH) or 3389 (RDP) from all IP addresses.",
+        "impact": "Exposing management ports to the open internet invites automated brute-force attacks and unauthorized access attempts.",
+        "remediation": "Restrict the source address prefix to your specific administrative IP address or subnet (e.g., 192.168.1.50/32) instead of using '*' or '0.0.0.0/0'."
     },
-    "AZURE_NSG_OPEN_RDP": {
-        "title": "Unrestricted Remote Desktop Access (Port 3389)",
-        "severity": "HIGH",
-        "description": "Port 3389 (Windows Remote Desktop) is exposed to the entire internet.",
-        "impact": "Exposing RDP directly to the internet makes your server a primary target for automated ransomware attacks.",
-        "remediation": "Close Port 3389 to public traffic or require a VPN connection to access remote desktops."
-    },
-    
-    # Azure Storage Rules
-    "AZURE_STORAGE_PUBLIC_ACCESS": {
-        "title": "Public Storage Blob Access Enabled",
-        "severity": "MEDIUM",
-        "description": "Public anonymous access is allowed on your Azure Storage Account containers.",
-        "impact": "Anyone with the link can view or download files stored inside your containers without logging in.",
-        "remediation": "Set container access permissions to Private to require authentication for all requests."
-    },
-
-    # AWS Network Rules
-    "AWS_SG_OPEN_ALL_TRAFFIC": {
-        "title": "Unrestricted Inbound Network Traffic",
+    "AZURE_STORAGE_PUBLIC_ACCESS_ENABLED": {
+        "rule_id": "AZURE_STORAGE_PUBLIC_ACCESS_ENABLED",
         "severity": "CRITICAL",
-        "description": "Your AWS Security Group permits all incoming protocols and ports from any source.",
-        "impact": "Leaves all internal server ports wide open to internet scanning and intrusion.",
-        "remediation": "Remove the all-traffic rule and explicitly permit only required ports (such as 80 or 443)."
+        "title": "Public Blob Access Allowed on Storage Account",
+        "description": "The requested storage account configuration permits anonymous public read access to containers and blobs.",
+        "impact": "Publicly accessible storage buckets are a leading cause of accidental cloud data leaks and credential exposure.",
+        "remediation": "Disable anonymous public access by setting 'allow_blob_public_access' to False."
     },
-
-    # AWS Storage Rules
-    "AWS_S3_PUBLIC_READ": {
-        "title": "Public S3 Bucket Read Access",
+    "AZURE_STORAGE_HTTPS_DISABLED": {
+        "rule_id": "AZURE_STORAGE_HTTPS_DISABLED",
         "severity": "HIGH",
-        "description": "Your AWS S3 Bucket policy allows public read access to stored objects.",
-        "impact": "Sensitive data or documents uploaded to this bucket can be indexed and exposed publicly.",
-        "remediation": "Enable AWS 'Block Public Access' settings on the S3 bucket."
+        "title": "Unencrypted HTTP Traffic Allowed on Storage Account",
+        "description": "The requested storage account configuration allows plain-text HTTP connections rather than enforcing HTTPS encryption.",
+        "impact": "Allowing unencrypted HTTP traffic exposes sensitive data in transit to potential man-in-the-middle eavesdropping or interception.",
+        "remediation": "Enforce secure transit by setting 'supports_https_traffic_only' to True."
     }
 }
 
-
-def get_security_feedback(rule_id: str) -> dict:
+def GET_SECURITY_MESSAGE(rule_id: str) -> dict:
     """
-    Retrieves plain-language security advice for a given rule ID.
-    If the rule ID is unknown, returns a generic fallback message.
+    Retrieves the plain-language message dictionary for a given rule_id with a fallback default.
     """
-    return SECURITY_MESSAGES.get(
-        rule_id,
-        {
-            "title": "Unknown Security Issue",
-            "severity": "UNKNOWN",
-            "description": f"Rule '{rule_id}' was triggered, but no plain-language advisory is available.",
-            "impact": "Potential security misconfiguration detected.",
-            "remediation": "Review cloud configuration manually against organizational standards."
-        }
-    )
+    return SECURITY_MESSAGES.get(rule_id, {
+        "rule_id": rule_id,
+        "severity": "MEDIUM",
+        "title": "Security Configuration Warning",
+        "description": "Potential security misconfiguration detected.",
+        "impact": "May increase risk exposure depending on network placement.",
+        "remediation": "Review configuration settings prior to deployment."
+    })
