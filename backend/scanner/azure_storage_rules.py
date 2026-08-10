@@ -13,6 +13,12 @@ Ported from `check_storage_public_access` and `check_storage_https_only` on
 `group/main`, which were correct and returned a shape aimed at being rendered
 on its own rather than counted alongside anything else.
 
+The container access level and shared key rules came the same way, from the
+Streamlit frontend's `preflight.py` on `streamlit-gui-for-review`. Both ask
+something the account-level settings do not: which containers anonymous access
+is actually reaching, and whether the account key is still a working
+credential.
+
 One difference from S3 is real rather than cosmetic and is called out in the
 findings: AWS has blocked public access on every new bucket since April 2023,
 so that rule cannot fire on a bucket made today. Azure has no such default -
@@ -126,6 +132,54 @@ def check_storage_account(settings):
             _target(name, "old_tls"),
         ))
 
+    # ---- Which containers are actually public --------------------------------
+    #
+    # Distinct from the account switch above, and worth saying separately. The
+    # account setting says whether a container may be opened to anonymous
+    # readers; this says which ones are. Somebody who turned the account switch
+    # on months ago needs the second answer to know what it currently exposes,
+    # and turning the switch back off is only safe once they do.
+    if "containers" not in unreadable:
+        for container in settings.get("containers") or []:
+            level = str(container.get("public_access") or "").lower()
+            if level not in ("blob", "container"):
+                continue
+
+            listing = (
+                " Anyone can also list everything in it, so the addresses do "
+                "not have to be guessed."
+                if level == "container" else
+                " The names have to be known or guessed to fetch them, which "
+                "is not a protection."
+            )
+            warnings.append(_warning(
+                CRITICAL,
+                f"Container '{container.get('name')}' in '{name}' is served to "
+                "anyone on the internet with no sign-in, and nothing records "
+                f"who read what.{listing} Whether the account permits this is a "
+                "separate setting; this container is using it.",
+                _target(name, f"public_container_{container.get('name')}"),
+            ))
+
+    # ---- Whether the account key is still a working credential ---------------
+    #
+    # Not a way in by itself - somebody still has to hold the key - which is
+    # why this is a warning rather than critical. It matters because of how the
+    # key behaves once it does leak: it never expires, it grants everything,
+    # and nothing records which person used it.
+    if settings.get("allow_shared_key_access"):
+        warnings.append(_warning(
+            WARNING,
+            f"'{name}' still accepts its account key as a credential. That key "
+            "never expires, cannot be scoped down, grants full control of "
+            "every container, and identifies nobody - so a leaked key is "
+            "indistinguishable from ordinary use in the logs. Keys reach "
+            "config files, screenshots and chat messages far more often than "
+            "anyone intends. Authorizing with Entra ID identities instead "
+            "gives each person their own access, revocable on its own.",
+            _target(name, "shared_key_allowed"),
+        ))
+
     # ---- Reachable from anywhere ---------------------------------------------
     access = str(settings.get("public_network_access") or "").lower()
     if access == "enabled":
@@ -157,5 +211,10 @@ def check_storage_spec(spec):
         "supports_https_traffic_only": secure,
         "minimum_tls_version": "TLS1_2" if secure else "TLS1_0",
         "public_network_access": "Enabled",
+        # An account being made now has no containers yet, and Azure permits
+        # the account key unless it is turned off. Saying so before creation
+        # matches what the reader would report the moment it exists.
+        "containers": [],
+        "allow_shared_key_access": True,
         "unreadable": {},
     })

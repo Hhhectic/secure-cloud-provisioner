@@ -286,6 +286,160 @@ def test_the_scanner_tolerates_an_account_that_is_not_there():
     assert check_storage_account(None) == []
 
 
+# ================================== Containers, and the account key
+#
+# Both ported from the Streamlit frontend's preflight.py. Each asks something
+# the account-level settings above do not.
+
+
+@pytest.mark.parametrize("level", ["Blob", "Container"])
+def test_a_container_serving_anonymous_readers_is_critical(level):
+    found = _find(
+        check_storage_account(_account(containers=[
+            {"name": "reports", "public_access": level}])),
+        "public_container_reports")
+    assert found["level"] == CRITICAL
+
+
+def test_a_private_container_says_nothing():
+    warnings = check_storage_account(_account(containers=[
+        {"name": "reports", "public_access": None},
+        {"name": "backups", "public_access": "None"}]))
+    assert warnings == []
+
+
+def test_container_level_access_is_reported_separately_from_the_account_switch():
+    """The account switch says a container *may* be anonymous; the container's
+    own level says one *is*. Somebody who turned the switch on months ago needs
+    the second answer to know what it is currently exposing."""
+    warnings = check_storage_account(_account(
+        allow_blob_public_access=True,
+        containers=[{"name": "reports", "public_access": "Container"}]))
+
+    assert {"public_blob_access", "public_container_reports"} <= _settings_of(warnings)
+
+
+def test_listing_the_whole_container_is_called_out_as_worse_than_reading_one():
+    listable = _find(check_storage_account(_account(containers=[
+        {"name": "reports", "public_access": "Container"}])),
+        "public_container_reports")
+    blobs_only = _find(check_storage_account(_account(containers=[
+        {"name": "reports", "public_access": "Blob"}])),
+        "public_container_reports")
+
+    assert "list everything" in listable["message"]
+    assert "list everything" not in blobs_only["message"]
+
+
+def test_containers_that_could_not_be_listed_are_not_scored_as_private():
+    """The same rule the account settings follow. An empty container list and
+    a container list the login could not read look identical, and one of them
+    is the most dangerous possible way to be wrong."""
+    warnings = check_storage_account(_account(
+        containers=[], unreadable={"containers": "the login could not list them"}))
+
+    assert _find(warnings, "unreadable_containers")["level"] == WARNING
+
+
+def test_an_account_still_accepting_its_key_is_a_warning():
+    found = _find(check_storage_account(_account(allow_shared_key_access=True)),
+                  "shared_key_allowed")
+    assert found["level"] == WARNING
+    assert "never expires" in found["message"]
+
+
+def test_an_account_requiring_entra_id_says_nothing():
+    assert "shared_key_allowed" not in _settings_of(
+        check_storage_account(_account(allow_shared_key_access=False)))
+
+
+# ==================================== Reading those two off the SDK
+#
+# Stubs shaped like the SDK's return values, for the same reason the rest of
+# this file uses them: there is no moto for Azure, and the parts worth testing
+# here are how absent values are resolved rather than how the wire looks.
+
+STORAGE_ID = (f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{GROUP}"
+              f"/providers/Microsoft.Storage/storageAccounts/demostorage")
+
+
+class _Fields:
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
+
+
+class _StubAccounts:
+    def __init__(self, account):
+        self._account = account
+
+    def get_properties(self, group, name):
+        return self._account
+
+
+class _StubContainers:
+    def __init__(self, containers, error=None):
+        self._containers = containers
+        self._error = error
+
+    def list(self, group, name):
+        if self._error:
+            raise self._error
+        return self._containers
+
+
+class _StubStorageClient:
+    def __init__(self, account=None, containers=(), container_error=None):
+        self.storage_accounts = _StubAccounts(account or _Fields(
+            name="demostorage", id=STORAGE_ID, location="eastus"))
+        self.blob_containers = _StubContainers(list(containers),
+                                               container_error)
+
+
+def test_an_unset_shared_key_setting_is_read_as_permitted():
+    """Azure documents null as equivalent to true here. Treating it as
+    unreadable instead would put an unchecked-setting warning on the commonest
+    case, in front of the findings that matter."""
+    settings = az_storage.read_account_for_scanning(
+        _StubStorageClient(), STORAGE_ID)
+
+    assert settings["allow_shared_key_access"] is True
+    assert "allow_shared_key_access" not in settings["unreadable"]
+
+
+def test_shared_key_turned_off_is_read_as_such():
+    client = _StubStorageClient(account=_Fields(
+        name="demostorage", id=STORAGE_ID, location="eastus",
+        allow_shared_key_access=False))
+
+    assert az_storage.read_account_for_scanning(
+        client, STORAGE_ID)["allow_shared_key_access"] is False
+
+
+def test_containers_are_read_with_their_access_level():
+    client = _StubStorageClient(containers=[
+        _Fields(name="reports", public_access="Container"),
+        _Fields(name="private", public_access=None)])
+
+    settings = az_storage.read_account_for_scanning(client, STORAGE_ID)
+
+    assert settings["containers"] == [
+        {"name": "reports", "public_access": "Container"},
+        {"name": "private", "public_access": None},
+    ]
+
+
+def test_a_login_that_cannot_list_containers_says_so():
+    """An empty list would be read as "no public containers", which is
+    indistinguishable from a clean result and is the wrong way to be wrong."""
+    client = _StubStorageClient(container_error=PermissionError("denied"))
+
+    settings = az_storage.read_account_for_scanning(client, STORAGE_ID)
+
+    assert settings["containers"] == []
+    assert "containers" in settings["unreadable"]
+    assert "could not list" in settings["unreadable"]["containers"]
+
+
 # ================================================ Before anything exists
 
 
@@ -305,16 +459,17 @@ def test_an_insecure_storage_form_is_flagged_before_creation():
     assert {"public_blob_access", "http_allowed"} <= _settings_of(warnings)
 
 
-def test_a_secure_storage_form_raises_nothing_worse_than_a_note():
+def test_a_secure_storage_form_still_reports_azures_own_defaults():
     """Not silent, and correctly so. An account created with every setting
-    this tool would choose is still reachable from any network, because that
-    is Azure's default and not something the form decides. Saying so before
-    creation is the point of scanning a form at all."""
+    this tool would choose is still reachable from any network and still
+    accepts its account key, because both are Azure's defaults rather than
+    something the form decides. Saying so before creation is the point of
+    scanning a form at all."""
     warnings = check_storage_spec({"name": "demo", "secure_by_default": True})
 
-    assert _settings_of(warnings) == {"reachable_from_anywhere"}
+    assert _settings_of(warnings) == {"reachable_from_anywhere",
+                                      "shared_key_allowed"}
     assert summarize(warnings)["critical"] == 0
-    assert summarize(warnings)["warning"] == 0
 
 
 # ====================================== Through the registry and the routes
