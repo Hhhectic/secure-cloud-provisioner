@@ -239,11 +239,14 @@ this tool does not scan. That is the right answer, not a miss.
 
 The figures above were measured before `scanner/role_rules.py` and
 `scanner/escalation.py` existed, when the tool reported that an instance
-profile was attached and never what it granted. Ten of the thirteen scenarios
-were deployed, scanned and destroyed again afterwards. The three not repeated
-are `s3_version_rollback_via_cfn`, deliberately skipped because its buckets
-carry Object Lock to 2099 and its teardown is the one known to leave things
-behind, plus `data_secrets` and `secrets_in_the_cloud`.
+profile was attached and never what it granted. Ten scenarios were deployed,
+scanned and destroyed again afterwards, each against a baseline of the account
+taken immediately beforehand.
+
+The first attempt at this re-run produced the wrong numbers twice over, and
+both faults are recorded under *Measuring it wrongly* below, because a
+benchmark that undercounts is indistinguishable from a tool that
+underperforms.
 
 | | Before | After |
 |---|---|---|
@@ -252,65 +255,116 @@ behind, plus `data_secrets` and `secrets_in_the_cloud`.
 | Reported something real that was not the point | 5 | **2** |
 | Correct silence, out of scope | — | 1 |
 
-Counted over the ten re-run, not the original thirteen, so the two columns are
-comparable only in shape. The change attributable to reading identities is
-narrower than the totals suggest and is worth stating exactly: **three
-scenarios went from missed to named, and one from missed to partial.** Nothing
-else moved.
+Counted over the ten re-run rather than the original thirteen, so the columns
+compare in shape and not as scores.
 
-### The three that went from missed to named
+### The six named
+
+`iam_enum_basics`, `ec2_ssrf` and `cloud_breach_s3` were named before and still
+are; the last two now say what the role reaches rather than only that the
+metadata service is open. The three that changed:
 
 **`lambda_privesc`.** Both ends, in two findings. `cg-lambdaManager-role` "can
 hand any role in this account to something it starts, and can create a
-function", and `cg-debug-role` "can do anything in this account". That is the
-scenario: assume the manager role, run a function carrying the debug role, take
-its credentials. The tool previously reported neither.
+function", and `cg-debug-role` "can do anything in this account". Assume the
+manager role, run a function carrying the debug role, take its credentials.
 
 **`iam_privesc_by_rollback`.** "`raynor` can roll a policy back to an older
-version that granted more." The escalation is one API call and changes nothing
-about the shape of the account, which is what made it invisible before.
+version that granted more." One API call, changing nothing about the shape of
+the account, which is what made it invisible before.
 
-**`iam_privesc_by_attachment`.** "`kerrigan` can hand any role in this account
-to something they start, and can start a machine." Recorded as a partial on the
-first pass, and that was a fault in the measurement rather than in the tool -
-see *Attribution by name is unsafe* below.
+**`iam_privesc_by_attachment`.** All three links, as three findings: `kerrigan`
+"can hand any role in this account to something they start, and can start a
+machine"; `cg-ec2-mighty-role` "can do anything in this account"; and the
+instance "lets software on it read the machine's AWS credentials with a simple
+web request".
 
-### The two that went from missed to partial
+### The one partial
 
-Both name the *sink* and not the route to it, and in both the sink is the
-thing worth fixing - removing it breaks the chain whichever way somebody
-arrives.
+**`iam_privesc_by_ec2`** reports `cg_ec2_role` as full administrative access on
+a running machine, with the metadata service named, and does not trace the
+three hops that lead there. Each hop is individually narrow and correctly
+declined: the user holds `sts:AssumeRole` on one named role ARN, and the role
+it reaches holds `ec2:ModifyInstanceAttribute` behind a `StringNotEquals`
+condition. Flagging a single named ARN would put a finding on most
+correctly-built infrastructure, and counting conditioned statements means
+evaluating IAM's policy language against a request that does not exist. Both
+limits are deliberate and both cost a detection here.
 
-**`iam_privesc_by_ec2`.** Reports `cg_ec2_role` as full administrative access
-attached to a running machine, with the metadata service named. It does not
-trace the three hops that lead there, and the reason is that each is
-individually narrow and correctly declined: the user holds `sts:AssumeRole` on
-one named role ARN, and the role it reaches holds `ec2:ModifyInstanceAttribute`
-behind a `StringNotEquals` condition. Flagging a single named ARN would put a
-finding on most correctly-built infrastructure, and counting conditioned
-statements means evaluating IAM's policy language against a request that does
-not exist. Both limits are deliberate and both cost a detection here.
+The sink is also the thing worth fixing: remove it and the chain breaks
+whichever way somebody arrives.
 
-**`iam_privesc_by_ec2` is the only partial.** `iam_privesc_by_attachment` was
-recorded here as the second one and that was wrong; see below.
+### The two that are still not the point
 
-### What is still missed, and why it is not a rule away
-
-**`detection_evasion`** produced six findings, none about alarms or about the
-escalation - unchanged, and for the reason already recorded: `aws/alarms.py`
-enumerates only alarms carrying this tool's own tag.
-
-**`federated_console_takeover`** produced one note about the initial user and
+**`federated_console_takeover`** produced nine findings, none critical, and
 nothing about the federation path.
 
-Both remaining misses, and both partials, share a shape the identity work does
-not reach. This tool judges one identity's policies at a time. A chain is a
-graph - who can assume what, and what that reaches in turn - and following it
-means traversing edges rather than matching statements. That is a different
-program from this one, and worth knowing before "role reachability" is read as
-"detects privilege escalation".
+**`detection_evasion`** produced twenty findings including four criticals, and
+this is where the earlier write-up was most wrong. It previously recorded
+"nothing about alarms at all", explained by `aws/alarms.py` enumerating only
+alarms carrying this tool's own tag. That explanation was false: with
+`only_ours=False` it reads every alarm in the region, and it reported both of
+this scenario's - `honeytoken_alarm` and `instance_profile_alarm` - as critical,
+because nobody had confirmed the subscription and an alarm nobody has confirmed
+reaches no one.
+
+It is still not a detection of the planted vulnerability. Those subscriptions
+are pending because the deployment was minutes old and nobody had clicked the
+confirmation link, which is a true statement about a fresh scenario rather than
+a flaw CloudGoat planted. It is worth recording anyway: the alarm rules fire
+correctly on somebody else's alarms, which is the external check
+`docs/benchmark.md` previously said they had never had.
+
+### Still true, and the reason the rest is hard
+
+Both remaining misses and the partial share a shape this work does not reach.
+This tool judges one identity's policies at a time. A chain is a graph - who can
+assume what, and what that reaches in turn - and following it means traversing
+edges rather than matching statements. That is a different program, and worth
+knowing before "role reachability" is read as "detects privilege escalation".
+
+## Measuring it wrongly
+
+Three faults, all in the harness rather than the scanner, and all of a kind
+that makes a tool look worse than it is.
+
+**Attribution by name undercounts.** The first method filtered findings by the
+`cgid` suffix, on the advice further down this document that CloudGoat "stamps
+it on every resource". It does not. `iam_privesc_by_attachment` names its user
+`kerrigan`; `detection_evasion` names its alarms `honeytoken_alarm` and
+`instance_profile_alarm` and one of its users `r_waterhouse`. Every one of those
+findings was discarded before anything was counted, and two scenarios were
+written up as failures of rules that had fired correctly.
+
+The safe method is a baseline: list the account before deploying, list it
+again afterwards, attribute the difference. That survives fixed names,
+leftovers from an earlier scenario, and anything already in the account.
+
+**A scenario that never deployed was scanned anyway.** The first harness
+checked only whether it could find a cgid in the output, so a `terraform apply`
+that failed halfway still produced a scan. `iam_privesc_by_rollback` never
+deployed on that pass - `terraform apply completed with no error code` appears
+nowhere in its log - and its findings were recorded as a detection. Check for
+that string, not for a scenario id.
+
+**It failed for a reason that looked like something else.** That scenario
+drives the `aws` CLI from a `local-exec` provisioner, four times, to create the
+older policy versions its escalation rolls back to. The CLI was not installed,
+and the resulting error names two unset Terraform variables rather than the
+missing binary.
 
 ## Two hazards worth knowing before anyone repeats this
+
+**CloudGoat fills the disk, and blames Terraform.** Every destroyed scenario is
+moved to `trash/` with its Terraform provider cache intact, about 700 MB each.
+After twenty-four scenarios that reached 20 GB, which on a machine where `/tmp`
+is a tmpfs is 20 GB of memory. The failure surfaces several scenarios later as
+`Error: Failed to install provider ... no space left on device`, which reads
+like a Terraform problem. Empty `trash/` between runs.
+
+**`detection_evasion` wants an email** in `config.yml` under `user_email`, and
+prompts if it is absent. Feeding `y` to that prompt produces a Terraform error
+about an unset variable. It subscribes the address to a real SNS topic.
 
 **`cloudgoat destroy` can report success and leave things behind.**
 `s3_version_rollback_via_cfn` left two buckets and an IAM user while printing
