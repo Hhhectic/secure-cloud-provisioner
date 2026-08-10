@@ -239,9 +239,19 @@ this tool does not scan. That is the right answer, not a miss.
 
 The figures above were measured before `scanner/role_rules.py` and
 `scanner/escalation.py` existed, when the tool reported that an instance
-profile was attached and never what it granted. Ten scenarios were deployed,
-scanned and destroyed again afterwards, each against a baseline of the account
-taken immediately beforehand.
+profile was attached and never what it granted. Twelve of the thirteen were
+deployed, scanned and destroyed again afterwards, each against a baseline of
+the account taken immediately beforehand.
+
+The thirteenth, `s3_version_rollback_via_cfn`, is deliberately not repeated.
+Its buckets carry Object Lock in GOVERNANCE mode with retention to 2099, so
+they cannot be deleted without `BypassGovernanceRetention`, which Terraform
+does not attempt. Its previous run left two IAM roles behind in this account -
+one of which could pass any role and create a function, an escalation path
+sitting unused for five hours until this tool's own role scanner found it. The
+information it would add is that public buckets are reported, which six other
+scenarios already demonstrate. Skipping it is a judgement about mess rather
+than about coverage, and is recorded as such.
 
 The first attempt at this re-run produced the wrong numbers twice over, and
 both faults are recorded under *Measuring it wrongly* below, because a
@@ -252,11 +262,11 @@ underperforms.
 |---|---|---|
 | Named the planted vulnerability | 3 | **6** |
 | Named part of the chain | 2 | **1** |
-| Reported something real that was not the point | 5 | **2** |
-| Correct silence, out of scope | — | 1 |
+| Reported something real that was not the point | 5 | **3** |
+| Correct silence, out of scope | — | 2 |
 
-Counted over the ten re-run rather than the original thirteen, so the columns
-compare in shape and not as scores.
+Counted over the twelve re-run rather than the original thirteen, so the
+columns compare in shape and not as scores.
 
 ### The six named
 
@@ -294,10 +304,16 @@ limits are deliberate and both cost a detection here.
 The sink is also the thing worth fixing: remove it and the chain breaks
 whichever way somebody arrives.
 
-### The two that are still not the point
+### The three that are still not the point
 
 **`federated_console_takeover`** produced nine findings, none critical, and
 nothing about the federation path.
+
+**`data_secrets`** produced twelve findings including three criticals - the
+metadata service open on the sensitive machine, a subnet described as private
+with a route to the internet, and that subnet handing out public addresses.
+All three are true and none is the scenario, whose secrets live in Lambda
+environment variables this tool does not read. Unchanged from the first run.
 
 **`detection_evasion`** produced twenty findings including four criticals, and
 this is where the earlier write-up was most wrong. It previously recorded
@@ -314,6 +330,15 @@ confirmation link, which is a true statement about a fresh scenario rather than
 a flaw CloudGoat planted. It is worth recording anyway: the alarm rules fire
 correctly on somebody else's alarms, which is the external check
 `docs/benchmark.md` previously said they had never had.
+
+### The two correct silences
+
+**`iam_privesc_by_key_rotation`** and **`secrets_in_the_cloud`** turn on
+Secrets Manager and DynamoDB. Neither produced a critical and neither should
+have: this tool does not scan those services and does not pretend to. Silence
+there is the right answer rather than a miss, and it is worth counting
+separately, because "found nothing" and "correctly declined to guess" look
+identical in a table.
 
 ### Still true, and the reason the rest is hard
 
