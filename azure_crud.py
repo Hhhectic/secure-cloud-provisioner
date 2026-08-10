@@ -132,7 +132,8 @@ def create_storage_account(
         "properties": {
             "supportsHttpsTrafficOnly": config.get("supports_https_traffic_only", config.get("enable_https_traffic_only", True)),
             "allowBlobPublicAccess": config.get("allow_blob_public_access", config.get("allowBlobPublicAccess", False)),
-            "minimumTlsVersion": config.get("minimum_tls_version", config.get("minimumTlsVersion", "TLS1_2"))
+            "minimumTlsVersion": config.get("minimum_tls_version", config.get("minimumTlsVersion", "TLS1_2")),
+            "allowSharedKeyAccess": config.get("allow_shared_key_access", config.get("allowSharedKeyAccess", True))
         }
     }
 
