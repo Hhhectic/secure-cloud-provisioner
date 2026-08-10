@@ -193,6 +193,43 @@ def grants_full_admin(document):
     return False
 
 
+# Wildcards that let a holder read the account's whole identity configuration.
+# Not an exhaustive list of read actions: a policy naming twenty of them
+# individually is somebody who thought about it, and one saying iam:List* is
+# somebody who did not.
+IAM_ENUMERATION_WILDCARDS = ("iam:*", "iam:get*", "iam:list*")
+
+
+def grants_account_wide_iam_read(document):
+    """Whether a policy lets its holder read every identity in the account.
+
+    Deliberately not the same question as full admin, and reported separately.
+    Somebody who can list every user, role and policy, and read the documents
+    attached to them, can find the way up without changing anything: this is
+    the first thing an attacker does with a credential and the last thing that
+    leaves a trace, because it is all reads.
+
+    Full admin is excluded rather than counted twice - CIS 1.15 already says
+    that, and saying it again under a second heading would inflate the count
+    without adding a fact.
+    """
+    for statement in _as_list(_as_document(document).get("Statement")):
+        if not isinstance(statement, dict):
+            continue
+        if statement.get("Effect") != "Allow" or statement.get("Condition"):
+            continue
+        if "*" not in _as_list(statement.get("Resource")):
+            continue
+
+        actions = [str(a).lower() for a in _as_list(statement.get("Action"))]
+        if "*" in actions:
+            continue
+        if any(a in IAM_ENUMERATION_WILDCARDS for a in actions):
+            return True
+
+    return False
+
+
 # ------------------------------------------------------------ Credential report
 
 
@@ -437,6 +474,43 @@ def read_admin_policies(iam):
     return admin
 
 
+def read_enumeration_policies(iam):
+    """Attached policies that let their holder read every identity here.
+
+    A second pass over the same policies rather than one loop producing both,
+    so read_admin_policies keeps the shape its callers expect. The cost is a
+    handful of extra GetPolicyVersion calls on an account's attached policies,
+    which is a second at most and is paid once per audit.
+    """
+    try:
+        pages = iam.get_paginator("list_policies").paginate(
+            Scope="All", OnlyAttached=True)
+        policies = [p for page in pages for p in page.get("Policies", [])]
+    except ClientError as e:
+        _denied(e, "iam:ListPolicies")
+
+    enumerating = []
+    for policy in policies:
+        try:
+            version = iam.get_policy_version(
+                PolicyArn=policy["Arn"],
+                VersionId=policy["DefaultVersionId"],
+            )["PolicyVersion"]
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "NoSuchEntity":
+                continue
+            _denied(e, "iam:GetPolicyVersion")
+
+        if grants_account_wide_iam_read(version.get("Document")):
+            enumerating.append({
+                "name": policy.get("PolicyName"),
+                "arn": policy.get("Arn"),
+                "attached_count": policy.get("AttachmentCount", 0),
+            })
+
+    return enumerating
+
+
 # ------------------------------------------------------------------------ Users
 
 
@@ -544,6 +618,8 @@ def read_account_for_scanning(iam, resource_id=None, now=None,
             lambda: read_password_policy(iam))
     attempt("users", "iam:ListUsers", lambda: read_users(iam))
     attempt("admin_policies", "iam:ListPolicies", lambda: read_admin_policies(iam))
+    attempt("enumeration_policies", "iam:ListPolicies",
+            lambda: read_enumeration_policies(iam))
     attempt("expired_certificates", "iam:ListServerCertificates",
             lambda: read_expired_certificates(iam, now=now))
     attempt("analyzer_count", "access-analyzer:ListAnalyzers",

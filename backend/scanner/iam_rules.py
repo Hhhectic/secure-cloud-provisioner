@@ -44,6 +44,8 @@ CHECK_LABELS = {
     "password_policy": "the rules for how strong passwords have to be",
     "users": "who has an account and how they get their permissions",
     "admin_policies": "whether anyone has been granted unrestricted access",
+    "enumeration_policies": "whether anyone can read every identity in the "
+                            "account",
     "expired_certificates": "whether expired certificates are still stored",
     "analyzer_count": "whether anything watches for resources shared outside "
                       "the account",
@@ -410,6 +412,31 @@ def _check_account_wide(settings, account):
     CIS 1.15, 1.16, 1.18, 1.19 and 1.21.
     """
     warnings = []
+
+    # ---- Reading every identity in the account. Uncited ----------------------
+    #
+    # Not a CIS control, and not full admin either, which is why it is
+    # separate from 1.15 below. Found by deploying CloudGoat's
+    # iam_enum_basics against a real account: the scenario turns on a user
+    # holding IAMReadOnlyAccess, this tool said nothing about it, and being
+    # able to read every user, role and policy is how somebody works out
+    # where the way up is. It leaves no trace worth the name, because it is
+    # all reads.
+    for policy in settings.get("enumeration_policies") or []:
+        holders = policy.get("attached_count", 0)
+        warnings.append(_warning(
+            WARNING,
+            f"'{policy['name']}' lets its holder read every user, role and "
+            f"permission set in this account, and {holders} "
+            f"{_plural(holders, 'identity', 'identities')} "
+            f"{_plural(holders, 'has', 'have')} it. That is less than full "
+            "control and it is the first thing somebody does with a stolen "
+            "credential: reading the whole arrangement shows them which "
+            "account to take next, and asking questions leaves nothing behind "
+            "to notice. An auditor may need this, in which case say so; a "
+            "program almost never does.",
+            _target(account, f"enumeration_{policy['name']}"),
+        ))
 
     # ---- Unrestricted access granted to anyone. CIS 1.15 ---------------------
     for policy in settings.get("admin_policies") or []:

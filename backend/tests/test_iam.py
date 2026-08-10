@@ -1043,3 +1043,72 @@ def test_fixing_an_iam_finding_over_http_is_refused(api):
                        json={"rule_id": rule_id})
     assert refused.status_code == 404
     assert "No fixable finding" in refused.json()["detail"]
+
+
+# --------------------------------------------- Reading every identity
+
+
+def test_a_policy_granting_broad_iam_read_is_recognised():
+    """Found by deploying CloudGoat's iam_enum_basics against a real account.
+
+    The scenario hands a user IAMReadOnlyAccess and this tool said nothing.
+    Being able to list every user, role and policy is how somebody works out
+    where the way up is, and it is all reads, so it leaves nothing behind.
+    """
+    for actions in (["iam:List*"], ["iam:Get*"], ["iam:*"],
+                    ["s3:GetObject", "iam:List*"]):
+        document = {"Version": "2012-10-17", "Statement": [
+            {"Effect": "Allow", "Action": actions, "Resource": "*"}]}
+        assert iam.grants_account_wide_iam_read(document), actions
+
+
+def test_full_admin_is_not_also_counted_as_enumeration():
+    """CIS 1.15 already says it. Saying it twice under a second heading
+    inflates the count without adding a fact."""
+    document = {"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Action": "*", "Resource": "*"}]}
+
+    assert iam.grants_full_admin(document)
+    assert not iam.grants_account_wide_iam_read(document)
+
+
+def test_a_policy_naming_its_iam_reads_individually_is_not_flagged():
+    """The distinction the rule is drawing.
+
+    A policy listing the reads it needs is somebody who thought about it, and
+    this tool's own audit policy is exactly that shape. One saying iam:List* is
+    somebody who did not.
+    """
+    document = {"Version": "2012-10-17", "Statement": [{
+        "Effect": "Allow",
+        "Action": ["iam:GetAccountSummary", "iam:ListUsers",
+                   "iam:GetCredentialReport", "iam:ListPolicies"],
+        "Resource": "*",
+    }]}
+    assert not iam.grants_account_wide_iam_read(document)
+
+
+def test_a_conditional_or_scoped_grant_is_not_flagged():
+    conditional = {"Version": "2012-10-17", "Statement": [{
+        "Effect": "Allow", "Action": "iam:List*", "Resource": "*",
+        "Condition": {"Bool": {"aws:MultiFactorAuthPresent": "true"}}}]}
+    assert not iam.grants_account_wide_iam_read(conditional)
+
+    scoped = {"Version": "2012-10-17", "Statement": [{
+        "Effect": "Allow", "Action": "iam:List*",
+        "Resource": "arn:aws:iam::123456789012:user/one"}]}
+    assert not iam.grants_account_wide_iam_read(scoped)
+
+
+def test_the_finding_names_the_policy_and_carries_no_citation():
+    """No published benchmark covers this, so it stands on being true."""
+    found = _find(check_account(_settings(
+        enumeration_policies=[{"name": "IAMReadOnlyAccess",
+                               "attached_count": 2}],
+    )), "enumeration_IAMReadOnlyAccess")
+
+    assert found is not None
+    assert found["level"] == WARNING
+    assert "IAMReadOnlyAccess" in found["message"]
+    assert "2 identities have it" in found["message"]
+    assert found["control"] is None
