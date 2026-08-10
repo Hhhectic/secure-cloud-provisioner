@@ -12,7 +12,8 @@
 
 const API = "..";
 
-const state = { types: [], type: null, region: "us-east-1", options: {} };
+const state = { types: [], type: null, region: "us-east-1", options: {},
+                createInputs: null };
 
 // Regions this tool is plausibly pointed at. Not fetched: DescribeRegions is
 // an extra call and an account's enabled regions rarely surprise anyone.
@@ -438,6 +439,11 @@ async function buildCreateForm() {
   const box = $("create-body");
   box.replaceChildren();
 
+  // Nothing to keep watching once the form is gone, and leaving the previous
+  // type's fields here would have the live check reading boxes that are no
+  // longer on the page.
+  state.createInputs = null;
+
   if (known.read_only) {
     box.append(text("p",
       `${known.label} is audited by this tool, not created by it. There is ` +
@@ -526,6 +532,15 @@ async function buildCreateForm() {
   }
 
   if (state.type === "key-pair") box.append(keygenControls(inputs));
+
+  // Above the buttons on purpose: the consequences of what has been typed are
+  // read on the way to pressing Create, not after it.
+  const live = document.createElement("div");
+  live.id = "create-live";
+  live.className = "live";
+  box.append(live);
+
+  state.createInputs = inputs;
 
   const row = document.createElement("div");
   row.className = "row";
@@ -717,6 +732,91 @@ function collectSpec(inputs) {
     if (v) spec[name] = v;
   }
   return spec;
+}
+
+/* Live pre-flight, on the endpoint that was built for it.
+
+   /check makes no cloud calls - every check_spec in the registry is pure - so
+   asking again on every edit costs a local round trip and nothing else. The
+   route's own docstring invites exactly this. Until now the form only asked
+   when somebody pressed a button, which meant an open rule or a bucket with
+   its protections switched off stayed invisible until they thought to look.
+   The point of the tool is that they should not have to think to look.
+
+   The "Check first" button stays. It writes to #create-out and that output
+   persists; this writes to #create-live, which is always about what the form
+   says at this moment and is cleared the instant the form stops being valid. */
+const LIVE_CHECK_DELAY_MS = 400;
+
+let liveTimer = null;
+let liveSeq = 0;
+
+function scheduleLiveCheck() {
+  clearTimeout(liveTimer);
+  liveTimer = setTimeout(runLiveCheck, LIVE_CHECK_DELAY_MS);
+}
+
+async function runLiveCheck() {
+  const box = $("create-live");
+  const inputs = state.createInputs;
+  if (!box || !inputs) return;
+
+  const spec = collectSpec(inputs);
+
+  // Not an error worth showing. Somebody who has typed two characters of a
+  // name is mid-thought, and a red box telling them the name is missing is
+  // the tool nagging rather than helping.
+  if (!spec.name) {
+    box.replaceChildren();
+    return;
+  }
+
+  // Two guards against showing an answer to a question nobody asked any more.
+  // Responses can arrive out of order, so a slower earlier one must not
+  // overwrite a faster later one; and the type can be switched while a request
+  // is in flight, which would render one resource's findings under another's
+  // form.
+  const seq = ++liveSeq;
+  const askedAbout = state.type;
+
+  let body;
+  try {
+    body = await api(`/resources/${state.type}/check`, {
+      method: "POST",
+      body: JSON.stringify(spec),
+    });
+  } catch {
+    // Quietly. Half a CIDR is a rejected request, and typing the other half
+    // fixes it; a banner for every intermediate keystroke would train people
+    // to ignore the area where the real findings appear.
+    if (seq === liveSeq) box.replaceChildren();
+    return;
+  }
+
+  if (seq !== liveSeq || state.type !== askedAbout) return;
+
+  box.replaceChildren();
+  const counts = body.counts || {};
+  const warnings = body.warnings || [];
+
+  if (!warnings.length) {
+    box.append(text("p", "Nothing flagged so far.", "live-clean"));
+    return;
+  }
+
+  box.append(text("p",
+    `As it stands: ${counts.critical || 0} critical, ` +
+    `${counts.warning || 0} warning, ${counts.info || 0} informational. ` +
+    "Nothing has been created.", "live-head"));
+
+  for (const w of warnings) {
+    // The fix button is dropped here even where the finding carries one.
+    // Fixing acts on a resource by id, and this one does not exist yet - the
+    // remedy for a bad setting in a form is to change the form. The Azure
+    // spec checks do return a rule_id, so without this the preview would
+    // offer to repair something that was never made.
+    box.append(renderFinding({ ...w, fix: null }, null));
+  }
 }
 
 async function submitSpec(inputs, dryRun, acceptRisk = false) {
@@ -1208,6 +1308,13 @@ async function removeBlueprintKeys(keys, out) {
 const regionSelect = $("region");
 for (const r of REGIONS) regionSelect.append(new Option(r, r));
 regionSelect.value = state.region;
+
+// Attached once to the container rather than to each field, so it catches rule
+// rows added later and cannot accumulate a second listener every time the form
+// is rebuilt. Which fields exist is read from state at the time it fires.
+for (const event of ["input", "change"]) {
+  $("create-body").addEventListener(event, scheduleLiveCheck);
+}
 
 $("modal-cancel").onclick = closeModal;
 $("refresh").onclick = loadList;

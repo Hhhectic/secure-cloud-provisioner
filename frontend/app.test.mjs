@@ -47,6 +47,11 @@ const STUB_TYPES = [
     read_only: true, only_ours_label: null },
   { key: "alarm", label: "Alarm", id_label: "Alarm name",
     read_only: false, only_ours_label: "only ones this tool made" },
+  // The second cloud, which the page has never been asked about. It reaches
+  // these through the registry like anything else, and that is the claim
+  // worth testing: nothing in app.js knows the word Azure.
+  { key: "azure-storage", label: "Azure storage account",
+    id_label: "Account name", read_only: true, only_ours_label: null },
 ];
 
 
@@ -90,6 +95,26 @@ function fakeApi(overrides = {}) {
       },
     }),
     "/resources/alarm": () => ({ resource_type: "alarm", resources: [] }),
+    "/resources/azure-storage": () => ({
+      resource_type: "azure-storage",
+      resources: [{ id: "demostorage", name: "demostorage" }],
+    }),
+    // Shaped like what scanner/azure_storage_rules.py actually returns: no
+    // control, because CIS AWS Foundations does not govern Azure.
+    "/resources/azure-storage/demostorage": () => ({
+      resource_type: "azure-storage", resource_id: "demostorage", settings: {},
+      warnings: [{
+        level: "critical",
+        message: "Containers in 'demostorage' can be opened to anonymous readers.",
+        rule_id: "demostorage:public_blob_access",
+        resource_id: "demostorage",
+        rule: { setting: "public_blob_access" },
+        fix: { action: "disable_public_blob_access",
+               label: "Stop containers being readable anonymously" },
+        control: null,
+      }],
+      counts: { critical: 1, warning: 0, info: 0 },
+    }),
   };
 
   async function fetchStub(url, options = {}) {
@@ -506,6 +531,112 @@ check(detail.textContent.includes("a website, on purpose"),
       "and why");
 check(detail.textContent.includes("1 acknowledged"),
       "and the tally says so, rather than quietly subtracting it");
+
+// -------------------------------------------------- the second cloud
+
+/* The page has never been asked about Azure. It reaches it through the
+ * registry like anything else, which is the claim worth protecting: nothing
+ * in app.js contains the word Azure, so a tab, a scan and a finding for a
+ * storage account are all handled by code written for security groups. */
+
+console.log("\nAzure, through the same routes");
+console.log("------------------------------");
+
+const azTab = [...$(document, "types").children]
+  .find((b) => b.textContent.includes("Azure storage account"));
+
+check(Boolean(azTab), "a tab appears for a type from the second cloud");
+check(azTab.textContent.includes("audit only"),
+      "labelled audit only, because Azure is read-only here");
+
+await azTab.click();
+await new Promise((r) => setTimeout(r, 60));
+
+const azCreate = $(document, "create-body");
+check(azCreate.textContent.includes("audited by this tool, not created by it"),
+      "choosing it explains why there is nothing to fill in");
+check(azCreate.querySelectorAll("input, select").length === 0,
+      "and offers no form, rather than one that would 405");
+check(!$(document, "create-live"),
+      "with no live check either, there being nothing to check");
+
+const azRow = document.querySelector("#list tr.clickable");
+if (check(Boolean(azRow), "the account is listed")) {
+  await azRow.click();
+  await new Promise((r) => setTimeout(r, 60));
+
+  const azFinding = $(document, "detail-body").querySelector(".finding");
+  check(Boolean(azFinding) && azFinding.classList.contains("critical"),
+        "and its finding is rendered at its own severity");
+  check(!azFinding.querySelector(".cite"),
+        "with no citation, because CIS AWS Foundations does not reach Azure");
+}
+
+// ------------------------------------------------ the live pre-flight
+
+/* The check route's own docstring says the form may call it on every
+ * keystroke. Until it did, a setting stayed dangerous-but-invisible until
+ * somebody thought to press a button, and the whole point is that they
+ * should not have to think to press it. */
+
+console.log("\nThe live pre-flight");
+console.log("-------------------");
+
+const liveWarning = {
+  level: "critical",
+  message: "Port 22 is reachable from the entire internet.",
+  rule_id: "sgr-1",
+  resource_id: null,
+  rule: { setting: "open_22" },
+  fix: { action: "narrow_to_my_ip", label: "Limit this to my current IP address" },
+  control: null,
+};
+
+const { document: liveDoc, sent: liveSent } = await boot({
+  "/resources/security-group/check": () => ({
+    resource_type: "security-group",
+    warnings: [liveWarning],
+    counts: { critical: 1, warning: 0, info: 0 },
+  }),
+});
+
+const liveName = $(liveDoc, "create-body")
+  .querySelector(".field input:not([type])");
+
+const checksSent = () =>
+  liveSent.filter((r) => r.path.endsWith("/check")).length;
+
+check(checksSent() === 0, "nothing is asked before anything is typed");
+
+liveName.value = "demo";
+liveName.dispatchEvent(new liveDoc.defaultView.Event("input", { bubbles: true }));
+await new Promise((r) => setTimeout(r, 600));
+
+check(checksSent() === 1, "typing a name asks the check route, once");
+
+const livePanel = $(liveDoc, "create-live");
+check(livePanel.textContent.includes("1 critical"),
+      "and the tally appears without anything being pressed");
+check(livePanel.textContent.includes("Nothing has been created"),
+      "saying plainly that nothing was made");
+check(livePanel.querySelectorAll(".finding").length === 1,
+      "with the finding itself rendered");
+
+// The finding carries a fix and a rule_id, which is what the detail view
+// needs to offer a button. Here there is nothing to fix: the remedy for a bad
+// setting in a form is to change the form, and a Fix button would act on a
+// resource that does not exist.
+check(livePanel.querySelectorAll("button").length === 0,
+      "and no fix button, because the resource does not exist yet");
+
+liveName.value = "";
+liveName.dispatchEvent(new liveDoc.defaultView.Event("input", { bubbles: true }));
+await new Promise((r) => setTimeout(r, 600));
+
+check(livePanel.children.length === 0,
+      "emptying the name clears the panel rather than leaving a stale answer");
+check(checksSent() === 1,
+      "and asks nothing, a half-typed form being mid-thought rather than wrong");
 
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");
 process.exit(failures ? 1 : 0);
