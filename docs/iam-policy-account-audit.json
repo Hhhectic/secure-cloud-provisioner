@@ -36,6 +36,18 @@
         "iam:ListInstanceProfilesForRole"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "ReadWhatReachesAUserSoTheOtherEndOfAChainIsVisible",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetUserPolicy",
+        "iam:ListGroups",
+        "iam:ListGroupPolicies",
+        "iam:GetGroupPolicy",
+        "iam:ListAttachedGroupPolicies"
+      ],
+      "Resource": "*"
     }
   ]
 }

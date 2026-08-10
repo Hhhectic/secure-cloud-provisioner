@@ -31,8 +31,6 @@ CIS has no control covering privilege-escalation paths, and inventing one would
 be exactly the fabricated citation `scanner/controls.py` warns about.
 """
 
-from fnmatch import fnmatchcase
-
 from scanner.common import (
     CRITICAL,
     WARNING,
@@ -44,90 +42,18 @@ from scanner.common import (
     worst_level,
     print_warnings,
 )
-
-EVERY_RESOURCE = "*"
-
-# Actions that hand an existing role to something that will run with it. On
-# their own they are inert; paired with a way to start that something, they are
-# the most common escalation in AWS.
-PASS_ROLE = "iam:PassRole"
-
-# Things that can be started carrying a passed role. Each is a real escalation
-# path with a CloudGoat scenario behind it.
-COMPUTE_THAT_CARRIES_A_ROLE = {
-    "ec2:RunInstances": "start a machine",
-    "lambda:CreateFunction": "create a function",
-    "glue:CreateDevEndpoint": "create a development endpoint",
-    "sagemaker:CreateNotebookInstance": "create a notebook",
-    "cloudformation:CreateStack": "create a stack",
-    "datapipeline:CreatePipeline": "create a pipeline",
-}
-
-# Ways to grant yourself more without passing a role anywhere. Each entry is
-# (actions that together do it, what the holder ends up able to do).
-ESCALATION_PATHS = [
-    (
-        ("iam:AttachUserPolicy",),
-        "attach any policy, including AdministratorAccess, to a user",
-    ),
-    (
-        ("iam:AttachRolePolicy",),
-        "attach any policy, including AdministratorAccess, to a role",
-    ),
-    (
-        ("iam:AttachGroupPolicy",),
-        "attach any policy, including AdministratorAccess, to a group",
-    ),
-    (
-        ("iam:PutUserPolicy",),
-        "write a new policy directly onto a user",
-    ),
-    (
-        ("iam:PutRolePolicy",),
-        "write a new policy directly onto a role",
-    ),
-    (
-        ("iam:PutGroupPolicy",),
-        "write a new policy directly onto a group",
-    ),
-    (
-        ("iam:CreatePolicyVersion",),
-        "rewrite a policy that is already attached to somebody, without "
-        "attaching anything",
-    ),
-    (
-        ("iam:SetDefaultPolicyVersion",),
-        "roll a policy back to an older version that granted more",
-    ),
-    (
-        ("iam:UpdateAssumeRolePolicy",),
-        "change who is allowed to assume a role, including making it "
-        "assumable by themselves",
-    ),
-    (
-        ("iam:CreateAccessKey",),
-        "create a permanent access key for another user and use it as them",
-    ),
-    (
-        ("iam:CreateLoginProfile",),
-        "set a console password on a user who had none and sign in as them",
-    ),
-    (
-        ("iam:UpdateLoginProfile",),
-        "change another user's console password and sign in as them",
-    ),
-    (
-        ("iam:AddUserToGroup",),
-        "add themselves to a group that has more permissions",
-    ),
-]
-
-# Reading everything is its own finding, reported by iam_rules for policies.
-# Repeated here because a role is where it usually sits.
-IAM_ENUMERATION_WILDCARDS = ("iam:*", "iam:get*", "iam:list*")
-
-# Wildcards that read the account's data rather than its identities.
-DATA_READ_WILDCARDS = ("s3:*", "s3:get*", "s3:list*")
+from scanner.escalation import (
+    COMPUTE_THAT_CARRIES_A_ROLE,
+    DATA_READ_WILDCARDS,
+    ESCALATION_PATHS,
+    EVERY_RESOURCE,
+    IAM_ENUMERATION_WILDCARDS,
+    PASS_ROLE,
+    allow_statements as _allow_statements,
+    as_list as _as_list,
+    permits as _permits,
+    statements_from as _granted_actions,
+)
 
 
 def _joined(*parts):
@@ -147,69 +73,6 @@ def _target(role_name, setting):
         "resource_id": role_name,
         "setting": setting,
     }
-
-
-def _as_list(value):
-    if value is None:
-        return []
-    return value if isinstance(value, list) else [value]
-
-
-def _allow_statements(document):
-    """Unconditional Allow statements from one policy document.
-
-    NotAction is skipped rather than inverted. A NotAction statement can be
-    equivalent to a very broad Allow, and working out which requires knowing
-    every action AWS has - a list that changes weekly and that being wrong
-    about produces confident nonsense.
-    """
-    if not isinstance(document, dict):
-        return []
-
-    out = []
-    for statement in _as_list(document.get("Statement")):
-        if not isinstance(statement, dict):
-            continue
-        if statement.get("Effect") != "Allow" or statement.get("Condition"):
-            continue
-        if statement.get("NotAction") or statement.get("NotResource"):
-            continue
-        out.append(statement)
-    return out
-
-
-def _permits(statements, wanted_action):
-    """Whether these statements allow an action on every resource.
-
-    Matching is by IAM's own wildcard rules, so `iam:*` permits
-    `iam:PassRole` and `*` permits everything. Resource is required to be `*`:
-    a policy that can pass one named role is a deliberate arrangement, and
-    treating it the same as one that can pass any role would flag most
-    correctly-built infrastructure.
-    """
-    wanted = wanted_action.lower()
-
-    for statement in statements:
-        if EVERY_RESOURCE not in _as_list(statement.get("Resource")):
-            continue
-        for action in _as_list(statement.get("Action")):
-            if fnmatchcase(wanted, str(action).lower()):
-                return True
-    return False
-
-
-def _granted_actions(policies):
-    """Every unconditional Allow statement across every readable policy.
-
-    Flattened deliberately. What a role can reach is the union of what its
-    policies permit, and an escalation built from one action in an inline
-    policy and another in an attached one is exactly as effective as one built
-    from a single statement.
-    """
-    statements = []
-    for policy in policies or []:
-        statements.extend(_allow_statements(policy.get("document")))
-    return statements
 
 
 def check_role(settings):

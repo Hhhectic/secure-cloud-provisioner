@@ -544,9 +544,108 @@ def read_users(iam):
             "attached_policies": [p["PolicyName"] for p in attached],
             "inline_policies": list(inline),
             "group_count": len(groups),
+            "group_names": [g["GroupName"] for g in groups],
+            # What those policies actually permit, rather than only their
+            # names. Knowing a user has an inline policy and not what is in it
+            # is the same first-link-only blindness that roles had: it was
+            # visible on CloudGoat's iam_privesc_by_ec2, where the escalation
+            # sat in a user's inline policy the tool could name and not read.
+            "policies": _documents_for_user(iam, name, inline, attached,
+                                            groups),
         })
 
     return users
+
+
+def _documents_for_user(iam, name, inline_names, attached, groups):
+    """Every policy document that reaches this user, from all three routes.
+
+    Inline, attached, and inherited through a group are gathered into one list
+    because the distinction matters to whoever maintains the account and not
+    at all to what the user can do. Permissions arriving through a group are
+    the recommended arrangement, so an escalation assembled there is if
+    anything more likely than one pinned to a person.
+
+    A document that cannot be read is kept with document=None rather than
+    dropped, so the scanner reports an unread policy instead of scoring it
+    harmless.
+    """
+    policies = []
+
+    for policy_name in inline_names:
+        policies.append({
+            "name": policy_name, "source": "inline",
+            "document": _user_inline_document(iam, name, policy_name),
+        })
+
+    for policy in attached:
+        policies.append({
+            "name": policy["PolicyName"], "source": "attached",
+            "document": managed_policy_document(iam, policy["PolicyArn"]),
+        })
+
+    for group in groups:
+        policies.extend(_documents_for_group(iam, group["GroupName"]))
+
+    return policies
+
+
+def _user_inline_document(iam, user_name, policy_name):
+    try:
+        return iam.get_user_policy(
+            UserName=user_name, PolicyName=policy_name)["PolicyDocument"]
+    except ClientError:
+        return None
+
+
+def _documents_for_group(iam, group_name):
+    """Policies a group hands to everybody in it."""
+    policies = []
+
+    try:
+        inline = iam.list_group_policies(GroupName=group_name)["PolicyNames"]
+    except ClientError:
+        inline = []
+
+    for policy_name in inline:
+        try:
+            document = iam.get_group_policy(
+                GroupName=group_name, PolicyName=policy_name)["PolicyDocument"]
+        except ClientError:
+            document = None
+        policies.append({"name": f"{group_name}/{policy_name}",
+                         "source": "group", "document": document})
+
+    try:
+        attached = iam.list_attached_group_policies(
+            GroupName=group_name)["AttachedPolicies"]
+    except ClientError:
+        attached = []
+
+    for policy in attached:
+        policies.append({
+            "name": f"{group_name}/{policy['PolicyName']}",
+            "source": "group",
+            "document": managed_policy_document(iam, policy["PolicyArn"]),
+        })
+
+    return policies
+
+
+def managed_policy_document(iam, policy_arn):
+    """The current version of a managed policy, or None if it cannot be read.
+
+    None rather than an empty document: an empty one reads as "grants
+    nothing", which is the reassuring answer and would be a lie.
+    """
+    try:
+        version_id = iam.get_policy(PolicyArn=policy_arn)["Policy"][
+            "DefaultVersionId"]
+        return iam.get_policy_version(
+            PolicyArn=policy_arn, VersionId=version_id
+        )["PolicyVersion"]["Document"]
+    except ClientError:
+        return None
 
 
 # ---------------------------------------------------------------- The whole read

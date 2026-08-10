@@ -20,6 +20,13 @@ without a second step. Everything else is a warning or a note, because a
 scanner that calls twenty things critical has said nothing about any of them.
 """
 
+from scanner.escalation import (
+    direct_escalations,
+    grants_everything,
+    reads_every_identity,
+    role_passing_paths,
+    statements_from,
+)
 from scanner.common import (
     CRITICAL,
     WARNING,
@@ -266,6 +273,9 @@ def _check_users(settings, account):
     for user in users:
         name = user.get("user_name", "an unnamed user")
 
+        # ---- Where this person could get to from here ------------------------
+        warnings.extend(_check_escalation(user, name, account))
+
         # ---- MFA on console logins. CIS 1.9 ----------------------------------
         if user.get("password_enabled") and not user.get("mfa_enabled"):
             warnings.append(_warning(
@@ -331,6 +341,98 @@ def _check_users(settings, account):
                 _target(account, "direct_permissions", user=name),
                 control="PERMISSIONS_VIA_GROUPS",
             ))
+
+    return warnings
+
+
+def _check_escalation(user, name, account):
+    """Whether this person could end up with more than they were given.
+
+    The same engine the role scanner uses, pointed at a user. Roles were built
+    first because the benchmark said "role to something", and re-running one
+    CloudGoat scenario afterwards showed the other end of every chain: in
+    `iam_privesc_by_ec2` the tool named the AdministratorAccess role sitting on
+    a machine and said nothing about the user who could put it there, because
+    the escalation was in that user's inline policy and nothing read it.
+
+    Policies inherited through a group count. Arriving that way is the
+    recommended arrangement, so an escalation assembled there is if anything
+    more likely than one pinned to a person.
+    """
+    policies = user.get("policies")
+    if not policies:
+        return []
+
+    warnings = []
+
+    unread = [p["name"] for p in policies if p.get("document") is None]
+    if unread:
+        warnings.append(_warning(
+            WARNING,
+            f"{len(unread)} of the policies reaching {name} could not be read "
+            f"({', '.join(unread[:3])}), so what they permit is unknown. They "
+            "are not counted as harmless below.",
+            _target(account, "unreadable_policies", user=name),
+        ))
+
+    statements = statements_from(policies)
+    if not statements:
+        return warnings
+
+    if grants_everything(statements):
+        warnings.append(_warning(
+            CRITICAL,
+            f"{name} can do anything in this account. Whoever holds these "
+            "credentials can grant themselves more, read everything, and "
+            "delete the record of having done so. Give a person the "
+            "permissions their work needs; the ones nobody uses are the ones "
+            "an attacker gets for free.",
+            _target(account, "user_full_admin", user=name),
+            control="NO_FULL_ADMIN_POLICY",
+        ))
+        # Full admin implies every path below. Listing them too would report
+        # one fact fourteen times.
+        return warnings
+
+    launchers = role_passing_paths(statements)
+    if launchers:
+        warnings.append(_warning(
+            CRITICAL,
+            f"{name} can hand any role in this account to something they "
+            f"start, and can {launchers[0]}. That is a way up: pick the most "
+            "powerful role in the account, start something carrying it, and "
+            "take its credentials from the inside. Neither permission looks "
+            "alarming on its own, which is what makes the pair worth naming.",
+            _target(account, "user_pass_role_to_compute", user=name),
+        ))
+    elif launchers is not None:
+        warnings.append(_warning(
+            WARNING,
+            f"{name} can hand any role in this account to a service. On its "
+            "own that grants nothing, but paired with permission to start "
+            "almost anything it becomes a way to acquire a more powerful "
+            "role. Limit which roles they may pass.",
+            _target(account, "user_pass_any_role", user=name),
+        ))
+
+    for key, consequence in direct_escalations(statements):
+        warnings.append(_warning(
+            CRITICAL,
+            f"{name} can {consequence}. This is a way for them to end up with "
+            "more than they were given, without anything looking unusual: the "
+            "permission itself is ordinary administration, and the escalation "
+            "is what it allows rather than what it is.",
+            _target(account, f"user_escalation_{key}", user=name),
+        ))
+
+    if reads_every_identity(statements):
+        warnings.append(_warning(
+            WARNING,
+            f"{name} can read every user, role and policy in this account. "
+            "That is how somebody who has got in works out where to go next, "
+            "and it leaves almost no trace because it is all reads.",
+            _target(account, "user_reads_every_identity", user=name),
+        ))
 
     return warnings
 

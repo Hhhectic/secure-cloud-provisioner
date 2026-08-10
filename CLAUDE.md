@@ -337,6 +337,18 @@ policy that names its reads individually is not flagged — that is somebody who
 thought about it, and it is the shape of this tool's own audit policy. Found
 by running CloudGoat against a real account; see `docs/benchmark.md`.
 
+**Escalation is one engine, pointed at three identity kinds.**
+`scanner/escalation.py` holds the matching and knows nothing about what an
+identity is; `role_rules` and `iam_rules` both ask it. Roles were built first
+because the benchmark said "role to something", and re-running one CloudGoat
+scenario immediately showed the other end: in `iam_privesc_by_ec2` the tool
+named the `AdministratorAccess` role sitting on a machine and said nothing
+about the *user* who could put it there, because the escalation was in that
+user's inline policy and nothing read it. A user's policies now include the
+ones inherited through a group, because arriving that way is the recommended
+arrangement and an escalation assembled there is if anything likelier than one
+pinned to a person.
+
 **A role is judged by its corridor, not its door alone.** Every other scanner
 here judges a setting; `scanner/role_rules.py` judges a route, and the danger
 is rarely one permission. `iam:PassRole` grants nothing and `ec2:RunInstances`

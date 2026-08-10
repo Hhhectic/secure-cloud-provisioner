@@ -1112,3 +1112,109 @@ def test_the_finding_names_the_policy_and_carries_no_citation():
     assert "IAMReadOnlyAccess" in found["message"]
     assert "2 identities have it" in found["message"]
     assert found["control"] is None
+
+
+# ------------------------------------------- Where a person could get to
+
+# The other end of every CloudGoat chain. Roles were built first because the
+# benchmark said "role to something"; re-running iam_privesc_by_ec2 afterwards
+# showed the tool naming the AdministratorAccess role on a machine and saying
+# nothing about the user who could put it there, because the escalation lived
+# in that user's inline policy and nothing read it.
+
+
+def _doc(*statements):
+    return {"Version": "2012-10-17", "Statement": list(statements)}
+
+
+def _grant(actions, resource="*", **extra):
+    s = {"Effect": "Allow", "Action": actions, "Resource": resource}
+    s.update(extra)
+    return s
+
+
+def _user_with(*documents, source="inline", **overrides):
+    return _user(policies=[
+        {"name": f"p{i}", "source": source, "document": d}
+        for i, d in enumerate(documents)], **overrides)
+
+
+def test_a_user_who_can_pass_a_role_and_start_a_machine_is_named():
+    """iam_privesc_by_ec2's actor, in the shape the scenario deploys it."""
+    found = _find(check_account(_settings(users=[_user_with(
+        _doc(_grant(["iam:PassRole", "ec2:RunInstances"])))])),
+        "user_pass_role_to_compute")
+
+    assert found["level"] == CRITICAL
+    assert "start a machine" in found["message"]
+    assert found["rule"]["user"] == "alice"
+
+
+def test_a_user_who_can_attach_a_policy_is_named():
+    found = _find(check_account(_settings(users=[_user_with(
+        _doc(_grant("iam:AttachUserPolicy")))])),
+        "user_escalation_attachuserpolicy")
+    assert found["level"] == CRITICAL
+
+
+def test_a_user_with_full_admin_is_named_and_cites_1_15():
+    found = _find(check_account(_settings(users=[_user_with(
+        _doc(_grant("*")))])), "user_full_admin")
+    assert found["level"] == CRITICAL
+    assert found["control"]["id"] == "1.15"
+
+
+def test_full_admin_does_not_also_list_every_path_it_implies():
+    warnings = [w for w in check_account(_settings(users=[_user_with(
+        _doc(_grant("*")))])) if w["rule"]["setting"].startswith("user_")]
+    assert {w["rule"]["setting"] for w in warnings} == {"user_full_admin"}
+
+
+def test_an_escalation_inherited_through_a_group_still_counts():
+    """Permissions arriving through a group are the recommended arrangement,
+    so an escalation assembled there is if anything more likely than one
+    pinned to a person."""
+    user = _user(policies=[
+        {"name": "engineers/launch", "source": "group",
+         "document": _doc(_grant(["iam:PassRole", "ec2:RunInstances"]))}])
+    assert "user_pass_role_to_compute" in _settings_of(
+        check_account(_settings(users=[user])))
+
+
+def test_an_escalation_split_between_a_group_and_an_inline_policy_counts():
+    user = _user(policies=[
+        {"name": "engineers/pass", "source": "group",
+         "document": _doc(_grant("iam:PassRole"))},
+        {"name": "own", "source": "inline",
+         "document": _doc(_grant("ec2:RunInstances"))}])
+    assert "user_pass_role_to_compute" in _settings_of(
+        check_account(_settings(users=[user])))
+
+
+def test_a_conditioned_grant_is_not_counted_for_users_either():
+    assert "user_pass_role_to_compute" not in _settings_of(
+        check_account(_settings(users=[_user_with(_doc(_grant(
+            ["iam:PassRole", "ec2:RunInstances"],
+            Condition={"StringEquals": {"aws:RequestedRegion": "eu-west-2"}})))])))
+
+
+def test_a_user_whose_policy_could_not_be_read_is_not_scored_harmless():
+    user = _user(policies=[{"name": "opaque", "source": "attached",
+                            "document": None}])
+    found = _find(check_account(_settings(users=[user])),
+                  "unreadable_policies")
+    assert found["level"] == WARNING
+    assert "not counted as harmless" in found["message"]
+
+
+def test_a_user_with_no_readable_policies_produces_no_escalation_findings():
+    """The old behaviour, and the correct one when nothing can be read: this
+    tool must not invent a finding from an absence."""
+    assert not [w for w in check_account(_settings(users=[_user()]))
+                if w["rule"]["setting"].startswith("user_escalation")]
+
+
+def test_an_ordinary_user_policy_says_nothing():
+    assert not [w for w in check_account(_settings(users=[_user_with(
+        _doc(_grant("s3:GetObject", resource="arn:aws:s3:::one/*")))]))
+        if w["rule"]["setting"].startswith("user_")]
