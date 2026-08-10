@@ -247,17 +247,18 @@ behind, plus `data_secrets` and `secrets_in_the_cloud`.
 
 | | Before | After |
 |---|---|---|
-| Named the planted vulnerability | 3 | **5** |
-| Named part of the chain | 2 | **2** |
+| Named the planted vulnerability | 3 | **6** |
+| Named part of the chain | 2 | **1** |
 | Reported something real that was not the point | 5 | **2** |
 | Correct silence, out of scope | — | 1 |
 
 Counted over the ten re-run, not the original thirteen, so the two columns are
 comparable only in shape. The change attributable to reading identities is
-narrower than the totals suggest and is worth stating exactly: **two scenarios
-went from missed to named, and two from missed to partial.** Nothing else moved.
+narrower than the totals suggest and is worth stating exactly: **three
+scenarios went from missed to named, and one from missed to partial.** Nothing
+else moved.
 
-### The two that went from missed to named
+### The three that went from missed to named
 
 **`lambda_privesc`.** Both ends, in two findings. `cg-lambdaManager-role` "can
 hand any role in this account to something it starts, and can create a
@@ -268,6 +269,11 @@ its credentials. The tool previously reported neither.
 **`iam_privesc_by_rollback`.** "`raynor` can roll a policy back to an older
 version that granted more." The escalation is one API call and changes nothing
 about the shape of the account, which is what made it invisible before.
+
+**`iam_privesc_by_attachment`.** "`kerrigan` can hand any role in this account
+to something they start, and can start a machine." Recorded as a partial on the
+first pass, and that was a fault in the measurement rather than in the tool -
+see *Attribution by name is unsafe* below.
 
 ### The two that went from missed to partial
 
@@ -285,10 +291,8 @@ finding on most correctly-built infrastructure, and counting conditioned
 statements means evaluating IAM's policy language against a request that does
 not exist. Both limits are deliberate and both cost a detection here.
 
-**`iam_privesc_by_attachment`.** Reports `cg-ec2-mighty-role` as full
-administrative access, and does not name the actor's ability to attach a policy
-to a role. Why the attach permission did not match was not established before
-the scenario was destroyed; answering it needs a redeploy rather than a guess.
+**`iam_privesc_by_ec2` is the only partial.** `iam_privesc_by_attachment` was
+recorded here as the second one and that was wrong; see below.
 
 ### What is still missed, and why it is not a rule away
 
@@ -330,9 +334,26 @@ directory, and `config.yml` must be a YAML list - `- default-profile: cloudgoat`
 
 **Those leftovers then contaminate every later scan.** Scenarios run after it
 picked up the orphaned buckets as their own findings, which is why raw
-per-scenario counts from a sequential run cannot be trusted. Attribute
-findings by the `cgid` suffix CloudGoat stamps on every resource - and do not
-attribute by the *most common* suffix, because leftovers outnumber a
-scenario's own resources and the contamination wins.
+per-scenario counts from a sequential run cannot be trusted.
+
+**Attribution by name is unsafe, and this document previously said to do it.**
+The advice was to attribute findings by the `cgid` suffix "CloudGoat stamps on
+every resource". It does not. `iam_privesc_by_attachment` creates a user called
+`kerrigan`, with no suffix at all, and a scan filtered on `cgid` therefore
+never counted the finding naming that user - which is the whole escalation. It
+was written up as a partial detection and a possible gap in the scanner, and it
+was neither: the rule fired correctly and the measurement threw the answer
+away.
+
+The safe method is a baseline. List the identities and resources before
+deploying, list them again afterwards, and attribute the difference. That
+survives fixed names, leftovers from an earlier scenario, and anything else
+already in the account, none of which a suffix filter does.
+
+The general lesson is worth more than the correction: a benchmark that
+undercounts looks exactly like a tool that underperforms, and the failure is
+invisible from inside the results. Every number in the *After* column was
+produced by the suffix method, so the ones not re-measured since may be
+understated in the same way.
 
 [cg]: https://github.com/RhinoSecurityLabs/cloudgoat
