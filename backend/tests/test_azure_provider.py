@@ -8,17 +8,28 @@ it, because every scanner in the package read the same one cloud. These
 findings come out of `api/app.py` counted and rendered by code that knows
 nothing about Azure, which is the evidence.
 
-The second matters more day to day: **the AWS half must start on a machine with
-no Azure SDK installed.** `.venv` is exactly such a machine, so every test here
-runs in that condition. If somebody later moves an Azure import to module scope
-in `az/`, `api/registry.py` stops importing and the whole AWS half goes with
-it - the precise failure recorded against mounting the two applications into
-one process.
+The second matters more day to day: **neither half may be a hard requirement of
+starting the other.** `api/registry.py` imports every provider module at
+startup, so one module-scope SDK import in either half takes the whole page
+down - both clouds - over a dependency belonging to one of them.
+
+This used to be asserted by checking that the Azure SDK was absent from the
+interpreter running the tests, `.venv` being a machine that lacked it. That
+held until somebody installed it, at which point the test failed and proved
+nothing, and the obvious reaction to a test failing on your own machine is to
+delete it. The property is now shown by blocking each SDK inside a subprocess,
+which holds on any machine - and, since `aws/common.py`, in both directions
+rather than only the Azure one.
 
 There is no moto for Azure. The reader tests use stubs shaped like the SDK's
 own return values rather than a fake service, which is the same approach
 `test_alarms.py` takes for the parts of AWS moto models wrongly.
 """
+
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -84,24 +95,90 @@ def _find(warnings, setting):
 # ================================ The AWS half must not need the Azure SDK
 
 
-def test_the_azure_sdk_is_genuinely_absent_here():
-    """Every claim below rests on this. If the SDK were installed the tests
-    would pass without proving the property they exist for."""
-    with pytest.raises(ImportError):
-        __import__("azure.mgmt.network")
+BACKEND = Path(__file__).resolve().parent.parent
+
+# Refuses one SDK for the life of a subprocess, so the property can be shown on
+# any machine rather than only on one that happens to lack it.
+#
+# This used to be asserted by checking that the Azure SDK was missing from the
+# interpreter running the tests. That worked while nobody had installed it, and
+# stopped meaning anything the moment somebody did - at which point the test
+# fails, the obvious reaction is to delete it, and the property goes unguarded.
+# A test that only holds on some machines is one nobody can trust on theirs.
+_BLOCK = """
+import sys
+
+class _Block:
+    def __init__(self, *names): self.names = names
+    def find_spec(self, name, path=None, target=None):
+        if name in self.names or any(name.startswith(n + ".") for n in self.names):
+            raise ImportError("blocked: " + name)
+        return None
+
+sys.meta_path.insert(0, _Block(*{blocked!r}))
+"""
 
 
-def test_the_registry_imports_without_the_azure_sdk():
-    assert "azure-nsg" in registry.REGISTRY
-    assert "azure-storage" in registry.REGISTRY
+def _without(blocked, body):
+    """Runs body in a subprocess where the named packages cannot be imported."""
+    return subprocess.run(
+        [sys.executable, "-c", _BLOCK.format(blocked=tuple(blocked)) + body],
+        cwd=BACKEND, capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": str(BACKEND)},
+    )
 
 
-def test_asking_azure_for_a_client_explains_itself_rather_than_raising_import():
-    """An ImportError about azure.mgmt.network reaching a browser tells the
-    person using the tool nothing they can act on."""
-    with pytest.raises(az_common.AzureNotConfigured) as raised:
-        az_nsg.get_client("us-east-1")
-    assert "pip install" in str(raised.value)
+AZURE_SDK = ["azure"]
+AWS_SDK = ["boto3", "botocore"]
+
+
+@pytest.mark.parametrize("blocked,label", [
+    (AZURE_SDK, "the Azure SDK"),
+    (AWS_SDK, "boto3"),
+    (AZURE_SDK + AWS_SDK, "both SDKs"),
+])
+def test_the_page_starts_without(blocked, label):
+    """Neither cloud's SDK may be a hard requirement of starting the process.
+
+    api/registry.py imports every provider module at startup, so one module
+    scope import in either half takes the whole page down - both clouds - over
+    a dependency belonging to one of them.
+    """
+    done = _without(blocked, "import api.app\nprint('ok')\n")
+    assert done.returncode == 0, f"the page did not start without {label}:\n{done.stderr}"
+
+
+@pytest.mark.parametrize("blocked", [AZURE_SDK, AWS_SDK, AZURE_SDK + AWS_SDK])
+def test_every_resource_type_is_still_registered_without(blocked):
+    """A missing SDK hides no resource type. The tab appears and the route
+    answers 503 with a sentence; a type that vanished would look like one this
+    tool does not support."""
+    done = _without(blocked, "from api import registry\n"
+                             "print(len(registry.REGISTRY))\n")
+    assert done.returncode == 0, done.stderr
+    assert int(done.stdout.strip()) == len(registry.REGISTRY)
+
+
+@pytest.mark.parametrize("blocked,module,error,call", [
+    (AZURE_SDK, "az.nsg", "az.common.AzureNotConfigured", "get_client('eastus')"),
+    (AWS_SDK, "aws.security_groups", "aws.common.AwsNotConfigured", "get_client('us-east-1')"),
+])
+def test_asking_for_an_absent_client_explains_itself(blocked, module, error, call):
+    """An ImportError about azure.mgmt.network or botocore reaching a browser
+    tells the person using the tool nothing they can act on. Both halves answer
+    with the same shape of sentence, naming what to install."""
+    package, _, name = error.rpartition(".")
+    done = _without(blocked, f"""
+import {module} as target
+from {package} import {name} as Expected
+try:
+    target.{call}
+    print("NO ERROR")
+except Expected as e:
+    print("pip install" in str(e))
+""")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "True", done.stdout
 
 
 def test_the_azure_modules_import_no_sdk_at_module_scope():

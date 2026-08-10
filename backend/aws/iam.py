@@ -31,8 +31,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import unquote
 
-import boto3
-from botocore.exceptions import BotoCoreError, ClientError
+from aws.common import client as _client, BotoCoreError, ClientError
 
 # Raised by this module too, so one HTTP handler turns a missing permission into
 # a 403 for every resource type. The name says bucket only because that is
@@ -86,7 +85,7 @@ REGION_ATTRIBUTE = "_provisioner_region"
 
 def get_client(region="us-east-1"):
     """Initializes and returns an IAM client that remembers its region."""
-    client = boto3.client("iam", region_name=region)
+    client = _client("iam", region)
     setattr(client, REGION_ATTRIBUTE, region)
     return client
 
@@ -394,7 +393,7 @@ def read_analyzers(iam_region):
     them: an account-wide claim from a one-region read would be a stronger
     statement than the evidence supports.
     """
-    client = boto3.client("accessanalyzer", region_name=iam_region)
+    client = _client("accessanalyzer", iam_region)
     try:
         return len(client.list_analyzers(type="ACCOUNT")["analyzers"])
     except ClientError as e:
@@ -653,7 +652,7 @@ def managed_policy_document(iam, policy_arn):
 
 def account_id(iam):
     """The account this tool is pointed at."""
-    sts = boto3.client("sts", region_name=client_region(iam))
+    sts = _client("sts", client_region(iam))
     try:
         return sts.get_caller_identity()["Account"]
     except ClientError as e:

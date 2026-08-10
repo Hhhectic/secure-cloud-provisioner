@@ -23,8 +23,7 @@ vpcs.py: a running charge that nothing here needs and that nobody notices
 starting. A confirmation prompt does not survive a typo; a refusal does.
 """
 
-import boto3
-from botocore.exceptions import ClientError
+from aws.common import client as _client, ClientError
 
 from scanner.alarm_rules import (
     BILLING_NAMESPACE,
@@ -51,7 +50,7 @@ _NOT_FOUND = {"ResourceNotFound", "ResourceNotFoundException",
 
 def get_client(region="us-east-1"):
     """Initializes and returns a CloudWatch client."""
-    return boto3.client("cloudwatch", region_name=region)
+    return _client("cloudwatch", region)
 
 
 def _sns(cloudwatch):
@@ -61,7 +60,7 @@ def _sns(cloudwatch):
     an alarm quietly wired to a topic somewhere else is exactly the kind of
     arrangement that is impossible to reason about later.
     """
-    return boto3.client("sns", region_name=cloudwatch.meta.region_name)
+    return _client("sns", cloudwatch.meta.region_name)
 
 
 # ------------------------------------------------------------------------ Read

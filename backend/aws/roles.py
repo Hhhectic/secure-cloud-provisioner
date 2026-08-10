@@ -21,8 +21,7 @@ that offered to edit a trust policy on someone's behalf would be offering to
 change who can enter the account.
 """
 
-import boto3
-from botocore.exceptions import BotoCoreError, ClientError
+from aws.common import client as _client, BotoCoreError, ClientError
 
 # Raised here too, so one HTTP handler turns a missing permission into a 403
 # for every resource type.
@@ -167,7 +166,7 @@ def read_machines_holding(iam, profile_names):
     if not profile_names:
         return []
 
-    ec2 = boto3.client("ec2", region_name=client_region(iam))
+    ec2 = _client("ec2", client_region(iam))
     holding = []
 
     try:

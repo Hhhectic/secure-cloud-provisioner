@@ -13,8 +13,7 @@ Two things about S3 that differ from EC2 and shape this file:
 """
 
 import json
-import boto3
-from botocore.exceptions import ClientError
+from aws.common import client as _client, ClientError
 
 MANAGED_TAG_KEY = "ManagedBy"
 MANAGED_TAG_VALUE = "secure-cloud-provisioner"
@@ -63,7 +62,7 @@ ALL_BLOCKS_ON = {
 
 def get_client(region="us-east-1"):
     """Initializes and returns an S3 client."""
-    return boto3.client("s3", region_name=region)
+    return _client("s3", region)
 
 
 # ---------------------------------------------------------------- CRUD Operations
