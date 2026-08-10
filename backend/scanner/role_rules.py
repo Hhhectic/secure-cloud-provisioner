@@ -130,6 +130,17 @@ IAM_ENUMERATION_WILDCARDS = ("iam:*", "iam:get*", "iam:list*")
 DATA_READ_WILDCARDS = ("s3:*", "s3:get*", "s3:list*")
 
 
+def _joined(*parts):
+    """Joins sentence fragments, dropping the empty ones.
+
+    Where a role can be reached from is folded into every finding, and for a
+    role no machine can hold that fragment is empty. Interpolating it anyway
+    leaves a double space in the middle of a sentence somebody is meant to
+    read.
+    """
+    return " ".join(part for part in parts if part)
+
+
 def _target(role_name, setting):
     return {
         "rule_id": f"{role_name}:{setting}",
@@ -259,11 +270,13 @@ def _check_what_it_grants(settings, name):
     if _permits(statements, "*"):
         warnings.append(_warning(
             CRITICAL,
-            f"{name} can do anything in this account. {reachable} Anyone who "
-            "obtains it can grant themselves more, read everything, and delete "
-            "the record of having done so. A role like this should exist only "
-            "if a person deliberately decided it should, and should be "
-            "assumable by as few things as possible.",
+            _joined(
+                f"{name} can do anything in this account.", reachable,
+                "Anyone who obtains it can grant themselves more, read "
+                "everything, and delete the record of having done so. A role "
+                "like this should exist only if a person deliberately decided "
+                "it should, and should be assumable by as few things as "
+                "possible."),
             _target(name, "full_admin"),
             control="NO_FULL_ADMIN_POLICY",
         ))
@@ -281,21 +294,26 @@ def _check_what_it_grants(settings, name):
         if launchers:
             warnings.append(_warning(
                 CRITICAL,
-                f"{name} can hand any role in this account to something it "
-                f"starts, and can {launchers[0]}. {reachable} That is a way "
-                "up: pick the most powerful role in the account, start "
-                "something carrying it, and take its credentials from the "
-                "inside. Nothing about the role itself looks wrong, which is "
-                "why this is worth saying out loud.",
+                _joined(
+                    f"{name} can hand any role in this account to something "
+                    f"it starts, and can {launchers[0]}.", reachable,
+                    "That is a way up: pick the most powerful role in the "
+                    "account, start something carrying it, and take its "
+                    "credentials from the inside. Nothing about the role "
+                    "itself looks wrong, which is why this is worth saying "
+                    "out loud."),
                 _target(name, "pass_role_to_compute"),
             ))
         else:
             warnings.append(_warning(
                 WARNING,
-                f"{name} can hand any role in this account to a service. "
-                f"{reachable} On its own that grants nothing, but paired with "
-                "permission to start almost anything it becomes a way to "
-                "acquire a more powerful role. Limit which roles it may pass.",
+                _joined(
+                    f"{name} can hand any role in this account to a service.",
+                    reachable,
+                    "On its own that grants nothing, but paired with "
+                    "permission to start almost anything it becomes a way to "
+                    "acquire a more powerful role. Limit which roles it may "
+                    "pass."),
                 _target(name, "pass_any_role"),
             ))
 
@@ -304,11 +322,13 @@ def _check_what_it_grants(settings, name):
         if all(_permits(statements, a) for a in actions):
             warnings.append(_warning(
                 CRITICAL,
-                f"{name} can {consequence}. {reachable} This is a way for "
-                "whoever holds it to end up with more than they were given, "
-                "without anything looking unusual: the permission itself is "
-                "ordinary administration, and the escalation is what it "
-                "allows rather than what it is.",
+                _joined(
+                    f"{name} can {consequence}.", reachable,
+                    "This is a way for whoever holds it to end up with more "
+                    "than they were given, without anything looking unusual: "
+                    "the permission itself is ordinary administration, and "
+                    "the escalation is what it allows rather than what it "
+                    "is."),
                 _target(name, f"escalation_{actions[0].split(':')[1].lower()}"),
             ))
 
@@ -316,11 +336,13 @@ def _check_what_it_grants(settings, name):
     if any(_permits(statements, w) for w in IAM_ENUMERATION_WILDCARDS):
         warnings.append(_warning(
             WARNING,
-            f"{name} can read every user, role and policy in this account. "
-            f"{reachable} That is how somebody who has got in works out where "
-            "to go next, and it leaves almost no trace because it is all "
-            "reads. A policy that names the reads it needs individually is "
-            "fine; a wildcard is not.",
+            _joined(
+                f"{name} can read every user, role and policy in this "
+                "account.", reachable,
+                "That is how somebody who has got in works out where to go "
+                "next, and it leaves almost no trace because it is all reads. "
+                "A policy that names the reads it needs individually is fine; "
+                "a wildcard is not."),
             _target(name, "reads_every_identity"),
         ))
 
@@ -328,10 +350,13 @@ def _check_what_it_grants(settings, name):
     if any(_permits(statements, w) for w in DATA_READ_WILDCARDS):
         warnings.append(_warning(
             WARNING,
-            f"{name} can read every storage bucket in this account. "
-            f"{reachable} If this role is meant to work with one bucket, name "
-            "it: the difference between one bucket and all of them is the "
-            "difference between a contained mistake and an account-wide one.",
+            _joined(
+                f"{name} can read every storage bucket in this account.",
+                reachable,
+                "If this role is meant to work with one bucket, name it: the "
+                "difference between one bucket and all of them is the "
+                "difference between a contained mistake and an account-wide "
+                "one."),
             _target(name, "reads_every_bucket"),
         ))
 
