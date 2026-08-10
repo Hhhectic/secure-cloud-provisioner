@@ -675,9 +675,9 @@ programs. Everything in *Not done* above other than that is a refinement.
 ## Next
 
 1. **Follow a chain, not one identity at a time.** The CloudGoat re-run is
-   done and `docs/benchmark.md` has it: two scenarios went from missed to
-   named, two from missed to partial, and both remaining misses plus both
-   partials share one shape. This tool judges an identity's own policies. A
+   done and `docs/benchmark.md` has it: six of ten scenarios named, one
+   partial, and the partial and both remaining misses share one shape. This
+   tool judges an identity's own policies. A
    privilege-escalation chain is a graph — who can assume what, and what that
    reaches in turn — and following it means traversing edges rather than
    matching statements. Everything cheap in that direction is now done; what
