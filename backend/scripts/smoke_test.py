@@ -1354,6 +1354,75 @@ def smoke_api(region):
 # ------------------------------------------------------------- Disk backups
 
 
+def smoke_roles(region):
+    """Reads every role and says what it can reach. Creates nothing, free.
+
+    Three things here cannot be exercised offline at all. moto has no
+    AWS-managed policies, so a role carrying AdministratorAccess reads back
+    with an unreadable document against the fake and a real one against AWS -
+    the difference between reporting full administrative access and reporting
+    a policy that could not be read. moto also creates no service-linked
+    roles, so the filter keeping AWS's own dozens out of the listing is only
+    ever meaningful here. And an instance profile is only attached to a
+    machine in an account that has machines.
+    """
+    heading("Roles")
+
+    resource = registry.ROLE
+    client = resource.get_client(region)
+
+    check(resource.read(client, "scp-no-such-role-anywhere") is None,
+          "a role that does not exist reads back as nothing, not an error")
+
+    ours = resource.list_all(client, only_ours=True)
+    everything = resource.list_all(client, only_ours=False)
+
+    check(len(everything) >= len(ours),
+          "excluding AWS's own service roles never adds any")
+    service_roles = len(everything) - len(ours)
+    if service_roles:
+        ok(f"{service_roles} AWS service-linked role(s) correctly left out of "
+           f"the listing")
+    else:
+        note("this account has no AWS service-linked roles, so the filter "
+             "cannot be shown to exclude anything")
+
+    if not ours:
+        print(f"        {DIM}no roles written by anyone here. An account with "
+              f"none is a legitimate answer, not a failed scan.{RESET}")
+        return
+
+    print(f"        {DIM}{len(ours)} role(s) somebody here wrote{RESET}")
+
+    findings = []
+    unreadable_documents = 0
+    for entry in ours:
+        settings = resource.read(client, entry["id"])
+        if settings is None:
+            continue
+        for policy in settings.get("policies") or []:
+            if policy.get("document") is None:
+                unreadable_documents += 1
+        findings.extend(resource.check(settings))
+
+    # The one moto cannot answer. Offline every attached AWS-managed policy
+    # comes back as a document this tool could not read, because moto has none
+    # of them; here they should all resolve.
+    check(unreadable_documents == 0,
+          "every policy attached to every role could be read")
+
+    counts = summarize(findings)
+    print(f"\n        {counts['critical']} critical, {counts['warning']} "
+          f"warning, {counts['info']} informational")
+
+    check(not fixable(findings),
+          "nothing about a role is offered as an automatic fix")
+
+    if findings:
+        print()
+        print_warnings(findings)
+
+
 def smoke_snapshots(region):
     """Audits EBS snapshots against the real account. Creates nothing, free.
 
@@ -1773,6 +1842,7 @@ def main():
 
         # Free, and creates at most two alarms inside the always-free ten.
         smoke_alarms(args.region, with_email=args.with_alarm_email)
+        smoke_roles(args.region)
         smoke_snapshots(args.region)
 
         # The HTTP layer, which everything above reaches one level below.
