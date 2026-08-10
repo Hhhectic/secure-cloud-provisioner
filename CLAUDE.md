@@ -42,63 +42,92 @@ account, and cleanup deletes by *tag*, not by author: `make_vulnerable.py
 resources a teammate created. `--region` is supported everywhere, so a region
 each is free isolation.
 
-## There are two applications in this repository
+## The two halves are merged
 
-This matters before anything else, because nothing in the rest of this file
-says it and the obvious assumption is wrong.
+This section used to say the opposite, at length. It is worth knowing that it
+did, because the merge is recent and anything else describing this repository
+as two applications is out of date.
 
 ```
-main.py                 app = FastAPI()   /api/v1/azure/scan, /api/v1/azure/deploy
-backend/api/app.py      app = FastAPI()   /resources/..., /blueprints/..., /ui, /docs
+main.py                 the Azure app. Still a separate FastAPI instance
+backend/api/app.py      the tool. /resources/..., /blueprints/..., /ui, /docs
 ```
 
-Two `FastAPI()` instances, neither mounting the other. Two scanners
-(`azure_scanner_engine.run_azure_security_scan` and `backend/scanner/`), two
-warning formats, two ports. `frontend/` is served by the AWS app at `/ui` and
-calls only its routes, so the page covers half the tool the README describes.
+`main.py` still exists and still runs on its own, and nothing depends on it any
+more. Azure is reached through `backend/api/app.py` like everything else:
+`azure-nsg` and `azure-storage` are `ResourceType` entries in
+`api/registry.py`, their rules live in `scanner/azure_*_rules.py` and return
+the same warning shape as every AWS rule, and the page at `/ui` grows tabs for
+them without being told they exist.
 
-Both halves work. They have simply never been introduced.
+That settled a claim this project had been making without evidence.
+`scanner/common.py` has said since the first commit that its warning shape is
+provider-agnostic and `api/app.py` has had one set of routes on the strength of
+it. Registering a second cloud needed two registry entries, no route changes,
+and no change to `scanner/common.py`.
 
-**Check `group/main` before judging the Azure code.** The Azure files on this
-branch are the ones the initial commit carried and are several commits behind;
-the working version lives on `group/main` and differs in all five files. Read
-against the stale copy, the Azure half looks broken — `azure_scanner` imports a
-function name that does not exist, the engine imports another, `azure_crud`
-provisions a resource group and a storage account as import-time side effects,
-and a wide-open NSG rule written in lower case scores clean. Every one of those
-is fixed on `group/main`, which imports cleanly, and which carries
-`test_azure_scanner.py` — six tests, passing. Anyone reviewing the Azure work
-from this branch alone will report bugs that were fixed weeks ago.
+**Three things about the Azure layer that will look wrong until you know why.**
 
-**The README is the scope, and it is one tool:** *"provisions AWS and Azure
-resources through guided forms and flags unsecure configurations before
-deployment."* Against that, the AWS half is complete and past its ticket — KAN-8
-capped it at one storage type, one compute type and one network rule, and there
-are now seven resource types. What is missing is not features. It is that a
-demonstration currently means starting two servers and explaining that the page
-only drives one of them.
+- The package is `backend/az/`, not `backend/azure/`. The Azure SDK owns
+  `azure` as a namespace package, and `pytest.ini` puts `backend/` on the path,
+  so a directory called `backend/azure/` becomes the top-level `azure` module
+  and every `import azure.identity` in the process resolves to it and fails.
+  Verified, not assumed. Do not rename it.
+- Every SDK import in `az/` happens **inside a function**. `api/registry.py`
+  imports every provider module at startup, so a module-level import would make
+  the Azure SDK a hard requirement of starting the AWS half — the exact
+  objection this file used to record against mounting the two apps into one
+  process. `test_azure_provider.py` asserts this by reading the source.
+- Azure is read-only. `azure_crud.py` has working create functions and wiring
+  them into a `create` adapter is the same block every AWS type already has.
+  It has not been done because nothing here has run against a real
+  subscription: the SDK is not in `.venv`, so the Azure findings are tested
+  logic rather than measured behaviour.
 
-**Two ways to join them, and they are not equally interesting.**
+**There were briefly three user interfaces.** The merge brought a Streamlit
+frontend into `frontend/` beside the served page, with `app.py` next to
+`app.js` doing an unrelated job. The served page was kept: it needs no process
+of its own and reaches every registered type, including Azure. The other is at
+`archive/streamlit-frontend/` with a README explaining the choice and what
+would need changing to revive it.
 
-Mounting one app inside the other is an afternoon. `app.mount("/aws", ...)` or
-the reverse, one process, one port, and the frontend can reach both. It solves
-the demo and nothing else: there would still be two scanners disagreeing about
-what a finding looks like. One process also means one dependency set, so the
-Azure SDK becomes a hard requirement of starting the AWS half — today the two
-halves can at least fail independently.
+## Where this stands, for whoever picks it up next
 
-Making Azure a `ResourceType` in `api/registry.py` is the version worth doing.
-`scanner/common.py` has claimed since the first commit that its warning shape is
-provider-agnostic, and `api/app.py` has one set of routes on the strength of
-that claim. Registering an Azure resource would be the first evidence either
-statement is true, and "why is it built this way?" is the obvious question in a
-viva. The cost is rewriting `azure_scanner_engine` to return the common warning
-shape, and agreeing whether Azure lives in `backend/azure/` beside `backend/aws/`
-or stays where it is.
+Everything below this line was true at commit `61881b5`.
 
-The group should pick one deliberately. Drifting into the first because it is
-Friday is a defensible choice; doing it without noticing the second existed is
-not.
+**Pushed to three places, all at the same commit.** `origin` (Hhhectic) has it
+on `main` and on `aws-provisioner-and-web-interface`; `group` (gavingonzo) has
+the branch. The tag `aws-half-complete` is pinned to `42b0e1f`, the state
+before the merge, and is the restore point if any of this turns out to be
+wrong: `git reset --hard aws-half-complete`.
+
+**Verification as of that commit.** 673 tests from `backend/`, 677 from the
+repository root (the extra six are the Azure half's own suite, which CI had
+never run until the merge). The live smoke test is 154 passed, 0 failed against
+account 679140927523, including instances and the whole bastion blueprint.
+
+**Two things were changed in AWS by hand and are not in any file here.** The
+`iam-audit` customer managed policy was extended twice, first with the six role
+reads and then with `iam:GetUserPolicy` and the three group reads;
+`docs/iam-policy-account-audit.json` is the record of what it should contain.
+And a billing alarm, `scp-billing-5-usd`, was created deliberately and left in
+place — it is the only thing standing between a shared account and a surprise
+bill, and the smoke test reports it as a leftover every run.
+
+**The account is clean otherwise.** No instances, no non-service roles, no
+non-default VPCs. Two orphaned CloudGoat roles were found by this tool's own
+first live role scan and deleted; one of them could pass any role and create a
+function, which is a live privilege escalation that had been sitting unused for
+five hours.
+
+**CloudGoat is not installed any more.** It lived in a session scratch
+directory that no longer exists. `docs/benchmark.md` records how to set it up
+again, including four traps that cost real time: it reads `whitelist.txt` and
+`config.yml` from its *package* directory, `config.yml` must be a YAML list,
+`destroy` prompts and dies silently on EOF while still reporting success, and
+it leaves every destroyed scenario's Terraform provider cache in `trash/` until
+that fills the disk. A separate `cloudgoat` AWS profile with admin deploys the
+scenarios; `EC2_Dude` scans them.
 
 ## Running things
 
@@ -191,7 +220,9 @@ security_messages.py    Azure's warning text
 test_azure_scanner.py   on group/main only. Six tests, no cloud calls
 requirements.txt        on group/main only. The Azure SDK, not boto3
 
+archive/       the Streamlit frontend, kept and not used. See its README
 backend/
+  az/          Azure. Named az/ and not azure/ on purpose; SDK imported lazily
   scanner/     pure rule logic, no boto3 anywhere, no cloud calls
   aws/         all boto3, one module per resource type (iam.py reads only)
   api/         FastAPI over a resource registry, generic across types
@@ -708,7 +739,8 @@ programs. Everything in *Not done* above other than that is a refinement.
    reaches in turn — and following it means traversing edges rather than
    matching statements. Everything cheap in that direction is now done; what
    is left is a different program and should be started as one.
-2. **Finish the Azure half.** It is registered and read-only: `az/nsg.py` and
+2. **Finish the Azure half.** Decided and half done: it is registered and
+   read-only: `az/nsg.py` and
    `az/storage.py` list and scan, and provisioning is deliberately not wired
    in. `azure_crud.py` on `group/main` has working create functions for
    resource groups, storage accounts and NSGs; giving them a `create` adapter
