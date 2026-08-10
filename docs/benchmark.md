@@ -125,3 +125,89 @@ That is the strongest argument in this document for building one, and it is
 recorded under *Not done* rather than quietly fixed by removing the rule.
 
 [prowler]: https://github.com/prowler-cloud/prowler
+
+# Benchmarked against CloudGoat
+
+Prowler answers "what do we miss on a clean account". CloudGoat answers the
+other half: given infrastructure built to be broken, does this tool say so.
+[CloudGoat][cg] deploys deliberately vulnerable AWS environments with
+Terraform; 13 of its 29 scenarios were run, scanned and destroyed.
+
+Which 13, and why not the rest: a scenario earns a run only if the resources
+it creates are ones this tool inspects. Everything built on RDS, ECS,
+Beanstalk or Bedrock was skipped - real money per day if a teardown fails, on
+services the scanner does not look at. `vulnerable_cognito` and `sns_secrets`
+are mostly API Gateway, so they would have proved nothing either.
+
+## Running it at all
+
+CloudGoat needs IAM write permissions, and this tool's own inline policy
+denies every IAM write. That refusal is correct and was left alone: a second
+IAM user with AdministratorAccess deploys the scenarios, and `EC2_Dude` scans
+them. One identity builds, a different one audits, which is the honest test
+and keeps `RefuseEveryIamWrite` intact.
+
+CloudGoat also ignores the region. Each scenario hardcodes
+`default = "us-east-1"` in its own `variables.tf`, and neither
+`AWS_DEFAULT_REGION` nor `TF_VAR_region` overrides it - both were tried.
+Everything lands in us-east-1 regardless, so this tool's own work should move
+elsewhere rather than CloudGoat being pushed away. Billing alarms are the
+exception and must stay in us-east-1, because AWS publishes the metric
+nowhere else.
+
+The whitelist matters. `cloudgoat config whitelist` restricts scenario
+security groups to one address; auto-detection failed here and the file was
+written by hand from `sg.my_public_ip()`. Without it a deliberately
+vulnerable machine is exposed to everyone.
+
+## What it caught
+
+**The pivot, in four scenarios.** CIS 5.7 - the metadata service handing out
+the instance's credentials to anything running on it - fired as critical on
+`iam_privesc_by_attachment`, `ec2_ssrf` and `data_secrets`, and as a warning
+on `federated_console_takeover`. That is the entry point those scenarios are
+built around: reach the metadata service, take the role, move on. The tool
+names it before anybody exploits it.
+
+**Two public buckets.** `s3_version_rollback_via_cfn` produced four
+criticals - the policy and the four blocks, on each of two buckets.
+
+**A rule generalising.** The IAM-enumeration rule added after
+`iam_enum_basics` then fired unprompted on `iam_privesc_by_rollback` and
+`lambda_privesc`, neither of which it was written for.
+
+## What it did not catch
+
+**What the attached role can reach.** Every one of these scenarios is a
+privilege-escalation chain: role to S3, role to Lambda, role to policy
+rollback. This tool reports that an instance profile is attached and never
+what it grants, so it sees the first link and none of the rest. That is the
+single most valuable thing left to build, and it is the same shape as the
+cross-account bucket gap Prowler found.
+
+**Anything about alarms.** `detection_evasion` is the only scenario creating
+CloudWatch alarms and CloudTrail, and produced three warnings, none of them
+about alarms - `aws/alarms.py` only enumerates alarms carrying this tool's
+tag. The newest rule set still has no external benchmark.
+
+**Correct silence.** `iam_privesc_by_key_rotation` produced only CIS 1.14
+notes. Its vulnerability is in Secrets Manager and a key-rotation path, which
+this tool does not scan. That is the right answer, not a miss.
+
+## Two hazards worth knowing before anyone repeats this
+
+**`cloudgoat destroy` can report success and leave things behind.**
+`s3_version_rollback_via_cfn` left two buckets and an IAM user while printing
+no error. The buckets have Object Lock in GOVERNANCE mode with retention to
+2099-12-31, so ordinary deletion is impossible - they need
+`BypassGovernanceRetention`, which Terraform does not attempt. Check the
+account afterwards rather than trusting the summary.
+
+**Those leftovers then contaminate every later scan.** Scenarios run after it
+picked up the orphaned buckets as their own findings, which is why raw
+per-scenario counts from a sequential run cannot be trusted. Attribute
+findings by the `cgid` suffix CloudGoat stamps on every resource - and do not
+attribute by the *most common* suffix, because leftovers outnumber a
+scenario's own resources and the contamination wins.
+
+[cg]: https://github.com/RhinoSecurityLabs/cloudgoat

@@ -144,6 +144,22 @@ so a checkout without either still gets a green suite — CI installs both and
 asserts they are not skipping, because a skip and a pass look the same in a
 tick.
 
+Two external scanners were used to benchmark this one, and both fight this
+machine's Python 3.14. Neither belongs in `.venv`: Prowler pins `pydantic<2`
+and `boto3 1.26`, which silently breaks `api/app.py`. `uv` fetches its own
+CPython without root, and everything below lives outside the repository:
+
+```bash
+uv python install 3.12
+uv venv --python 3.12 /tmp/prowler && VIRTUAL_ENV=/tmp/prowler uv pip install prowler
+/tmp/prowler/bin/prowler aws --services ec2 s3 iam cloudwatch vpc
+```
+
+CloudGoat needs Terraform and an IAM identity that can write IAM, which this
+tool's own policy denies. Use the separate `cloudgoat` AWS profile for
+deploying and the default profile for scanning. `docs/benchmark.md` records
+what both found, and the two hazards that cost an hour each.
+
 The Azure half runs from the repository root, is a separate process, and needs
 a different set of dependencies:
 
@@ -310,6 +326,16 @@ one. Where a caller gives security groups but no subnet, `launch_instance`
 takes the network from the groups rather than the account default — they are
 the only statement of intent available, and the mismatch otherwise fails with
 `InvalidParameterValue`, naming neither.
+
+**Reading everything is a finding, not only changing everything.** CIS 1.15
+asks who holds `*:*`, and an identity with `iam:List*` on `*` holds nothing of
+the sort while being able to map every user, role and policy in the account.
+That is the first thing done with a stolen credential and the last thing to
+leave a trace, because it is all reads. `grants_account_wide_iam_read` reports
+it separately from full admin rather than stretching 1.15 to cover it, and a
+policy that names its reads individually is not flagged — that is somebody who
+thought about it, and it is the shape of this tool's own audit policy. Found
+by running CloudGoat against a real account; see `docs/benchmark.md`.
 
 **A skipped check is a finding, not a silence.** Every IAM check runs
 independently and a failure lands in `unreadable` rather than aborting the
@@ -537,20 +563,33 @@ Severity means something — if everything is critical, nothing is.
   What remains uncovered is whether any of it *looks* right — layout, the
   modal, whether a button is reachable — and that is still only ever found by
   a person opening the page.
-- **Benchmarked against Prowler; four real gaps and one design hole.**
-  `docs/benchmark.md` compares this tool's findings against Prowler 5.37.1 on
-  the same account. Eight findings agree. Not covered at all: a bucket policy
-  granting another account access, password expiry, per-user hardware MFA, and
-  resources spread across regions. Two apparent gaps were not gaps — MFA Delete
-  sits behind versioning because it cannot be enabled without it, and CIS 1.9
-  correctly stays quiet for a user with no console password.
+- **Benchmarked against Prowler and CloudGoat.** `docs/benchmark.md` has both
+  and is the first thing to read before adding a rule; it records what was
+  measured rather than what was assumed.
 
-  The hole worth building for is that neither tool can tell a bucket that is
-  public by mistake from one that is public on purpose. The demo account holds
-  a personal site that is deliberately world-readable, and both scanners call
-  it critical, correctly. Prowler has suppression files; this has nothing, so
-  two correct findings will sit there being ignored until somebody stops
-  reading the list. Deleting the rule would be the wrong fix.
+  Prowler agrees on eight findings and covers four this tool does not: a
+  bucket policy granting another account access, password expiry, per-user
+  hardware MFA, and resources spread across regions. Two apparent gaps were
+  not gaps, and the reasoning is written down so nobody re-files them.
+
+  CloudGoat is the other direction — deliberately broken infrastructure, 13 of
+  29 scenarios run. The tool named the pivot (CIS 5.7, the metadata service
+  handing out instance credentials) in four separate scenarios, which is the
+  entry point those exercises are built around.
+
+- **Nothing reports what an attached role can reach.** The largest remaining
+  gap, and both benchmarks found it from different angles. This tool says an
+  instance profile is attached and never what it grants, so on every CloudGoat
+  privilege-escalation chain it sees the first link and none of the rest.
+  Prowler's `s3_bucket_cross_account_access` is the same shape. Closing it
+  means reading role policies and saying what they reach, which is a new
+  `scanner/` module rather than a rule.
+
+- **The alarm scanner has no external benchmark.** `detection_evasion` is the
+  only CloudGoat scenario creating CloudWatch alarms and CloudTrail, and this
+  tool reported nothing about alarms on it, because `aws/alarms.py` only
+  enumerates alarms carrying its own tag. The newest rule set is the one least
+  tested against anything somebody else wrote.
 
 - **The snapshot audit covers one region.** Snapshots are regional and
   `list_snapshots` sees only the client's region, the same limit as the Access
@@ -601,11 +640,15 @@ programs. Everything in *Not done* above other than that is a refinement.
 
 ## Next
 
-1. Decide how Azure and AWS become one application — mount, or register Azure
+1. **Report what an attached role can reach.** The biggest gap, found
+   independently by both benchmarks. A new `scanner/` module reading role
+   policies, not another rule in an existing one.
+2. Decide how Azure and AWS become one application — mount, or register Azure
    as a `ResourceType`. Read the section at the top before choosing; this is a
    group decision rather than a task.
-2. The frontend's rendering is still only ever checked by a person opening the
-   page.
 3. Detach `AmazonEC2FullAccess` and friends from `EC2_Dude`, so the documented
    least-privilege policy is the one actually in force and the smoke test
-   proves it.
+   proves it. Already done for EC2 and S3; SNS, CloudWatch and SSM remain and
+   belong to a teammate.
+4. The four smaller Prowler gaps: cross-account bucket policies, password
+   expiry, per-user hardware MFA, multi-region.
