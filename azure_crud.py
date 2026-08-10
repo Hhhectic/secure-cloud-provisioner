@@ -1,6 +1,7 @@
 """
 azure_crud.py
-Azure Resource Management module for provisioning Resource Groups, Network Security Groups, and Storage Accounts.
+Azure Resource Management module for provisioning Resource Groups, Network Security Groups,
+Storage Accounts, and Key Vaults.
 Includes pre-flight authentication verification and sanitized exceptions.
 """
 
@@ -15,6 +16,8 @@ except ImportError:
 
 from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.storage import StorageManagementClient
+from azure.mgmt.keyvault import KeyVaultManagementClient
+from azure.mgmt.keyvault.models import VaultCreateOrUpdateParameters, VaultProperties, Sku, SkuName, SkuFamily
 from azure.core.exceptions import ClientAuthenticationError, HttpResponseError
 
 
@@ -148,4 +151,38 @@ def create_storage_account(
         "name": storage_result.name,
         "location": storage_result.location,
         "provisioning_state": storage_result.provisioning_state
+    }
+
+
+def create_key_vault(resource_group_name: str, location: str, vault_name: str) -> dict:
+    """
+    Provisions an Azure Key Vault with soft-delete and purge protection enabled for governance compliance.
+    """
+    credential, subscription_id = get_azure_credentials()
+    tenant_id = os.getenv("AZURE_TENANT_ID")
+
+    kv_client = KeyVaultManagementClient(credential, subscription_id)
+
+    parameters = VaultCreateOrUpdateParameters(
+        location=location,
+        properties=VaultProperties(
+            tenant_id=tenant_id,
+            sku=Sku(family=SkuFamily.A, name=SkuName.standard),
+            enable_soft_delete=True,
+            enable_purge_protection=True,
+            access_policies=[]
+        )
+    )
+
+    poller = kv_client.vaults.begin_create_or_update(
+        resource_group_name=resource_group_name,
+        vault_name=vault_name,
+        parameters=parameters
+    )
+    result = poller.result()
+
+    return {
+        "name": result.name,
+        "location": result.location,
+        "provisioning_state": result.properties.provisioning_state
     }

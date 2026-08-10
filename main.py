@@ -1,144 +1,139 @@
-"""
-main.py
-FastAPI application entrypoint for secure cloud provisioning operations.
-Integrates security scanning engine, pre-flight validation, and sanitized error handling.
-"""
-
+import os
+from typing import Optional, List
+from fastapi import FastAPI, HTTPException, status
+from pydantic import BaseModel
 from dotenv import load_dotenv
-load_dotenv()  # Automatically loads environment variables from .env file
-
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
 from azure.core.exceptions import ClientAuthenticationError, HttpResponseError
 
-from azure_scanner_engine import run_azure_security_scan
 from azure_crud import (
     create_resource_group,
     create_network_security_group,
-    create_storage_account
+    create_storage_account,
+    create_key_vault
 )
+from azure_scanner_engine import scan_azure_payload
+
+load_dotenv()
 
 app = FastAPI(
-    title="Secure Cloud Provisioner API",
-    version="1.0.0",
-    description="Backend API for validating, scanning, and deploying Azure infrastructure resources securely."
+    title="Azure Governance & Provisioning Engine",
+    version="1.0.0"
 )
 
+# --- Pydantic Data Models ---
+class NSGRuleProps(BaseModel):
+    protocol: str = "Tcp"
+    source_port_range: str = "*"
+    destination_port_range: str
+    source_address_prefix: str
+    destination_address_prefix: str = "*"
+    access: str = "Allow"
+    priority: int = 100
+    direction: str = "Inbound"
 
 class NSGRule(BaseModel):
-    name: str = "allow-ssh-admin"
-    direction: str = "Inbound"
-    access: str = "Allow"
-    destination_port_range: str = "22"
-    source_address_prefix: str = "*"
-    protocol: str = "Tcp"
+    name: str
+    properties: NSGRuleProps
 
+class NSGRequest(BaseModel):
+    name: str
+    security_rules: Optional[List[NSGRule]] = []
+
+class StorageRequest(BaseModel):
+    name: str
+    supports_https_traffic_only: bool = True
+    allow_blob_public_access: bool = False
+    minimum_tls_version: str = "TLS1_2"
+
+class KeyVaultRequest(BaseModel):
+    name: str
+    enable_soft_delete: bool = True
+    enable_purge_protection: bool = True
 
 class AzureDeployRequest(BaseModel):
-    resource_group_name: str = Field(..., description="Target Azure Resource Group name")
-    location: str = Field(default="eastus", description="Azure region location")
-    storage_account_name: Optional[str] = Field(default=None, description="Azure Storage Account name")
-    nsg_name: Optional[str] = Field(default=None, description="Azure Network Security Group name")
-    nsg_rules: Optional[List[NSGRule]] = Field(default=None, description="List of NSG rules")
-    storage_config: Optional[Dict[str, Any]] = Field(default=None, description="Optional storage configuration overrides")
+    resource_group_name: str
+    location: str = "eastus"
+    network_security_group: Optional[NSGRequest] = None
+    storage_account: Optional[StorageRequest] = None
+    key_vault: Optional[KeyVaultRequest] = None
 
-
-@app.get("/")
-def read_root():
-    return {"status": "ONLINE", "message": "Secure Cloud Provisioner API is operational"}
-
-
+# --- REST Endpoints ---
 @app.post("/api/v1/azure/scan")
-def scan_azure_infrastructure(request: AzureDeployRequest):
-    """
-    Dry-run endpoint used by frontend forms to evaluate deployment requests against governance rules.
-    """
-    scan_results = run_azure_security_scan(request.dict())
-    return {
-        "status": "COMPLETED",
-        "passed": scan_results.get("passed", False),
-        "total_warnings": scan_results.get("total_warnings", 0),
-        "warnings": scan_results.get("warnings", [])
-    }
-
+def scan_azure_infrastructure(payload: AzureDeployRequest):
+    violations = scan_azure_payload(payload.model_dump())
+    if violations:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"status": "BLOCKED", "policy_violations": violations}
+        )
+    return {"status": "PASSED", "message": "Pre-flight scan complete. No violations detected."}
 
 @app.post("/api/v1/azure/deploy")
-def deploy_azure_infrastructure(request: AzureDeployRequest):
-    """
-    Scans incoming configuration against all security rules (SSH, RDP, Blob Access, HTTPS/TLS).
-    If validation passes, provisions infrastructure using azure_crud.py with sanitized exception handling.
-    """
-    # 1. Full Security Engine Scan
-    payload = request.dict()
-    scan_results = run_azure_security_scan(payload)
-
-    if not scan_results.get("passed", False):
-        warnings = scan_results.get("warnings", [])
-        formatted_warnings = "; ".join(w.get("title", "Governance Violation") for w in warnings) if warnings else "Configuration violates governance policies."
+def deploy_azure_infrastructure(payload: AzureDeployRequest):
+    # Step 1: Pre-flight governance check
+    payload_dict = payload.model_dump()
+    violations = scan_azure_payload(payload_dict)
+    if violations:
         raise HTTPException(
-            status_code=400,
-            detail={
-                "message": f"Deployment blocked: {formatted_warnings}",
-                "warnings": warnings
-            }
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"status": "BLOCKED", "policy_violations": violations}
         )
-
-    # 2. Infrastructure Deployment Execution
+        
+    # Step 2: Azure Infrastructure Provisioning
+    results = {}
     try:
-        # Step A: Resource Group
-        rg_res = create_resource_group(request.resource_group_name, request.location)
-
-        # Step B: Network Security Group (Optional)
-        nsg_res = None
-        if request.nsg_name:
-            rules_dict = [rule.dict() for rule in request.nsg_rules] if request.nsg_rules else []
+        # Create Resource Group
+        rg_res = create_resource_group(payload.resource_group_name, payload.location)
+        results["resource_group"] = rg_res["name"]
+        
+        # Create NSG if requested
+        if payload.network_security_group:
+            rules_raw = [r.model_dump() for r in payload.network_security_group.security_rules] if payload.network_security_group.security_rules else []
             nsg_res = create_network_security_group(
-                request.resource_group_name,
-                request.location,
-                request.nsg_name,
-                rules_dict
+                payload.resource_group_name,
+                payload.location,
+                payload.network_security_group.name,
+                rules_raw
             )
+            results["network_security_group"] = nsg_res
 
-        # Step C: Storage Account (Optional)
-        storage_res = None
-        if request.storage_account_name:
-            storage_res = create_storage_account(
-                request.resource_group_name,
-                request.location,
-                request.storage_account_name,
-                request.storage_config
+        # Create Storage Account if requested
+        if payload.storage_account:
+            st_res = create_storage_account(
+                payload.resource_group_name,
+                payload.location,
+                payload.storage_account.name
             )
+            results["storage_account"] = st_res
 
+        # Create Key Vault if requested (NEW)
+        if payload.key_vault:
+            kv_res = create_key_vault(
+                payload.resource_group_name,
+                payload.location,
+                payload.key_vault.name
+            )
+            results["key_vault"] = kv_res
+            
         return {
             "status": "SUCCESS",
             "provision_mode": "PROVISIONED_IN_AZURE",
             "message": "Security scan passed. Infrastructure deployment authorized.",
-            "scan_warnings": scan_results.get("warnings", []),
-            "resource_group": rg_res.get("name"),
-            "location": rg_res.get("location"),
-            "network_security_group": nsg_res,
-            "storage_account": storage_res
+            "results": results
         }
 
-    except (ClientAuthenticationError, ValueError):
-        # Sanitizes credential failures (hides raw Azure Entra ID Trace IDs, Tenant IDs, Client IDs)
+    except ClientAuthenticationError:
         raise HTTPException(
-            status_code=401,
+            status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Azure Authentication Failed: Invalid client credentials or tenant configuration."
         )
-
-    except HttpResponseError as e:
-        # Sanitizes API/SDK HTTP response errors while conveying actionable resource issues
-        sanitized_msg = getattr(e, "message", "Invalid resource parameters or request format.")
+    except HttpResponseError as err:
         raise HTTPException(
-            status_code=400,
-            detail=f"Azure Resource Provisioning Failed: {sanitized_msg}"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Azure SDK Deployment Error: {err.message}"
         )
-
-    except Exception:
-        # Generic fallback for unhandled internal exceptions
+    except Exception as e:
         raise HTTPException(
-            status_code=500,
-            detail="An internal server error occurred during resource provisioning."
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal Server Error: {str(e)}"
         )
