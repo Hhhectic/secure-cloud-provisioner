@@ -35,6 +35,7 @@ from aws import snapshots
 from aws import roles
 from az import nsg as az_nsg
 from az import storage as az_storage
+from az import keyvault as az_keyvault
 from scanner.rules import (
     check_firewall_rules,
     check_group_usage,
@@ -54,6 +55,7 @@ from scanner.role_rules import check_role
 from scanner.azure_nsg_rules import check_nsg, check_nsg_spec
 from scanner.azure_storage_rules import (check_storage_account,
                                          check_storage_spec)
+from scanner.azure_keyvault_rules import check_key_vault, check_key_vault_spec
 
 DEFAULT_REGION = "us-east-1"
 
@@ -1140,8 +1142,74 @@ AZURE_STORAGE = ResourceType(
 )
 
 
+# ------------------------------------------------------------ Azure key vaults
+
+
+def _az_keyvault_list(client, only_ours):
+    return [{"id": v["id"], "name": v["name"]}
+            for v in az_keyvault.list_vaults(client, only_ours=only_ours)]
+
+
+def _az_keyvault_fix(client, resource_id, warning, options):
+    return az_keyvault.apply_fix(client, resource_id, warning)
+
+
+def _az_keyvault_create(client, spec):
+    """Creates one key vault, in a resource group the spec has to name.
+
+    The same refusal _az_storage_create makes, for the same reason: a resource
+    group has no AWS equivalent to default from.
+    """
+    group = spec.get("resource_group")
+    if not group:
+        return False, (
+            "Azure puts every resource in a resource group, and this one names "
+            "none. Give a resource group; it will be created if it does not "
+            "already exist."
+        ), []
+
+    return az_keyvault.create_vault(
+        client,
+        spec["name"],
+        group,
+        location=spec.get("region") or DEFAULT_AZURE_LOCATION,
+        secure_by_default=spec.get("secure_by_default", True),
+    )
+
+
+def _az_keyvault_delete(client, resource_id, options):
+    return az_keyvault.delete_vault(
+        client, resource_id, force=options.get("force", False))
+
+
+def _az_keyvault_cleanup(client, options):
+    return az_keyvault.cleanup_all_managed_vaults(
+        client, force=options.get("force", False))
+
+
+AZURE_KEYVAULT = ResourceType(
+    key="azure-keyvault",
+    label="Azure key vault",
+    id_label="Vault name",
+    get_client=az_keyvault.get_client,
+    create=_az_keyvault_create,
+    list_all=_az_keyvault_list,
+    read=az_keyvault.read_vault_for_scanning,
+    check=check_key_vault,
+    describe=az_keyvault.describe_vault,
+    check_spec=check_key_vault_spec,
+    fix=_az_keyvault_fix,
+    delete=_az_keyvault_delete,
+    cleanup=_az_keyvault_cleanup,
+    # No plan_deletion. A vault's delete reaches further than any inventory
+    # this tool could print - what breaks is whatever was encrypted with the
+    # keys inside, which lives in resources this tool has never read. An empty
+    # preview in front of that would be the most misleading thing here.
+)
+
+
 REGISTRY = {r.key: r for r in (SECURITY_GROUP, BUCKET, KEY_PAIR, INSTANCE, IAM,
-                               ROLE, AZURE_NSG, AZURE_STORAGE,
+                               ROLE, AZURE_NSG, AZURE_STORAGE, AZURE_KEYVAULT,
                                SNAPSHOT, ALARM, VPC)}
 
 

@@ -10,3 +10,5 @@ azure-mgmt-storage==21.0.0
 # pin because nothing here has resolved it against a real install yet; pin it
 # once the Azure half has run against a subscription.
 azure-mgmt-network>=25.0.0
+# az/keyvault.py. Resolved against a real install at 14.0.1.
+azure-mgmt-keyvault>=14.0.0

@@ -107,6 +107,28 @@ def storage_client(region=None):
     return StorageManagementClient(credential(), subscription_id())
 
 
+def keyvault_client(region=None):
+    """A client for key vaults. region is accepted and ignored."""
+    KeyVaultManagementClient = _import("azure.mgmt.keyvault",
+                                       "KeyVaultManagementClient")
+    return KeyVaultManagementClient(credential(), subscription_id())
+
+
+def tenant_id():
+    """The Entra tenant a vault's permissions are scoped to.
+
+    Storage and network security groups need no such thing. A key vault does:
+    every permission on it names a tenant, and a vault created against the
+    wrong one is unopenable by everybody including its creator. It comes from
+    the same environment the credential does, so it cannot disagree with the
+    identity making the call.
+    """
+    found = os.getenv("AZURE_TENANT_ID")
+    if not found:
+        raise AzureNotConfigured(CREDENTIAL_HINT)
+    return found
+
+
 def resource_client(region=None):
     """A client for resource groups. region is accepted and ignored.
 

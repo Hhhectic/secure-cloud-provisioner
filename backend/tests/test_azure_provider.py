@@ -35,8 +35,10 @@ import pytest
 
 from api import registry
 from az import common as az_common
+from az import keyvault as az_keyvault
 from az import nsg as az_nsg
 from az import storage as az_storage
+from scanner.azure_keyvault_rules import check_key_vault, check_key_vault_spec
 from scanner.azure_nsg_rules import check_nsg, check_nsg_spec
 from scanner.azure_storage_rules import check_storage_account, check_storage_spec
 from scanner.common import CRITICAL, WARNING, INFO, cited, fixable, summarize
@@ -767,6 +769,280 @@ def test_the_only_ours_filter_means_something_now():
         "ours", "theirs"]
     assert [a["name"] for a in
             az_storage.list_accounts(client, only_ours=True)] == ["ours"]
+
+
+# ============================================================== Key vaults
+#
+# The third Azure type, and the first whose danger is destruction rather than
+# exposure. Same stub approach, same limit: this proves the module asks Azure
+# for the right things and cannot prove Azure does them.
+
+
+class _StubVault:
+    def __init__(self, name, group=GROUP, tags=None, location="eastus",
+                 **properties):
+        self.name = name
+        self.location = location
+        self.tags = tags
+        self.id = (f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{group}"
+                   f"/providers/Microsoft.KeyVault/vaults/{name}")
+        base = {
+            "enable_soft_delete": True,
+            "enable_purge_protection": True,
+            "enable_rbac_authorization": True,
+            "soft_delete_retention_in_days": 90,
+            "access_policies": [],
+            "public_network_access": "Disabled",
+            "network_acls": None,
+        }
+        base.update(properties)
+        self.properties = _Fields(**base)
+
+
+class _StubVaultClient:
+    """The slice of KeyVaultManagementClient that az/keyvault.py touches."""
+
+    def __init__(self, vaults=(), name_available=True):
+        self.vault_list = list(vaults)
+        self._name_available = name_available
+        self.created = []
+        self.deleted = []
+        self.vaults = self
+
+    def list_by_subscription(self):
+        return list(self.vault_list)
+
+    def get(self, group, name):
+        for vault in self.vault_list:
+            if vault.name == name:
+                return vault
+        raise _NotFound()
+
+    def check_name_availability(self, parameters):
+        if self._name_available:
+            return _NameAnswer(True)
+        return _NameAnswer(
+            False, f"The vault named '{parameters['name']}' is in a soft "
+                   "deleted state.")
+
+    def begin_create_or_update(self, group, name, parameters):
+        self.created.append((group, name, parameters))
+        made = _StubVault(name, group=group, tags=parameters.get("tags"))
+        self.vault_list.append(made)
+        return _StubPoller(made)
+
+    def begin_delete(self, group, name):
+        self.deleted.append((group, name))
+        self.vault_list = [v for v in self.vault_list if v.name != name]
+        return _StubWaiter()
+
+
+class _NotFound(Exception):
+    status_code = 404
+
+
+class _StubWaiter:
+    def wait(self):
+        return None
+
+
+@pytest.fixture
+def vault_group_exists(monkeypatch):
+    monkeypatch.setattr(az_keyvault, "ensure_resource_group",
+                        lambda name, location: (False, None))
+    monkeypatch.setattr(az_keyvault, "tenant_id", lambda: "a-tenant")
+
+
+def test_a_created_vault_carries_the_tag_and_names_its_tenant(
+        vault_group_exists):
+    """The tenant is the one thing a vault needs that storage does not. A vault
+    built against the wrong one is unopenable by everybody including whoever
+    made it."""
+    client = _StubVaultClient()
+    ok, resource_id, _ = az_keyvault.create_vault(client, "demo", GROUP)
+
+    assert ok
+    assert resource_id.endswith("/vaults/demo")
+    _, _, parameters = client.created[0]
+    assert parameters["tags"] == az_common.managed_tags()
+    assert parameters["properties"]["tenant_id"] == "a-tenant"
+
+
+def test_soft_delete_is_stated_as_on_whichever_way_the_switch_is_set(
+        vault_group_exists):
+    """Azure made recoverable deletion mandatory in 2020 and refuses a vault
+    without it, so the deliberately weak option cannot weaken this and does not
+    pretend to. The value is still stated rather than left to the platform."""
+    for secure in (True, False):
+        client = _StubVaultClient()
+        az_keyvault.create_vault(client, "demo", GROUP,
+                                 secure_by_default=secure)
+        assert client.created[0][2]["properties"]["enable_soft_delete"] is True
+
+
+def test_purge_protection_off_is_sent_as_absent_not_as_false(
+        vault_group_exists):
+    """The API rejects an explicit false: once enabled it can never be
+    disabled, so Azure models "not on" as absent. The one setting this module
+    cannot state outright, and Azure's constraint rather than a choice here."""
+    client = _StubVaultClient()
+    az_keyvault.create_vault(client, "demo", GROUP, secure_by_default=False)
+
+    assert client.created[0][2]["properties"]["enable_purge_protection"] is None
+
+
+def test_creating_a_secure_vault_warns_that_it_cannot_be_fully_removed(
+        vault_group_exists):
+    """Purge protection is a one-way door, and the name stays reserved for 90
+    days after any delete. Somebody creating one on a shared subscription
+    should learn that from the create rather than from the delete."""
+    client = _StubVaultClient()
+    ok, _, problems = az_keyvault.create_vault(client, "demo", GROUP)
+
+    assert ok
+    assert any("90 days" in p for p in problems)
+
+
+def test_a_vault_name_still_held_by_a_deleted_vault_is_refused(
+        vault_group_exists):
+    """Soft delete keeps the name. "Already taken" here routinely means "you
+    deleted it last week", and a caller only told the create failed will try
+    the same name again."""
+    client = _StubVaultClient(name_available=False)
+    ok, message, _ = az_keyvault.create_vault(client, "demo", GROUP)
+
+    assert ok is False
+    assert client.created == []
+    assert "soft deleted" in message
+
+
+def test_deleting_a_vault_refuses_without_force():
+    client = _StubVaultClient([_StubVault("demo")])
+    ok, message = az_keyvault.delete_vault(client, "demo")
+
+    assert ok is False
+    assert client.deleted == []
+
+
+def test_a_forced_delete_says_the_name_stays_reserved():
+    """"Deleted" on its own would be true and would mislead somebody who then
+    tries to reuse the name."""
+    client = _StubVaultClient([_StubVault("demo")])
+    ok, message = az_keyvault.delete_vault(
+        client, client.vault_list[0].id, force=True)
+
+    assert ok
+    assert client.deleted == [(GROUP, "demo")]
+    assert "name stays reserved" in message
+
+
+def test_vault_cleanup_reaches_only_what_this_tool_tagged():
+    client = _StubVaultClient([
+        _StubVault("ours", tags=az_common.managed_tags()),
+        _StubVault("theirs", tags={"Name": "production"}),
+    ])
+
+    az_keyvault.cleanup_all_managed_vaults(client, force=True)
+
+    assert [name for _, name in client.deleted] == ["ours"]
+
+
+def test_a_vault_without_recoverable_deletion_is_critical():
+    warnings = check_key_vault({
+        "vault_name": "demo", "soft_delete_enabled": False,
+        "purge_protection_enabled": True, "rbac_authorization": True,
+        "access_policy_count": 0, "unreadable": {},
+    })
+
+    assert _find(warnings, "no_soft_delete")["level"] == CRITICAL
+
+
+def test_access_granted_by_the_vaults_own_list_is_reported_as_invisible():
+    """The finding this rule set exists for. scanner/role_rules.py can read an
+    identity's entire permission set and still not know it can open this
+    vault."""
+    warnings = check_key_vault({
+        "vault_name": "demo", "soft_delete_enabled": True,
+        "purge_protection_enabled": True, "rbac_authorization": False,
+        "access_policy_count": 3, "unreadable": {},
+    })
+
+    found = _find(warnings, "access_policies_not_roles")
+    assert found["level"] == WARNING
+    assert "3 identities hold" in found["message"]
+
+
+def test_an_empty_access_list_is_a_note_rather_than_a_finding():
+    warnings = check_key_vault({
+        "vault_name": "demo", "soft_delete_enabled": True,
+        "purge_protection_enabled": True, "rbac_authorization": False,
+        "access_policy_count": 0, "unreadable": {},
+    })
+
+    assert _find(warnings, "access_policies_empty")["level"] == INFO
+
+
+def test_a_setting_azure_did_not_report_on_a_vault_is_not_scored_as_safe():
+    warnings = check_key_vault({
+        "vault_name": "demo", "soft_delete_enabled": None,
+        "purge_protection_enabled": True, "rbac_authorization": True,
+        "access_policy_count": 0,
+        "unreadable": {"soft_delete_enabled": "Azure did not report it"},
+    })
+
+    assert "unreadable_soft_delete_enabled" in _settings_of(warnings)
+    assert "no_soft_delete" not in _settings_of(warnings)
+
+
+def test_nothing_in_the_key_vault_rules_claims_a_cis_control():
+    """CIS AWS Foundations is an AWS benchmark. The Azure one is a separate
+    document nobody here has read."""
+    warnings = check_key_vault({
+        "vault_name": "demo", "soft_delete_enabled": False,
+        "purge_protection_enabled": False, "rbac_authorization": False,
+        "access_policy_count": 2, "public_network_access": "Enabled",
+        "unreadable": {},
+    })
+
+    assert warnings
+    assert cited(warnings) == []
+
+
+def test_a_secure_vault_form_raises_nothing_worse_than_a_note():
+    warnings = check_key_vault_spec({"name": "demo", "secure_by_default": True})
+
+    assert summarize(warnings)["critical"] == 0
+    assert summarize(warnings)["warning"] == 0
+
+
+def test_an_insecure_vault_form_is_flagged_before_creation():
+    warnings = check_key_vault_spec({"name": "demo",
+                                     "secure_by_default": False})
+
+    assert "no_purge_protection" in _settings_of(warnings)
+
+
+@pytest.mark.parametrize("secure", [True, False])
+def test_a_vault_reads_back_as_the_form_scan_promised(vault_group_exists,
+                                                      secure):
+    """The same parity contract storage holds to, across the third type."""
+    client = _StubVaultClient()
+    az_keyvault.create_vault(client, "demo", GROUP, secure_by_default=secure)
+    built = client.created[0][2]["properties"]
+
+    after = check_key_vault({
+        "vault_name": "demo",
+        "soft_delete_enabled": built["enable_soft_delete"],
+        "purge_protection_enabled": built["enable_purge_protection"] is True,
+        "rbac_authorization": built["enable_rbac_authorization"],
+        "soft_delete_retention_days": built["soft_delete_retention_in_days"],
+        "access_policy_count": 0,
+        "public_network_access": "Enabled",
+        "unreadable": {},
+    })
+    before = check_key_vault_spec({"name": "demo", "secure_by_default": secure})
+
+    assert _settings_of(after) == _settings_of(before)
 
 
 # ====================================== Through the registry and the routes

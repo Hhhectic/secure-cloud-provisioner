@@ -42,7 +42,8 @@ from az.common import AzureNotConfigured
 from blueprints import bastion
 from scanner.rules import check_firewall_rules
 from scanner.s3_rules import check_bucket_settings
-from scanner.common import print_warnings, fixable, summarize
+from scanner.common import (print_warnings, fixable, summarize, worst_level,
+                            CRITICAL)
 
 REGION = "us-east-1"
 
@@ -1138,37 +1139,56 @@ def alarm_menu(cloudwatch):
 # --------------------------------------------------------------- Azure storage
 
 
-def azure_storage_menu(storage):
-    """Azure storage accounts, through the same registry contract as the rest.
+# The characters Azure will accept in each type's name, since they differ and
+# both are stricter than anything AWS asks for. A storage account is lowercase
+# letters and digits only; a vault also allows hyphens but must start with a
+# letter. Only used to generate the offered default, which is the one name a
+# person did not choose and so the one that must not be rejected.
+_AZURE_NAME_SEEDS = {
+    "azure-storage": lambda suffix: f"scp{suffix}",
+    "azure-keyvault": lambda suffix: f"scp-{suffix}",
+}
 
-    Every call below goes through `resource`, exactly as the key pair and alarm
-    menus do, and none of this file knows which cloud it is talking to beyond
-    the two questions Azure asks that AWS does not: which resource group, and
-    where.
 
-    The client is passed in like every other menu even though `get_client`
-    ignores the region it is given. Azure carries a location on each resource
-    rather than on the connection, so there is nothing regional for main() to
-    decide - but having one menu take its client from somewhere else would be
-    a difference to remember for no benefit.
+def azure_menu(resource, client):
+    """Any Azure resource type, driven entirely through the registry.
+
+    One menu rather than one per type, unlike the AWS half above. That is not
+    inconsistency for its own sake: the AWS menus each ask for something
+    genuinely different - a network to place a group in, an instance size, a
+    metric and a threshold - while every Azure type here takes the same four
+    answers, a name, a resource group, a location and whether to build it
+    safely. Writing this once means the next Azure type needs a registry entry
+    and no menu at all.
+
+    What the deliberately-weak option is about to build is printed by running
+    check_spec and showing the findings, rather than by a hardcoded sentence
+    per type. Two reasons: a sentence goes stale the moment a rule is added,
+    and showing the actual findings is the thing this tool exists to do. It is
+    also exactly what POST /resources/{type} does before it provisions.
+
+    The client is passed in like every other menu even though Azure's
+    get_client ignores the region it is given. Azure carries a location on each
+    resource rather than on the connection, so there is nothing regional for
+    main() to decide - but one menu taking its client from somewhere else would
+    be a difference to remember for no benefit.
     """
-    print("\n--- Azure Storage Accounts ---")
+    label = resource.label
+    print(f"\n--- {label}s ---")
     print("1. Create (secure by default)")
     print("2. Create (deliberately weak, for the demo)")
     print("3. Scan")
     print("4. Delete one")
-    print("5. Remove all accounts this tool made")
+    print(f"5. Remove all {label.lower()}s this tool made")
     choice = input("\nSelect action (1-5): ").strip()
-
-    resource = registry.AZURE_STORAGE
 
     if choice in ("1", "2"):
         secure = choice == "1"
-        # No hyphens: an Azure storage account name is 3-24 characters of
-        # lowercase letters and digits only, which is stricter than S3's.
+
         suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        default_name = f"scp{suffix}"
-        name = input(f"Account name [{default_name}]: ").strip() or default_name
+        seed = _AZURE_NAME_SEEDS.get(resource.key, lambda s: f"scp-{s}")
+        default_name = seed(suffix)
+        name = input(f"{resource.id_label} [{default_name}]: ").strip() or default_name
 
         group = input("Resource group: ").strip()
         if not group:
@@ -1179,18 +1199,26 @@ def azure_storage_menu(storage):
 
         location = input("Location [eastus]: ").strip() or "eastus"
 
-        if not secure:
-            print("\nThis account will allow anonymous public reads, accept plain")
-            print("HTTP, and accept TLS 1.0. That is the point of this option.")
-            if input("Continue? (y/N): ").strip().lower() != "y":
-                return
-
-        ok, res, problems = resource.create(storage, {
+        spec = {
             "name": name,
             "resource_group": group,
             "region": location,
             "secure_by_default": secure,
-        })
+        }
+
+        # What this would be, before it is anything. The same scan the API runs
+        # before it provisions, and the reason the weak option needs no
+        # hardcoded description of what makes it weak.
+        planned = resource.check_spec(spec)
+        if planned:
+            print("\nBefore building it, this is what it would be:")
+            _report(planned)
+
+        if not secure or worst_level(planned) == CRITICAL:
+            if input("\nBuild it anyway? (y/N): ").strip().lower() != "y":
+                return
+
+        ok, res, problems = resource.create(client, spec)
         if not ok:
             print(f"Error: {res}")
             return
@@ -1199,66 +1227,72 @@ def azure_storage_menu(storage):
         for p in problems:
             print(f"  [!] {p}")
 
-        _report(resource.check(resource.read(storage, res)))
+        # Read back rather than trusting the request. A create can succeed and
+        # still not take a setting, and reporting the form would be reporting
+        # an intention.
+        _report(resource.check(resource.read(client, res)))
 
     elif choice == "3":
-        found = resource.list_all(storage, only_ours=False)
+        found = resource.list_all(client, only_ours=False)
         if not found:
-            print("No storage accounts in this subscription.")
+            print(f"No {label.lower()}s in this subscription.")
             return
-        chosen = _choose(found, lambda a: a["name"], "Select account to scan")
+        chosen = _choose(found, lambda a: a["name"], f"Select one to scan")
         if not chosen:
             return
 
-        settings = resource.read(storage, chosen["id"])
-        # An account deleted between the listing and this read is not an error.
+        settings = resource.read(client, chosen["id"])
+        # Deleted between the listing and this read is not an error.
         if settings is None:
-            print("That account is no longer there.")
+            print("That one is no longer there.")
             return
 
         _report(resource.check(settings))
-        print("\nNothing here is fixed automatically yet. Each finding says what")
-        print("to change; both storage settings are one change in the portal.")
+        print("\nNothing in the Azure half is fixed automatically yet; each")
+        print("finding says what to change and where.")
 
     elif choice == "4":
-        found = resource.list_all(storage, only_ours=True)
+        found = resource.list_all(client, only_ours=True)
         if not found:
-            print("No storage accounts this tool made.")
+            print(f"No {label.lower()}s this tool made.")
             return
-        chosen = _choose(found, lambda a: a["name"], "Select account to delete")
+        chosen = _choose(found, lambda a: a["name"], "Select one to delete")
         if not chosen:
             return
 
-        print("\nDeleting a storage account destroys every container and blob")
-        print("inside it. Azure has no version of this that stops at an account")
-        print("with something in it, the way S3 refuses a bucket that is not")
-        print("empty - so this is the only warning there is.")
-        typed = input(f"Type the account name to confirm ({chosen['name']}): ").strip()
+        # The refusal text lives in az/, next to the call that would do it, so
+        # this asks first and lets the module say why it matters afterwards if
+        # the answer is no.
+        refused, why = resource.delete(client, chosen["id"], {"force": False})
+        if not refused:
+            print(f"\n{why}")
+
+        typed = input(f"\nType the name to confirm ({chosen['name']}): ").strip()
         if typed != chosen["name"]:
             print("That did not match. Nothing was deleted.")
             return
 
-        ok, msg = resource.delete(storage, chosen["id"], {"force": True})
+        ok, msg = resource.delete(client, chosen["id"], {"force": True})
         print(msg)
 
     elif choice == "5":
-        found = resource.list_all(storage, only_ours=True)
+        found = resource.list_all(client, only_ours=True)
         if not found:
             print("Nothing to clean up.")
             return
 
-        print(f"\nThis deletes {len(found)} storage account(s) carrying this")
+        print(f"\nThis deletes {len(found)} {label.lower()}(s) carrying this")
         print("tool's tag, and everything inside them. The tag records which")
         print("tool made them, not which person - on a shared subscription this")
-        print("reaches a colleague's demo as readily as your own.")
-        for account in found:
-            print(f"  - {account['name']}")
+        print("reaches a colleague's work as readily as your own.")
+        for item in found:
+            print(f"  - {item['name']}")
 
         if input("\nType DELETE to go ahead: ").strip() != "DELETE":
             print("Nothing was deleted.")
             return
 
-        for resource_id, ok, msg in resource.cleanup(storage, {"force": True}):
+        for resource_id, ok, msg in resource.cleanup(client, {"force": True}):
             print(f"[{resource_id.split('/')[-1]}] -> {msg}")
 
 
@@ -1277,7 +1311,8 @@ def main():
     print("8. Disk backups - audit only, changes nothing")
     print("9. Alarms - tell me when spending or load goes up")
     print("10. Azure storage accounts")
-    resource = input("\nSelect resource type (1-10): ").strip()
+    print("11. Azure key vaults - these hold the keys other things depend on")
+    resource = input("\nSelect resource type (1-11): ").strip()
 
     try:
         if resource == "1":
@@ -1299,7 +1334,11 @@ def main():
         elif resource == "9":
             alarm_menu(registry.ALARM.get_client(REGION))
         elif resource == "10":
-            azure_storage_menu(registry.AZURE_STORAGE.get_client(REGION))
+            azure_menu(registry.AZURE_STORAGE,
+                       registry.AZURE_STORAGE.get_client(REGION))
+        elif resource == "11":
+            azure_menu(registry.AZURE_KEYVAULT,
+                       registry.AZURE_KEYVAULT.get_client(REGION))
         else:
             print("Not a valid selection.")
     except AzureNotConfigured as e:
