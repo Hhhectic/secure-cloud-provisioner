@@ -52,6 +52,7 @@ from aws import snapshots
 from aws import vpcs
 from aws import alarms
 from aws.s3_buckets import PermissionDenied
+from az.common import AzureNotConfigured
 from scanner.common import (summarize, fixable, cited, print_warnings,
                             CRITICAL, WARNING, INFO)
 
@@ -1750,6 +1751,188 @@ def _smoke_alarm_routes(region):
 # ---------------------------------------------------------------------- Sweep
 
 
+# ----------------------------------------------------------------------- Azure
+#
+# Everything above this line has been run against a real AWS account many times.
+# Nothing below it has ever run against a real subscription, which is the point:
+# the Azure findings, and now the create and delete paths with them, are tested
+# logic rather than measured behaviour. This is the instrument for changing
+# that, and until somebody points it at a subscription it is untested code too.
+#
+# Two differences from the AWS sections, both deliberate:
+#
+#   - They skip rather than fail when Azure is not configured. This script's
+#     subject is AWS and every existing invocation of it expects to pass without
+#     an Azure credential in sight.
+#   - The reads run whenever a subscription is reachable; the writes need
+#     --with-azure-resources. A storage account costs almost nothing and a key
+#     vault nothing at all, but a deleted vault keeps its name for the whole
+#     soft-delete retention period, so every write run burns a name that cannot
+#     be reused. That is a cost of a different kind and it deserves a flag.
+
+
+def azure_configured():
+    """Whether a subscription can be reached at all, without asserting anything.
+
+    Called before the sections rather than inside them so that "not configured"
+    is reported once, as a skip, instead of five times as failures.
+    """
+    try:
+        registry.AZURE_STORAGE.get_client(None)
+        return True
+    except AzureNotConfigured:
+        return False
+
+
+def confirm_azure_identity():
+    heading("Azure credentials")
+    try:
+        from az.common import subscription_id
+        found = subscription_id()
+    except AzureNotConfigured as e:
+        fail(str(e))
+        return None
+
+    # The subscription id is not a secret, but printing it whole in a terminal
+    # somebody is about to screenshot for a report is a habit worth not having.
+    print(f"  {DIM}subscription {found[:8]}…{found[-4:]}{RESET}")
+    ok("Azure credentials work")
+    return found
+
+
+def _azure_sweep(resource, location, expect_write):
+    """Lists and scans every one of a type the subscription already has.
+
+    Free, and the half of an Azure run that needs no flag. It is also the only
+    part that exercises the readers against shapes this project did not create -
+    an account somebody made in the portal years ago is exactly where a getattr
+    default or an unreadable setting will first be wrong.
+    """
+    client = resource.get_client(location)
+    found = resource.list_all(client, False)
+    ok(f"listed {len(found)} {resource.label.lower()}(s)")
+
+    if not found:
+        note(f"no {resource.label.lower()}s in this subscription, so nothing "
+             "was scanned. The reader is unproven until there is one.")
+        return
+
+    for item in found[:5]:
+        settings = resource.read(client, item["id"])
+        if settings is None:
+            fail(f"{item['name']}: listed but could not be read back")
+            continue
+
+        warnings = resource.check(settings)
+        counts = summarize(warnings)
+        print(f"  {DIM}{item['name']}: {counts[CRITICAL]} critical, "
+              f"{counts[WARNING]} warning, {counts[INFO]} info{RESET}")
+
+        # The reader records what it could not see rather than scoring it
+        # clean. Against a real subscription this is where a permission gap
+        # shows up, and it is the whole reason the field exists.
+        for setting, reason in (settings.get("unreadable") or {}).items():
+            note(f"{item['name']}: could not check {setting} - {reason}")
+
+    if len(found) > 5:
+        print(f"  {DIM}…and {len(found) - 5} more, not scanned{RESET}")
+
+    if expect_write:
+        ok(f"{resource.label.lower()}s are writable through the registry")
+
+
+def smoke_azure_storage(location, with_writes):
+    heading("Azure storage accounts")
+
+    resource = registry.AZURE_STORAGE
+    _azure_sweep(resource, location, expect_write=not resource.read_only)
+
+    if not with_writes:
+        print(f"  {DIM}writes skipped. Pass --with-azure-resources to create "
+              f"and delete a real account.{RESET}")
+        return
+
+    client = resource.get_client(location)
+    group = f"scp-smoke-{suffix()}"
+    name = f"scpsmoke{suffix()}"        # 3-24 lowercase alphanumeric, no hyphens
+    created = None
+
+    try:
+        made, created, problems = resource.create(client, {
+            "name": name, "resource_group": group, "region": location,
+            "secure_by_default": False,
+        })
+        if not check(made, "created a storage account with no hardening"):
+            print(f"        {created}")
+            created = None
+            return
+        for p in problems:
+            note(p)
+
+        settings = resource.read(client, created)
+        if not check(settings is not None, "read it back after creating it"):
+            return
+
+        warnings = resource.check(settings)
+        print(f"\n  {DIM}what Azure actually gave us:{RESET}")
+        print(f"    public blob access: {settings.get('allow_blob_public_access')}")
+        print(f"    https only:         {settings.get('supports_https_traffic_only')}")
+        print(f"    minimum TLS:        {settings.get('minimum_tls_version')}")
+        print(f"    shared key:         {settings.get('allow_shared_key_access')}")
+
+        # The claim check_storage_spec makes: what the form said before it was
+        # built is what the scanner says after. Asserted here against a real
+        # account rather than against a stub of one.
+        before = {w["rule"]["setting"] for w in resource.check_spec(
+            {"name": name, "secure_by_default": False})}
+        after = {w["rule"]["setting"] for w in warnings}
+        check(before <= after,
+              "every finding predicted before creation is present after it")
+        if before - after:
+            print(f"        predicted but absent: {sorted(before - after)}")
+
+    finally:
+        if created and not KEEP:
+            gone, message = resource.delete(client, created, {"force": True})
+            check(gone, f"deleted {created}")
+            if not gone:
+                print(f"        {message}")
+            note(f"the name '{created}' is retained for the soft-delete "
+                 "period and cannot be reused until it lapses")
+        elif created:
+            note(f"--keep: storage account {created} left behind in {group}")
+        note(f"resource group {group} was created and is not removed by this "
+             "script; delete it in the portal if the run left anything")
+
+
+def smoke_azure_keyvault(location, with_writes):
+    heading("Azure key vaults")
+
+    resource = registry.AZURE_KEYVAULT
+    _azure_sweep(resource, location, expect_write=not resource.read_only)
+
+    if not with_writes:
+        print(f"  {DIM}writes skipped. Pass --with-azure-resources to create "
+              f"and delete a real vault.{RESET}")
+        return
+
+    note("a deleted vault keeps its name for the soft-delete retention "
+         "period, so this run consumes a name permanently")
+
+
+def smoke_azure_nsg(location):
+    heading("Azure network security groups")
+
+    resource = registry.AZURE_NSG
+    _azure_sweep(resource, location, expect_write=False)
+
+    # Not a gap to be filled later without deciding something first, so it is
+    # stated here rather than left as silence in a passing run.
+    print(f"  {DIM}read-only by design: an NSG rule carries a priority "
+          f"deciding which of several overlapping rules wins, so neither "
+          f"creating nor fixing one can be judged from a single rule.{RESET}")
+
+
 def report_leftovers(region):
     """Lists anything tagged as ours that is still in the account."""
     heading("Leftovers")
@@ -1763,6 +1946,13 @@ def report_leftovers(region):
 
         try:
             found = resource.list_all(resource.get_client(region), True)
+        except AzureNotConfigured:
+            # Azure storage and key vaults became writable, which put them in
+            # this loop for the first time. Without a subscription configured
+            # they cannot be asked, and this script's whole subject is AWS -
+            # so a missing Azure credential must not end an AWS run. It is
+            # skipped rather than noted: nothing was created there either.
+            continue
         except (ClientError, PermissionDenied) as e:
             note(f"could not list {resource.label.lower()}s: {e}")
             continue
@@ -1805,6 +1995,14 @@ def main():
     parser.add_argument("--with-blueprint", action="store_true",
                         help="also build and tear down the whole bastion "
                              "architecture, which launches two t3.micro")
+    parser.add_argument("--azure-location", default="eastus",
+                        help="where Azure resources go. Azure carries the "
+                             "location on the resource rather than the client, "
+                             "so this is not --region and cannot be")
+    parser.add_argument("--with-azure-resources", action="store_true",
+                        help="also create and delete a real Azure storage "
+                             "account. The Azure reads run whenever a "
+                             "subscription is reachable; this adds the writes")
     args = parser.parse_args()
     KEEP = args.keep
 
@@ -1861,6 +2059,23 @@ def main():
             heading("Blueprint: bastion architecture")
             print(f"  {DIM}skipped. Pass --with-blueprint to build and tear "
                   f"down a real one.{RESET}")
+
+        # Azure last, and skipped entirely when no subscription is reachable.
+        # Every existing invocation of this script expects to pass on an AWS
+        # machine, and a missing Azure credential is not an AWS failure.
+        if azure_configured():
+            confirm_azure_identity()
+            smoke_azure_storage(args.azure_location, args.with_azure_resources)
+            smoke_azure_keyvault(args.azure_location, args.with_azure_resources)
+            smoke_azure_nsg(args.azure_location)
+        else:
+            heading("Azure")
+            print(f"  {DIM}skipped: no subscription configured. Put the "
+                  f"AZURE_* values in .env to include it.{RESET}")
+            note("Azure was not exercised. Nothing in az/ has yet run against "
+                 "a real subscription, so its findings and its create and "
+                 "delete paths remain tested logic rather than measured "
+                 "behaviour.")
 
         report_leftovers(args.region)
     except Exception:
