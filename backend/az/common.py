@@ -56,7 +56,24 @@ def _import(name, attribute):
         module = __import__(name, fromlist=[attribute])
     except ImportError as e:
         raise AzureNotConfigured(f"{INSTALL_HINT} (missing {name}: {e})") from e
-    return getattr(module, attribute)
+
+    # A module that imports and does not carry the symbol is the same problem
+    # as one that does not import, and callers must be able to handle it the
+    # same way. azure-mgmt-resource 26.0.0 is exactly this: `azure.mgmt.resource`
+    # imports cleanly and exposes nothing at all, because the client moved down
+    # to `azure.mgmt.resource.resources`. resource_client() already carries a
+    # fallback for that move, and it never fired - it catches AzureNotConfigured
+    # and this raised a bare AttributeError past it, out through the registry
+    # and into the caller. Found on the first create against a real
+    # subscription, where it stopped the write path on its first call.
+    try:
+        return getattr(module, attribute)
+    except AttributeError as e:
+        raise AzureNotConfigured(
+            f"{name} is installed but does not provide {attribute}. The SDK "
+            "moves these between versions; see resource_client() for the "
+            f"fallback pattern. ({e})"
+        ) from e
 
 
 def subscription_id():

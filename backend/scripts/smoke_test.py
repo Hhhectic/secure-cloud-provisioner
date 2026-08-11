@@ -1911,8 +1911,14 @@ def smoke_azure_storage(location, with_writes):
                  "period and cannot be reused until it lapses")
         elif created:
             note(f"--keep: storage account {created} left behind in {group}")
-        note(f"resource group {group} was created and is not removed by this "
-             "script; delete it in the portal if the run left anything")
+        if created:
+            # Only once something actually reached Azure. The first version
+            # said this unconditionally and printed it after a create that had
+            # failed before touching the subscription, naming a resource group
+            # that was never made.
+            note(f"resource group {group} holds what this run created and is "
+                 "not removed by this script; delete it in the portal if "
+                 "anything is left")
 
 
 def smoke_azure_keyvault(location, with_writes):
