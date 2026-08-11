@@ -33,7 +33,8 @@ nothing on a machine with only the AWS half installed.
 """
 
 from az import names, nsg as az_nsg, vnet as az_vnet
-from az.common import (AzureNotConfigured, _import, credential,
+from az.common import (AzureNotConfigured, AzureRefused, _import,
+                       credential,
                        ensure_resource_group, is_managed, managed_tags,
                        network_client, plain, resource_group_of,
                        subscription_id)
@@ -447,11 +448,19 @@ def create_vm(client, name, resource_group, location="eastus",
             "anywhere."
         ), problems
 
-    net = network_client()
+    # The resource group is checked before a second client is built, because
+    # it is the cheapest thing that can stop this and the one most likely to.
+    # Building the network client first meant a caller who named a group they
+    # cannot see paid for a client they never used.
+    try:
+        created, note = ensure_resource_group(resource_group, location)
+    except AzureRefused as e:
+        return False, str(e), problems
 
-    created, note = ensure_resource_group(resource_group, location)
     if created:
         problems.append(note)
+
+    net = network_client()
 
     # ---- The network --------------------------------------------------------
     vnet_name = vnet_name or f"{name}-vnet"

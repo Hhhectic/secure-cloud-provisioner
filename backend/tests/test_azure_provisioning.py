@@ -20,6 +20,9 @@ from api import registry
 from az import names as az_names
 from az import nsg as az_nsg
 from az import vnet as az_vnet
+from az import common as az_common
+from az import storage as az_storage_mod
+from az import keyvault as az_keyvault_mod
 from az import vm as az_vm
 from scanner import azure_nsg_effective as effective
 from scanner.azure_nsg_rules import check_nsg
@@ -710,3 +713,158 @@ def test_the_machine_form_offers_only_the_allowlist():
     offered = {c["value"] for c in registry.AZURE_VM.options(None)["vm_size"]}
 
     assert offered == az_vm.ALLOWED_VM_SIZES
+
+
+# ================= A group you may not see, and one that is not there
+#
+# Azure answers both with a refusal, which is the third time this project has
+# paid for that fact - after SkuNotAvailable and the unregistered compute
+# provider. Found by typing a resource group name that did not exist into the
+# CLI under a service principal scoped to particular groups: a traceback about
+# an HTTP response came back instead of a sentence.
+
+
+class _Forbidden(Exception):
+    status_code = 403
+
+    def __str__(self):
+        return ("(AuthorizationFailed) The client '...' does not have "
+                "authorization to perform action "
+                "'Microsoft.Resources/subscriptions/resourcegroups/read'")
+
+
+class _Missing(Exception):
+    status_code = 404
+
+
+class _StubGroups:
+    def __init__(self, error=None):
+        self._error = error
+        self.created = []
+
+    def get(self, name):
+        if self._error:
+            raise self._error
+        return object()
+
+    def create_or_update(self, name, body):
+        self.created.append((name, body))
+
+
+class _StubResourceClient:
+    def __init__(self, error=None):
+        self.resource_groups = _StubGroups(error)
+
+
+@pytest.fixture
+def resource_client_raising(monkeypatch):
+    def _install(error):
+        client = _StubResourceClient(error)
+        monkeypatch.setattr(az_common, "resource_client", lambda *a, **k: client)
+        return client
+    return _install
+
+
+def test_a_resource_group_you_may_not_read_is_a_refusal_not_a_crash(
+        resource_client_raising):
+    """403 used to fall through the `!= 404` guard and out of the process."""
+    resource_client_raising(_Forbidden())
+
+    with pytest.raises(az_common.AzureRefused) as raised:
+        az_common.ensure_resource_group("cdkhcd", "eastus")
+
+    assert "not allowed to look at the resource group 'cdkhcd'" in str(raised.value)
+    assert "same refusal" in str(raised.value)
+
+
+def test_it_does_not_try_to_create_a_group_it_could_not_read(
+        resource_client_raising):
+    """Treating 403 as "not there" sends the create straight into
+    create_or_update, which fails again with a second 403 and a worse
+    message."""
+    client = resource_client_raising(_Forbidden())
+
+    with pytest.raises(az_common.AzureRefused):
+        az_common.ensure_resource_group("cdkhcd", "eastus")
+
+    assert client.resource_groups.created == []
+
+
+def test_a_group_that_is_genuinely_missing_is_still_created(
+        resource_client_raising):
+    """The 404 path must keep working. It is the reason this function exists."""
+    client = resource_client_raising(_Missing())
+
+    created, note = az_common.ensure_resource_group("brand-new", "eastus")
+
+    assert created is True
+    assert "did not exist, so it was created" in note
+    assert client.resource_groups.created[0][0] == "brand-new"
+
+
+def test_being_unable_to_create_a_group_is_also_a_sentence(monkeypatch):
+    """Reading may be allowed while creating is not - Azure grants the two
+    separately, and a subscription-wide grant is what creating one needs."""
+    class _ReadableUncreatable(_StubGroups):
+        def get(self, name):
+            raise _Missing()
+
+        def create_or_update(self, name, body):
+            raise _Forbidden()
+
+    client = _StubResourceClient()
+    client.resource_groups = _ReadableUncreatable()
+    monkeypatch.setattr(az_common, "resource_client", lambda *a, **k: client)
+
+    with pytest.raises(az_common.AzureRefused) as raised:
+        az_common.ensure_resource_group("brand-new", "eastus")
+
+    assert "not allowed to create one" in str(raised.value)
+
+
+@pytest.mark.parametrize("key,extra", [
+    ("azure-storage", {}),
+    ("azure-keyvault", {}),
+    ("azure-nsg", {"azure_rules": []}),
+    ("azure-vnet", {}),
+    ("azure-vm", {"public_key": "ssh-ed25519 AAAA", "vm_size": "Standard_B1s"}),
+])
+def test_every_create_returns_the_refusal_rather_than_raising(
+        key, extra, resource_client_raising, monkeypatch):
+    """The registry contract is (ok, error, problems). A permission failure has
+    to arrive through that channel like every other refusal, or the caller gets
+    a traceback and loses `problems` with it - which is how a failed machine
+    create left four billable resources nobody was told about."""
+    resource_client_raising(_Forbidden())
+    monkeypatch.setattr(az_names, "check", lambda kind, name: (True, None))
+
+    resource = registry.get(key)
+    spec = {"name": "demo", "resource_group": "cdkhcd", "region": "eastus"}
+    spec.update(extra)
+
+    # The name-availability calls happen before this and need a client; the
+    # ones that make them are stubbed to say the name is free.
+    for module in (az_storage_mod, az_keyvault_mod, az_nsg, az_vnet):
+        if hasattr(module, "_name_is_available"):
+            monkeypatch.setattr(module, "_name_is_available",
+                                lambda *a, **k: (True, None))
+        if hasattr(module, "_name_is_taken"):
+            monkeypatch.setattr(module, "_name_is_taken",
+                                lambda *a, **k: (False, None))
+
+    ok, message, problems = resource.create(_AnyClient(), spec)
+
+    assert ok is False, key
+    assert "not allowed" in message, key
+    assert isinstance(problems, list), key
+
+
+class _AnyClient:
+    """Accepts any attribute access and any call. The creates above never get
+    as far as using it, because the resource group check fails first."""
+
+    def __getattr__(self, name):
+        return _AnyClient()
+
+    def __call__(self, *args, **kwargs):
+        return _AnyClient()

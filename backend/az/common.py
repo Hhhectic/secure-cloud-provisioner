@@ -34,6 +34,63 @@ class AzureNotConfigured(Exception):
     """The Azure SDK or its credentials are not available in this process."""
 
 
+# Separate from AzureNotConfigured on purpose, because the two send a person to
+# two different places. "Not configured" means this process cannot talk to
+# Azure at all and the fix is a package or a variable. This means Azure was
+# reached, understood the request, and said no - the credentials are fine and
+# the permission is not, which is a conversation with whoever owns the
+# subscription rather than an edit to a file.
+#
+# Carries a sentence rather than a status code. Every create in `az/` catches
+# it and returns it as the error half of (ok, error, problems), so a refusal
+# arrives through the same channel as "that name is taken" instead of as a
+# traceback about an HTTP response - which is what a caller got before this
+# existed, and which names the missing action in the one format nobody reads
+# as advice.
+class AzureRefused(Exception):
+    """Azure was reached and declined, for a reason the caller can act on."""
+
+
+def denied(error):
+    """Whether Azure refused this for permission rather than for absence.
+
+    Every read in this package has to make this distinction, because Azure does
+    not: a resource you may not see and a resource that is not there both come
+    back as a refusal, and the only difference is the status code. A reader
+    that checks for 404 and re-raises everything else turns "you lack a role"
+    into a traceback about an HTTP response, which is the one format nobody
+    reads as advice.
+
+    Matches the code and the error string, because the two calls that produced
+    this were not consistent about which one carried the answer.
+    """
+    return (getattr(error, "status_code", None) == 403
+            or "AuthorizationFailed" in str(error))
+
+
+def not_allowed_to_look(resource_group, what=None):
+    """The refusal every scoped-permission read here produces. One wording.
+
+    Written once because it was wrong in three places independently: a caller
+    who names a resource group the login cannot see gets the same answer
+    whether the call that noticed was a resource-group read, a security-group
+    read or a virtual-network read.
+    """
+    where = (f"{what} in the resource group '{resource_group}'" if what
+             else f"the resource group '{resource_group}'")
+
+    return AzureRefused(
+        f"This login is not allowed to look at {where}, so whether it already "
+        f"exists cannot be answered and nothing was created. Azure returns "
+        f"the same refusal for "
+        f"something you may not see and something that is not there.\n\n"
+        f"The usual cause is a service principal granted Contributor on "
+        f"particular resource groups rather than on the whole subscription - "
+        f"in which case only those group names work. Use a group the login "
+        f"already holds."
+    )
+
+
 INSTALL_HINT = (
     "The Azure half needs its own dependencies, which the AWS half does not "
     "install. Run `pip install -r requirements.txt` from the repository root."
@@ -249,6 +306,22 @@ def ensure_resource_group(name, location):
     A group that already exists is left exactly as it is, tags included.
     Stamping this tool's ownership tag on somebody else's resource group would
     make the cleanup that reads that tag a liar.
+
+    **A group you are not allowed to see is not a group that is missing, and
+    Azure answers both with a refusal.** A principal scoped to particular
+    resource groups - which is what this tool asks for, and what the smoke
+    test's `--azure-resource-group` exists to make possible - gets 403 on
+    `resource_groups.get` for any group outside that scope, whether or not it
+    exists. Treating that as "not there" would send the create straight into
+    `create_or_update`, which fails again with a second 403 and a worse
+    message. Letting it out unhandled is what actually happened: somebody
+    typed a group name that did not exist, and a traceback about an HTTP
+    response came back instead of a sentence.
+
+    This is the third time this project has paid for the same fact, after
+    `SkuNotAvailable` and the unregistered compute provider: **Azure reports
+    "you may not" and "there is none" in the same words.** Every read here has
+    to decide which it is being told.
     """
     client = resource_client()
 
@@ -259,11 +332,27 @@ def ensure_resource_group(name, location):
         # Matching on the status code rather than catching
         # ResourceNotFoundError, which lives behind an import this module
         # deliberately does not make at scope.
-        if getattr(e, "status_code", None) != 404:
+        status = getattr(e, "status_code", None)
+
+        if denied(e):
+            raise not_allowed_to_look(name) from e
+
+        if status != 404:
             raise
 
-    client.resource_groups.create_or_update(
-        name, {"location": location, "tags": managed_tags()})
+    try:
+        client.resource_groups.create_or_update(
+            name, {"location": location, "tags": managed_tags()})
+    except Exception as e:
+        if denied(e):
+            raise AzureRefused(
+                f"The resource group '{name}' does not exist and this login "
+                f"is not allowed to create one. Creating a resource group "
+                f"needs permission across the subscription; using an existing "
+                f"one needs only Contributor on that group. Name a group that "
+                f"already exists, or have somebody create this one."
+            ) from e
+        raise
 
     return True, (
         f"Resource group '{name}' did not exist, so it was created in "

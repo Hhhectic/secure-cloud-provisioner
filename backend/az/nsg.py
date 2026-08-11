@@ -14,8 +14,10 @@ than a feature.
 """
 
 from az import names
-from az.common import (AzureNotConfigured, ensure_resource_group, is_managed,
-                       managed_tags, network_client, plain, resource_group_of)
+from az.common import (AzureNotConfigured, AzureRefused, denied,
+                       ensure_resource_group, is_managed, managed_tags,
+                       network_client, not_allowed_to_look, plain,
+                       resource_group_of)
 
 
 def get_client(region="us-east-1"):
@@ -336,11 +338,17 @@ def create_nsg(client, name, resource_group, location="eastus", rules=None):
     if error:
         return False, error, problems
 
-    taken, why_not = _name_is_taken(client, name, resource_group)
-    if taken:
-        return False, why_not, problems
+    # Both of these read inside the resource group, so both answer a name the
+    # login cannot see with a refusal rather than with "no". One catch, because
+    # to the caller they are one question: can this be built here.
+    try:
+        taken, why_not = _name_is_taken(client, name, resource_group)
+        if taken:
+            return False, why_not, problems
 
-    created, note = ensure_resource_group(resource_group, location)
+        created, note = ensure_resource_group(resource_group, location)
+    except AzureRefused as e:
+        return False, str(e), problems
     if created:
         problems.append(note)
 
@@ -378,6 +386,12 @@ def _name_is_taken(client, name, resource_group):
     try:
         client.network_security_groups.get(resource_group, name)
     except Exception as e:
+        # 403 here is the same fact ensure_resource_group records: a resource
+        # group this login cannot see answers every read inside it with a
+        # refusal, and "not allowed" is not "not there". Checked before 404,
+        # because only one of the two is an answer to the question asked.
+        if denied(e):
+            raise not_allowed_to_look(resource_group, "network security groups") from e
         if getattr(e, "status_code", None) == 404:
             return False, None
         raise

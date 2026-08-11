@@ -20,6 +20,7 @@ delete refuses without force even though Azure would carry it out
 from az import names
 from az.common import (
     AzureNotConfigured,
+    AzureRefused,
     ensure_resource_group,
     is_managed,
     managed_tags,
@@ -260,7 +261,10 @@ def create_account(client, name, resource_group, location="eastus",
     if not available:
         return False, why_not, problems
 
-    created, note = ensure_resource_group(resource_group, location)
+    try:
+        created, note = ensure_resource_group(resource_group, location)
+    except AzureRefused as e:
+        return False, str(e), problems
     if created:
         problems.append(note)
 

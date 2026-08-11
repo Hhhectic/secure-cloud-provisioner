@@ -983,6 +983,22 @@ cleaned up only the machine, so a create that failed before making one leaked
 all four. `_remove_vm_scaffolding` removes them in the order Azure enforces,
 whether or not the machine was ever built.
 
+**And a fourth time, from the CLI.** Somebody typed a resource group name that
+did not exist, and got a traceback about an HTTP response. The service
+principal holds Contributor on particular resource groups rather than on the
+subscription, so Azure answered "does this group exist?" with **403, not 404** —
+and `ensure_resource_group` handled only 404 and re-raised everything else. The
+same bug was in `_name_is_taken` for security groups and virtual networks,
+independently, because each was written to the same wrong assumption.
+
+`az/common.denied` and `az/common.not_allowed_to_look` are the one place that
+distinction is now made, and every create catches `AzureRefused` and returns it
+as the error half of `(ok, error, problems)` — so a permission failure arrives
+through the same channel as "that name is taken" rather than as a stack trace.
+Worth stating plainly, because it is the fourth instance and will not be the
+last: **a read that only handles 404 is a read that turns a missing role into a
+crash.**
+
 **The smoke test asks which size to use rather than naming one.** A hardcoded
 size makes that section pass or fail on which subscription it is pointed at
 rather than on whether the code works, which is the same failure as a test that

@@ -19,6 +19,7 @@ this module costs nothing on a machine with only the AWS half installed.
 from az import names
 from az.common import (
     AzureNotConfigured,
+    AzureRefused,
     ensure_resource_group,
     is_managed,
     keyvault_client,
@@ -256,7 +257,10 @@ def create_vault(client, name, resource_group, location="eastus",
     if not available:
         return False, why_not, problems
 
-    created, note = ensure_resource_group(resource_group, location)
+    try:
+        created, note = ensure_resource_group(resource_group, location)
+    except AzureRefused as e:
+        return False, str(e), problems
     if created:
         problems.append(note)
 
