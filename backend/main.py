@@ -12,6 +12,13 @@ import string
 import time
 from pathlib import Path
 
+# Before anything reads a credential. See environment.py: nothing in backend/
+# used to read .env, so credentials put where every instruction here says to
+# put them reached the root Azure app and not this one.
+import environment
+
+environment.load()
+
 from aws.security_groups import (
     get_client as ec2_client,
     get_default_vpc,

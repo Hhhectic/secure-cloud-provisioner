@@ -29,6 +29,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+# Before api.registry imports the provider modules, and well before any route
+# asks for a client. See environment.py.
+import environment
+
+environment.load()
+
 from api import audit, models, registry
 from aws.common import AwsNotConfigured
 from aws.s3_buckets import PermissionDenied
