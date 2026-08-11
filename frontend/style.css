@@ -118,3 +118,10 @@ select { font: inherit; padding: .25rem; border: 1px solid #999; background: #ff
 #toast { position: fixed; bottom: 1rem; right: 1rem; padding: .6rem .9rem;
          border: 1px solid #1a1a1a; background: #fff; max-width: 34rem; }
 #toast.err { border-color: #a00; background: #fee; }
+
+/* The live pre-flight, above the Create button. Deliberately quieter than the
+   output of an explicit check: this appears without being asked for, so it
+   states what it knows and does not compete with the findings inside it. */
+.live:not(:empty) { border-top: 1px dashed #ccc; margin-top: .8rem; padding-top: .6rem; }
+.live-head { font-size: .85rem; color: #444; margin: 0 0 .4rem; }
+.live-clean { font-size: .85rem; color: #060; margin: 0; }

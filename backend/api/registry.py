@@ -22,7 +22,7 @@ line to REGISTRY. No route changes.
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from botocore.exceptions import ClientError
+from aws.common import ClientError
 
 from aws import security_groups as sg
 from aws import s3_buckets as s3

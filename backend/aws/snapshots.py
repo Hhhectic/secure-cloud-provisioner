@@ -33,8 +33,7 @@ snapshots would report confidently on the one property that matters without
 ever having asked about it.
 """
 
-import boto3
-from botocore.exceptions import ClientError
+from aws.common import client as _client, ClientError
 
 from aws.s3_buckets import PermissionDenied
 
@@ -69,7 +68,7 @@ _ACCOUNT_ATTRIBUTE = "_scp_account_id"
 
 def get_client(region="us-east-1"):
     """Initializes and returns an EC2 client."""
-    return boto3.client("ec2", region_name=region)
+    return _client("ec2", region)
 
 
 def _denied(e, permission):
@@ -90,7 +89,7 @@ def account_id(ec2):
     if cached:
         return cached
 
-    sts = boto3.client("sts", region_name=ec2.meta.region_name)
+    sts = _client("sts", ec2.meta.region_name)
     try:
         found = sts.get_caller_identity()["Account"]
     except ClientError as e:

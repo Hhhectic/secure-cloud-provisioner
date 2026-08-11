@@ -27,8 +27,7 @@ alternative.
 import math
 from datetime import datetime, timedelta, timezone
 
-import boto3
-from botocore.exceptions import ClientError, WaiterError
+from aws.common import client as _client, ClientError, WaiterError
 
 MANAGED_TAG_KEY = "ManagedBy"
 MANAGED_TAG_VALUE = "secure-cloud-provisioner"
@@ -91,7 +90,7 @@ class InstanceTypeNotAllowed(ValueError):
 
 def get_client(region="us-east-1"):
     """Initializes and returns an EC2 client."""
-    return boto3.client("ec2", region_name=region)
+    return _client("ec2", region)
 
 
 def architecture_for(instance_type):
@@ -105,7 +104,7 @@ def architecture_for(instance_type):
 
 def latest_ami(region, architecture="x86_64"):
     """Looks up the current Amazon Linux 2023 image for this region."""
-    ssm = boto3.client("ssm", region_name=region)
+    ssm = _client("ssm", region)
     parameter = AMI_PARAMETERS.get(architecture)
     if not parameter:
         return None, f"No image is configured for {architecture}."
@@ -517,7 +516,7 @@ def read_cpu_usage(ec2, instance_id, hours=CPU_WINDOW_HOURS, now=None):
     the second as idle would advise switching off something that may be busy.
     """
     now = now or datetime.now(timezone.utc)
-    cloudwatch = boto3.client("cloudwatch", region_name=ec2.meta.region_name)
+    cloudwatch = _client("cloudwatch", ec2.meta.region_name)
 
     try:
         points = cloudwatch.get_metric_statistics(

@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from api import audit, models, registry
+from aws.common import AwsNotConfigured
 from aws.s3_buckets import PermissionDenied
 from az.common import AzureNotConfigured
 from blueprints import bastion
@@ -175,6 +176,27 @@ async def _permission_denied(request, exc):
                 "and try again."
             ),
             "missing_permission": exc.permission,
+        },
+    )
+
+
+@app.exception_handler(AwsNotConfigured)
+async def _aws_not_configured(request, exc):
+    """The same answer as the Azure one, for the same reason.
+
+    boto3 used to be a hard requirement of importing this module, so this state
+    was unreachable: a deployment without it could not start at all. Now that
+    `aws/` imports the SDK lazily, an installation with only the Azure
+    dependencies serves the Azure half and answers here for the rest, which is
+    what the Azure half has always done in the other direction.
+    """
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": str(exc),
+            "provider": "aws",
         },
     )
 

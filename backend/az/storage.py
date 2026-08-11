@@ -103,7 +103,40 @@ def read_account_for_scanning(client, name):
             found, "enable_https_traffic_only", None),
         "minimum_tls_version": getattr(found, "minimum_tls_version", None),
         "public_network_access": getattr(found, "public_network_access", None),
+        # Null is documented as equivalent to true here, unlike the two
+        # settings below: Azure says an unset allowSharedKeyAccess permits the
+        # account key. That is a documented default rather than a guess, so it
+        # is resolved here instead of going into "unreadable" - reporting an
+        # unchecked setting for the commonest case would be noise standing in
+        # front of the findings that matter.
+        "allow_shared_key_access": getattr(found, "allow_shared_key_access",
+                                           None) is not False,
+        "containers": [],
     }
+
+    # Which containers are actually served anonymously, as opposed to whether
+    # the account permits it. These are two different questions: the account
+    # switch says whether a container *may* be public, and the container's own
+    # access level says whether one *is*. A reader who has turned the account
+    # switch on wants to know which containers it currently affects.
+    #
+    # This is a second call and a second permission, so a failure is recorded
+    # rather than read as "no public containers" - that answer looks identical
+    # to a clean result and is the most dangerous possible way to be wrong.
+    try:
+        settings["containers"] = [
+            {"name": c.name,
+             # None means private. Azure spells the other two "Blob" (objects
+             # readable, listing not) and "Container" (both).
+             "public_access": getattr(c, "public_access", None)}
+            for c in client.blob_containers.list(group, short)
+        ]
+        containers_unreadable = None
+    except Exception as e:
+        containers_unreadable = (
+            "the login could not list this account's containers "
+            f"({type(e).__name__})"
+        )
 
     # An attribute Azure did not return is a question this scan did not get an
     # answer to, and the scanner reports those rather than scoring them clean.
@@ -112,6 +145,8 @@ def read_account_for_scanning(client, name):
         if settings[key] is None:
             unreadable[key] = ("Azure did not report this setting for this "
                                "account")
+    if containers_unreadable:
+        unreadable["containers"] = containers_unreadable
 
     settings["unreadable"] = unreadable
     return settings
@@ -129,6 +164,11 @@ def describe_account(settings):
         "supports_https_traffic_only": settings.get(
             "supports_https_traffic_only"),
         "minimum_tls_version": settings.get("minimum_tls_version"),
+        "allow_shared_key_access": settings.get("allow_shared_key_access"),
+        "containers": [
+            {"name": c.get("name"), "public_access": c.get("public_access")}
+            for c in settings.get("containers") or []
+        ],
         "checks_skipped": sorted(settings.get("unreadable") or {}),
     }
 

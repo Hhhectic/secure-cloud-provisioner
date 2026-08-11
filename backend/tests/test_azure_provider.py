@@ -8,17 +8,28 @@ it, because every scanner in the package read the same one cloud. These
 findings come out of `api/app.py` counted and rendered by code that knows
 nothing about Azure, which is the evidence.
 
-The second matters more day to day: **the AWS half must start on a machine with
-no Azure SDK installed.** `.venv` is exactly such a machine, so every test here
-runs in that condition. If somebody later moves an Azure import to module scope
-in `az/`, `api/registry.py` stops importing and the whole AWS half goes with
-it - the precise failure recorded against mounting the two applications into
-one process.
+The second matters more day to day: **neither half may be a hard requirement of
+starting the other.** `api/registry.py` imports every provider module at
+startup, so one module-scope SDK import in either half takes the whole page
+down - both clouds - over a dependency belonging to one of them.
+
+This used to be asserted by checking that the Azure SDK was absent from the
+interpreter running the tests, `.venv` being a machine that lacked it. That
+held until somebody installed it, at which point the test failed and proved
+nothing, and the obvious reaction to a test failing on your own machine is to
+delete it. The property is now shown by blocking each SDK inside a subprocess,
+which holds on any machine - and, since `aws/common.py`, in both directions
+rather than only the Azure one.
 
 There is no moto for Azure. The reader tests use stubs shaped like the SDK's
 own return values rather than a fake service, which is the same approach
 `test_alarms.py` takes for the parts of AWS moto models wrongly.
 """
+
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -84,24 +95,90 @@ def _find(warnings, setting):
 # ================================ The AWS half must not need the Azure SDK
 
 
-def test_the_azure_sdk_is_genuinely_absent_here():
-    """Every claim below rests on this. If the SDK were installed the tests
-    would pass without proving the property they exist for."""
-    with pytest.raises(ImportError):
-        __import__("azure.mgmt.network")
+BACKEND = Path(__file__).resolve().parent.parent
+
+# Refuses one SDK for the life of a subprocess, so the property can be shown on
+# any machine rather than only on one that happens to lack it.
+#
+# This used to be asserted by checking that the Azure SDK was missing from the
+# interpreter running the tests. That worked while nobody had installed it, and
+# stopped meaning anything the moment somebody did - at which point the test
+# fails, the obvious reaction is to delete it, and the property goes unguarded.
+# A test that only holds on some machines is one nobody can trust on theirs.
+_BLOCK = """
+import sys
+
+class _Block:
+    def __init__(self, *names): self.names = names
+    def find_spec(self, name, path=None, target=None):
+        if name in self.names or any(name.startswith(n + ".") for n in self.names):
+            raise ImportError("blocked: " + name)
+        return None
+
+sys.meta_path.insert(0, _Block(*{blocked!r}))
+"""
 
 
-def test_the_registry_imports_without_the_azure_sdk():
-    assert "azure-nsg" in registry.REGISTRY
-    assert "azure-storage" in registry.REGISTRY
+def _without(blocked, body):
+    """Runs body in a subprocess where the named packages cannot be imported."""
+    return subprocess.run(
+        [sys.executable, "-c", _BLOCK.format(blocked=tuple(blocked)) + body],
+        cwd=BACKEND, capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": str(BACKEND)},
+    )
 
 
-def test_asking_azure_for_a_client_explains_itself_rather_than_raising_import():
-    """An ImportError about azure.mgmt.network reaching a browser tells the
-    person using the tool nothing they can act on."""
-    with pytest.raises(az_common.AzureNotConfigured) as raised:
-        az_nsg.get_client("us-east-1")
-    assert "pip install" in str(raised.value)
+AZURE_SDK = ["azure"]
+AWS_SDK = ["boto3", "botocore"]
+
+
+@pytest.mark.parametrize("blocked,label", [
+    (AZURE_SDK, "the Azure SDK"),
+    (AWS_SDK, "boto3"),
+    (AZURE_SDK + AWS_SDK, "both SDKs"),
+])
+def test_the_page_starts_without(blocked, label):
+    """Neither cloud's SDK may be a hard requirement of starting the process.
+
+    api/registry.py imports every provider module at startup, so one module
+    scope import in either half takes the whole page down - both clouds - over
+    a dependency belonging to one of them.
+    """
+    done = _without(blocked, "import api.app\nprint('ok')\n")
+    assert done.returncode == 0, f"the page did not start without {label}:\n{done.stderr}"
+
+
+@pytest.mark.parametrize("blocked", [AZURE_SDK, AWS_SDK, AZURE_SDK + AWS_SDK])
+def test_every_resource_type_is_still_registered_without(blocked):
+    """A missing SDK hides no resource type. The tab appears and the route
+    answers 503 with a sentence; a type that vanished would look like one this
+    tool does not support."""
+    done = _without(blocked, "from api import registry\n"
+                             "print(len(registry.REGISTRY))\n")
+    assert done.returncode == 0, done.stderr
+    assert int(done.stdout.strip()) == len(registry.REGISTRY)
+
+
+@pytest.mark.parametrize("blocked,module,error,call", [
+    (AZURE_SDK, "az.nsg", "az.common.AzureNotConfigured", "get_client('eastus')"),
+    (AWS_SDK, "aws.security_groups", "aws.common.AwsNotConfigured", "get_client('us-east-1')"),
+])
+def test_asking_for_an_absent_client_explains_itself(blocked, module, error, call):
+    """An ImportError about azure.mgmt.network or botocore reaching a browser
+    tells the person using the tool nothing they can act on. Both halves answer
+    with the same shape of sentence, naming what to install."""
+    package, _, name = error.rpartition(".")
+    done = _without(blocked, f"""
+import {module} as target
+from {package} import {name} as Expected
+try:
+    target.{call}
+    print("NO ERROR")
+except Expected as e:
+    print("pip install" in str(e))
+""")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "True", done.stdout
 
 
 def test_the_azure_modules_import_no_sdk_at_module_scope():
@@ -286,6 +363,160 @@ def test_the_scanner_tolerates_an_account_that_is_not_there():
     assert check_storage_account(None) == []
 
 
+# ================================== Containers, and the account key
+#
+# Both ported from the Streamlit frontend's preflight.py. Each asks something
+# the account-level settings above do not.
+
+
+@pytest.mark.parametrize("level", ["Blob", "Container"])
+def test_a_container_serving_anonymous_readers_is_critical(level):
+    found = _find(
+        check_storage_account(_account(containers=[
+            {"name": "reports", "public_access": level}])),
+        "public_container_reports")
+    assert found["level"] == CRITICAL
+
+
+def test_a_private_container_says_nothing():
+    warnings = check_storage_account(_account(containers=[
+        {"name": "reports", "public_access": None},
+        {"name": "backups", "public_access": "None"}]))
+    assert warnings == []
+
+
+def test_container_level_access_is_reported_separately_from_the_account_switch():
+    """The account switch says a container *may* be anonymous; the container's
+    own level says one *is*. Somebody who turned the switch on months ago needs
+    the second answer to know what it is currently exposing."""
+    warnings = check_storage_account(_account(
+        allow_blob_public_access=True,
+        containers=[{"name": "reports", "public_access": "Container"}]))
+
+    assert {"public_blob_access", "public_container_reports"} <= _settings_of(warnings)
+
+
+def test_listing_the_whole_container_is_called_out_as_worse_than_reading_one():
+    listable = _find(check_storage_account(_account(containers=[
+        {"name": "reports", "public_access": "Container"}])),
+        "public_container_reports")
+    blobs_only = _find(check_storage_account(_account(containers=[
+        {"name": "reports", "public_access": "Blob"}])),
+        "public_container_reports")
+
+    assert "list everything" in listable["message"]
+    assert "list everything" not in blobs_only["message"]
+
+
+def test_containers_that_could_not_be_listed_are_not_scored_as_private():
+    """The same rule the account settings follow. An empty container list and
+    a container list the login could not read look identical, and one of them
+    is the most dangerous possible way to be wrong."""
+    warnings = check_storage_account(_account(
+        containers=[], unreadable={"containers": "the login could not list them"}))
+
+    assert _find(warnings, "unreadable_containers")["level"] == WARNING
+
+
+def test_an_account_still_accepting_its_key_is_a_warning():
+    found = _find(check_storage_account(_account(allow_shared_key_access=True)),
+                  "shared_key_allowed")
+    assert found["level"] == WARNING
+    assert "never expires" in found["message"]
+
+
+def test_an_account_requiring_entra_id_says_nothing():
+    assert "shared_key_allowed" not in _settings_of(
+        check_storage_account(_account(allow_shared_key_access=False)))
+
+
+# ==================================== Reading those two off the SDK
+#
+# Stubs shaped like the SDK's return values, for the same reason the rest of
+# this file uses them: there is no moto for Azure, and the parts worth testing
+# here are how absent values are resolved rather than how the wire looks.
+
+STORAGE_ID = (f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{GROUP}"
+              f"/providers/Microsoft.Storage/storageAccounts/demostorage")
+
+
+class _Fields:
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
+
+
+class _StubAccounts:
+    def __init__(self, account):
+        self._account = account
+
+    def get_properties(self, group, name):
+        return self._account
+
+
+class _StubContainers:
+    def __init__(self, containers, error=None):
+        self._containers = containers
+        self._error = error
+
+    def list(self, group, name):
+        if self._error:
+            raise self._error
+        return self._containers
+
+
+class _StubStorageClient:
+    def __init__(self, account=None, containers=(), container_error=None):
+        self.storage_accounts = _StubAccounts(account or _Fields(
+            name="demostorage", id=STORAGE_ID, location="eastus"))
+        self.blob_containers = _StubContainers(list(containers),
+                                               container_error)
+
+
+def test_an_unset_shared_key_setting_is_read_as_permitted():
+    """Azure documents null as equivalent to true here. Treating it as
+    unreadable instead would put an unchecked-setting warning on the commonest
+    case, in front of the findings that matter."""
+    settings = az_storage.read_account_for_scanning(
+        _StubStorageClient(), STORAGE_ID)
+
+    assert settings["allow_shared_key_access"] is True
+    assert "allow_shared_key_access" not in settings["unreadable"]
+
+
+def test_shared_key_turned_off_is_read_as_such():
+    client = _StubStorageClient(account=_Fields(
+        name="demostorage", id=STORAGE_ID, location="eastus",
+        allow_shared_key_access=False))
+
+    assert az_storage.read_account_for_scanning(
+        client, STORAGE_ID)["allow_shared_key_access"] is False
+
+
+def test_containers_are_read_with_their_access_level():
+    client = _StubStorageClient(containers=[
+        _Fields(name="reports", public_access="Container"),
+        _Fields(name="private", public_access=None)])
+
+    settings = az_storage.read_account_for_scanning(client, STORAGE_ID)
+
+    assert settings["containers"] == [
+        {"name": "reports", "public_access": "Container"},
+        {"name": "private", "public_access": None},
+    ]
+
+
+def test_a_login_that_cannot_list_containers_says_so():
+    """An empty list would be read as "no public containers", which is
+    indistinguishable from a clean result and is the wrong way to be wrong."""
+    client = _StubStorageClient(container_error=PermissionError("denied"))
+
+    settings = az_storage.read_account_for_scanning(client, STORAGE_ID)
+
+    assert settings["containers"] == []
+    assert "containers" in settings["unreadable"]
+    assert "could not list" in settings["unreadable"]["containers"]
+
+
 # ================================================ Before anything exists
 
 
@@ -305,16 +536,17 @@ def test_an_insecure_storage_form_is_flagged_before_creation():
     assert {"public_blob_access", "http_allowed"} <= _settings_of(warnings)
 
 
-def test_a_secure_storage_form_raises_nothing_worse_than_a_note():
+def test_a_secure_storage_form_still_reports_azures_own_defaults():
     """Not silent, and correctly so. An account created with every setting
-    this tool would choose is still reachable from any network, because that
-    is Azure's default and not something the form decides. Saying so before
-    creation is the point of scanning a form at all."""
+    this tool would choose is still reachable from any network and still
+    accepts its account key, because both are Azure's defaults rather than
+    something the form decides. Saying so before creation is the point of
+    scanning a form at all."""
     warnings = check_storage_spec({"name": "demo", "secure_by_default": True})
 
-    assert _settings_of(warnings) == {"reachable_from_anywhere"}
+    assert _settings_of(warnings) == {"reachable_from_anywhere",
+                                      "shared_key_allowed"}
     assert summarize(warnings)["critical"] == 0
-    assert summarize(warnings)["warning"] == 0
 
 
 # ============================================== Creating and deleting storage
@@ -324,6 +556,13 @@ def test_a_secure_storage_form_raises_nothing_worse_than_a_note():
 # same approach test_alarms.py takes for the parts of AWS moto models wrongly,
 # and it has the same limit: it proves this module asks for the right things,
 # not that Azure does them. Only a live subscription can show the second.
+#
+# A second stub rather than an extension of _StubStorageClient above, because
+# the two model different slices of one SDK object and are built from different
+# things. That one is handed the account it should return and is asked to read;
+# this one is handed nothing, asked to create, and examined afterwards for what
+# it was told to build. One class serving both would need two constructors
+# sharing no arguments.
 
 
 class _StubAccount:
@@ -349,7 +588,7 @@ class _NameAnswer:
         self.message = message
 
 
-class _StubStorageClient:
+class _StubProvisioningClient:
     """The slice of StorageManagementClient that az/storage.py touches."""
 
     def __init__(self, accounts=(), name_available=True):
@@ -393,7 +632,7 @@ def group_exists(monkeypatch):
 
 def test_a_created_account_carries_the_tag_that_makes_cleanup_possible(
         group_exists):
-    client = _StubStorageClient()
+    client = _StubProvisioningClient()
     ok, resource_id, _ = az_storage.create_account(client, "demo", GROUP)
 
     assert ok
@@ -406,7 +645,7 @@ def test_every_setting_the_scanner_reads_is_stated_rather_than_defaulted(
         group_exists):
     """The lesson assign_public_ip taught on the AWS side: an absent setting
     is not a safe setting, it is the platform's setting."""
-    client = _StubStorageClient()
+    client = _StubProvisioningClient()
     az_storage.create_account(client, "demo", GROUP)
 
     built = client.created[0][2]["properties"]
@@ -427,8 +666,17 @@ def test_the_findings_after_creation_are_the_ones_the_form_scan_promised(
     This is why there is one secure_by_default switch here and not a field per
     setting. group/main's form offered a TLS dropdown beside a scanner with no
     TLS rule, and could therefore build a TLS 1.0 account and call it clean.
+
+    Two of the settings the reader returns are not the form's to decide, and
+    they are written here as the account would actually read the moment it
+    exists rather than left out. A brand new account has no containers, and
+    Azure permits the account key unless somebody turns it off - which
+    create_account deliberately does not do, for the reason check_storage_spec
+    already gives about it. Omitting them would make this test agree by not
+    asking, which is the one way it could pass while the property it exists for
+    was false.
     """
-    client = _StubStorageClient()
+    client = _StubProvisioningClient()
     az_storage.create_account(client, "demo", GROUP, secure_by_default=secure)
     built = client.created[0][2]["properties"]
 
@@ -438,6 +686,8 @@ def test_the_findings_after_creation_are_the_ones_the_form_scan_promised(
         "supports_https_traffic_only": built["supportsHttpsTrafficOnly"],
         "minimum_tls_version": built["minimumTlsVersion"],
         "public_network_access": "Enabled",
+        "allow_shared_key_access": built.get("allowSharedKeyAccess", True),
+        "containers": [],
         "unreadable": {},
     })
     before = check_storage_spec({"name": "demo", "secure_by_default": secure})
@@ -450,7 +700,7 @@ def test_an_existing_account_name_is_refused_rather_than_overwritten(
     """begin_create on a name you already own updates that account instead of
     failing, so try-it-and-catch would rewrite a live account's settings and
     report success."""
-    client = _StubStorageClient(name_available=False)
+    client = _StubProvisioningClient(name_available=False)
     ok, message, _ = az_storage.create_account(client, "demo", GROUP)
 
     assert ok is False
@@ -464,7 +714,7 @@ def test_a_resource_group_that_had_to_be_created_is_reported_not_hidden(
     nothing either. problems is the channel the create route already has."""
     monkeypatch.setattr(az_storage, "ensure_resource_group",
                         lambda name, location: (True, f"made {name}"))
-    client = _StubStorageClient()
+    client = _StubProvisioningClient()
     ok, _, problems = az_storage.create_account(client, "demo", GROUP)
 
     assert ok
@@ -475,7 +725,7 @@ def test_deleting_an_account_refuses_without_force():
     """S3 gives an unforced delete a safe failure - a bucket with anything in
     it refuses. Azure's delete succeeds on a full account and takes every blob
     with it, so the explicit ask is the only thing standing there."""
-    client = _StubStorageClient([_StubAccount("demo")])
+    client = _StubProvisioningClient([_StubAccount("demo")])
     ok, message = az_storage.delete_account(client, "demo")
 
     assert ok is False
@@ -484,7 +734,7 @@ def test_deleting_an_account_refuses_without_force():
 
 
 def test_a_forced_delete_names_the_group_from_the_resource_id():
-    client = _StubStorageClient([_StubAccount("demo")])
+    client = _StubProvisioningClient([_StubAccount("demo")])
     ok, message = az_storage.delete_account(
         client, client.accounts[0].id, force=True)
 
@@ -494,7 +744,7 @@ def test_a_forced_delete_names_the_group_from_the_resource_id():
 
 def test_cleanup_reaches_only_what_this_tool_tagged():
     """The bound that makes a cleanup endpoint defensible at all."""
-    client = _StubStorageClient([
+    client = _StubProvisioningClient([
         _StubAccount("ours", tags=az_common.managed_tags()),
         _StubAccount("someone-elses", tags={"Name": "production"}),
         _StubAccount("untagged", tags=None),
@@ -508,7 +758,7 @@ def test_cleanup_reaches_only_what_this_tool_tagged():
 
 def test_the_only_ours_filter_means_something_now():
     """It was accepted and ignored while nothing here created anything."""
-    client = _StubStorageClient([
+    client = _StubProvisioningClient([
         _StubAccount("ours", tags=az_common.managed_tags()),
         _StubAccount("theirs", tags=None),
     ])

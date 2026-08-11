@@ -84,11 +84,28 @@ and no change to `scanner/common.py`.
   carries a priority deciding which of several overlapping rules wins, so
   neither creating one nor fixing one can be judged without reading the whole
   ordered set — the same reason `az/nsg.py` offers no fix.
-- Nothing in `az/` has run against a real subscription. The SDK is still not in
-  `.venv`, so the Azure findings are tested logic rather than measured
-  behaviour, and that now covers a write path as well as a read one. The stubs
-  in `test_azure_provider.py` prove the module asks Azure for the right things.
-  They cannot prove Azure does them.
+- Nothing in `az/` has run against a real subscription. The SDK is installed
+  now, so that is no longer what is missing — it is credentials and a run.
+  Until there is one, the Azure findings and now the create and delete paths
+  with them are tested logic rather than measured behaviour, which is why
+  `az/storage.py` still declines to offer fix actions.
+
+**Neither SDK is a hard requirement, and that is now symmetric.** The paragraph
+above was true of Azure from the first commit and false of AWS the whole time:
+`aws/*.py` imported boto3 at module scope, `api/registry.py` imports every
+provider module at startup, and so a checkout without boto3 could not import
+`api/app.py` at all — the entire page, both clouds, refusing to start over a
+dependency belonging to one of them. `aws/common.py` is the mirror of
+`az/common.py` and closes it. boto3 is imported inside `client()`, and
+`ClientError` and its two siblings resolve to placeholder classes when botocore
+is absent, which nothing can ever raise because `client()` refuses first.
+
+The page now starts with either SDK missing, or both, and answers 503 with a
+sentence naming what to install. `test_the_page_starts_without` proves all
+three cases by blocking the imports in a subprocess, so it holds on any machine
+rather than only on one that happens to lack an SDK — which is what the
+previous version of this test did, and why it started failing the day somebody
+installed the Azure SDK.
 
 **There were briefly three user interfaces.** The merge brought a Streamlit
 frontend into `frontend/` beside the served page, with `app.py` next to
@@ -210,13 +227,22 @@ uvicorn main:app --reload --port 8001    # Azure scan and deploy
 python -m pytest test_azure_scanner.py   # on group/main: six tests
 ```
 
-`.venv` holds boto3 and fastapi, not `azure-identity` or the three
-`azure-mgmt-*` packages, so that uvicorn line fails on a checkout set up for
-the AWS half. `main.py` imports `azure_crud` at module scope, which pulls the
-Azure SDK in before anything runs — so `/api/v1/azure/scan`, which needs
-neither credentials nor the SDK, cannot start without them either. Worth
-knowing before a demo: one `pip install` stands between the two halves and
-running side by side.
+`.venv` now holds both SDKs, so `/ui` scans Azure as well as AWS. It did not
+until recently, and the reason for the change is worth knowing: the page is one
+process, so whether it can reach Azure is decided by the interpreter running
+uvicorn. A second virtualenv beside it does not help — `main.py` and the
+archived Streamlit page are separate processes and can have their own, but
+`/ui` cannot.
+
+What that costs is nothing, now that `test_the_page_starts_without` blocks the
+imports in a subprocess rather than relying on `.venv` being a machine that
+lacks one. Before that, installing the Azure SDK made two tests fail, and the
+obvious reaction to a test that fails on your machine is to delete it.
+
+`main.py` still imports `azure_crud` at module scope, which pulls the Azure SDK
+in before anything runs — so `/api/v1/azure/scan`, which needs neither
+credentials nor the SDK, cannot start without them either. That one is
+unchanged; only `backend/` is symmetric.
 
 It has no `/ui`, and shares nothing with `backend/` but the repository.
 Nothing below this line applies to it.
@@ -238,7 +264,8 @@ backend/
   az/          Azure. Named az/ and not azure/ on purpose; SDK imported lazily.
                storage.py provisions and deletes; nsg.py reads only
   scanner/     pure rule logic, no boto3 anywhere, no cloud calls
-  aws/         all boto3, one module per resource type (iam.py reads only)
+  aws/         all boto3, one module per resource type (iam.py reads only).
+               common.py imports the SDK lazily, mirroring az/common.py
   api/         FastAPI over a resource registry, generic across types
   blueprints/  compositions of several resources into a correct architecture
   scripts/     live smoke test and demo helpers, plus the CloudWatch harness
@@ -753,18 +780,23 @@ Severity means something — if everything is critical, nothing is.
   group somewhere they did not choose.
 - **No Azure half of the smoke test, and no live run at all.** Every AWS claim
   here is backed by `scripts/smoke_test.py` against a real account. Azure has
-  nothing equivalent: the SDK is not in `.venv`, no subscription has been
-  pointed at, and the create and delete paths are covered only by stubs shaped
-  like the SDK's own return values. That is the single largest gap in this
-  file, and it is the reason `az/storage.py` still offers no `apply_fix` even
-  though both of its findings are one property update away.
-- **`azure_crud.py` and root `main.py` are a third copy of provisioning.**
-  Storage is now done twice — once there and once in `az/storage.py` — which
-  is the same duplication the scanner had before the merge. The root app is
-  the only thing that can still create an Azure NSG, so it cannot retire until
-  `az/nsg.py` can, and `az/nsg.py` is waiting on the priority-ordering problem.
-- **The frontend covers AWS only.** It is served by the AWS app and calls only
-  its routes. Either it grows an Azure half or the README stops promising one.
+  nothing equivalent: no subscription has been pointed at, and the create and
+  delete paths are covered only by stubs shaped like the SDK's own return
+  values. That is the single largest gap in this file, and it is the reason
+  `az/storage.py` still offers no `apply_fix` even though both of its findings
+  are one property update away.
+- **`main.py` is still a second application, and now a second copy of
+  provisioning.** `backend/` is one program serving both clouds; the Azure app
+  at the repository root is not part of it and shares nothing but the
+  directory. Nothing depends on it any more, so the open question is whether it
+  is deleted or kept as the Azure-only deployment `/ui` cannot be — see *The
+  two halves are merged*. What decides it is no longer only taste: storage is
+  now built in both places, which is the duplication the scanner had before the
+  merge, and the root app is the only thing that can still create an Azure NSG.
+  It cannot retire until `az/nsg.py` can. The two entries that used to sit
+  here, saying the halves had never met and that the frontend covered AWS only,
+  were made false by that merge and by Azure becoming a `ResourceType`; the
+  page grows Azure tabs without being told they exist.
 
 ## Where this stands against the scope
 
@@ -793,21 +825,20 @@ done* above is a refinement.
    reaches in turn — and following it means traversing edges rather than
    matching statements. Everything cheap in that direction is now done; what
    is left is a different program and should be started as one.
-2. **Run the Azure half against a real subscription.** This is now the thing
-   blocking everything else Azure. `az/storage.py` creates, deletes and cleans
-   up, and none of it has spoken to Azure once. Install the SDK
-   (`pip install -r requirements.txt`), point it at a subscription, and write
-   the Azure half of the smoke test. Two things to expect: pinning
-   `azure-mgmt-network`, which is currently a floor, and
-   `test_the_azure_sdk_is_genuinely_absent_here` going red — four tests below
-   it only prove anything while the SDK is missing, so that group needs an
-   SDK-free environment of its own before the install, not after. Then
-   `apply_fix` for storage, which is one property update per finding and is
-   held back only by never having run.
+2. **Run the Azure half against a real subscription.** The one thing blocking
+   everything else Azure, and the whole of what is left of *finish the Azure
+   half*. The SDK is installed and `/ui` reaches Azure; `az/storage.py` creates,
+   deletes and cleans up. None of it has touched a subscription once, so the
+   Azure findings and both write paths are tested logic rather than measured
+   behaviour. Point it at credentials and write the Azure half of the smoke
+   test. Expect to pin `azure-mgmt-network`, which is a floor in
+   `requirements.txt` for want of a real resolve. Then `apply_fix` for storage,
+   one property update per finding, held back only by never having run.
 3. **Azure NSG provisioning, or a decision not to.** The one thing root
-   `main.py` can still do that `backend/` cannot. It needs the whole ordered
-   rule set read before a single rule can be created or narrowed — the same
-   problem blocking `az/nsg.py`'s `apply_fix`, and worth solving once.
+   `main.py` can still do that `backend/` cannot, and therefore the thing
+   keeping it alive. It needs the whole ordered rule set read before a single
+   rule can be created or narrowed — the same problem blocking `az/nsg.py`'s
+   `apply_fix`, and worth solving once for both.
 4. Detach `AmazonEC2FullAccess` and friends from `EC2_Dude`, so the documented
    least-privilege policy is the one actually in force and the smoke test
    proves it. Already done for EC2 and S3; SNS, CloudWatch and SSM remain and
