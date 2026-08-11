@@ -139,7 +139,8 @@ account 679140927523, including instances and the whole bastion blueprint.
 
 Since then, on this branch: the merge with `group/main`, Azure storage and key
 vault provisioning, the first live Azure run, and then network security group,
-virtual network and virtual machine provisioning take it to **779 from
+virtual network and virtual machine provisioning, and then telling a resource
+group you may not see apart from one that is not there, take it to **794 from
 `backend/`**, 7 skipped. The live *AWS* smoke test has not been re-run. The
 Azure half of it has, against a real subscription: `python
 scripts/smoke_test.py --azure-only --with-azure-resources
