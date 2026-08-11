@@ -507,6 +507,37 @@ def test_containers_are_read_with_their_access_level():
     ]
 
 
+def test_an_unset_public_network_access_is_read_as_enabled():
+    """Found against a real subscription, not here.
+
+    Azure only populates publicNetworkAccess once somebody sets it, so an
+    account that has never had its network access restricted returns None -
+    and the rule reads None as "say nothing". Two real accounts, both
+    reachable from any network, both scored clean. Absent is not restricted;
+    the documented default is Enabled.
+    """
+    client = _StubStorageClient()   # an account with the attribute absent
+
+    settings = az_storage.read_account_for_scanning(client, STORAGE_ID)
+
+    assert settings["public_network_access"] == "Enabled"
+    assert "reachable_from_anywhere" in _settings_of(
+        check_storage_account(settings))
+
+
+def test_a_restricted_account_is_still_read_as_restricted():
+    """The fix must not turn every account into a finding."""
+    client = _StubStorageClient(account=_Fields(
+        name="demostorage", id=STORAGE_ID, location="eastus",
+        public_network_access="Disabled"))
+
+    settings = az_storage.read_account_for_scanning(client, STORAGE_ID)
+
+    assert settings["public_network_access"] == "Disabled"
+    assert "reachable_from_anywhere" not in _settings_of(
+        check_storage_account(settings))
+
+
 def test_a_login_that_cannot_list_containers_says_so():
     """An empty list would be read as "no public containers", which is
     indistinguishable from a clean result and is the wrong way to be wrong."""

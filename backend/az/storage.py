@@ -102,7 +102,20 @@ def read_account_for_scanning(client, name):
         "supports_https_traffic_only": getattr(
             found, "enable_https_traffic_only", None),
         "minimum_tls_version": getattr(found, "minimum_tls_version", None),
-        "public_network_access": getattr(found, "public_network_access", None),
+        # Absent means Enabled, and absent is the common case. Azure only
+        # populates this once somebody sets it, so every account that has
+        # never had its network access restricted returns None here - which
+        # the rule read as "say nothing", making the check silently useless on
+        # exactly the accounts it is for. Found on the first run against a real
+        # subscription: two accounts, both reachable from any network, both
+        # scored clean. Resolved here rather than in the rule for the reason
+        # allow_shared_key_access is: the documented default is a fact about
+        # Azure, and the rules are where judgement lives, not lookup.
+        #
+        # The AWS half learned this exact lesson from assign_public_ip - see
+        # "An absent setting is not a safe setting" in CLAUDE.md.
+        "public_network_access": getattr(found, "public_network_access", None)
+                                 or "Enabled",
         # Null is documented as equivalent to true here, unlike the two
         # settings below: Azure says an unset allowSharedKeyAccess permits the
         # account key. That is a documented default rather than a guess, so it
