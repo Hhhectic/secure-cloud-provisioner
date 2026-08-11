@@ -4,3 +4,9 @@ pydantic>=2.0.0
 azure-identity==1.15.0
 azure-mgmt-resource==26.0.0
 azure-mgmt-storage==21.0.0
+# az/nsg.py and az/common.py:network_client have needed this since the merge
+# and it was never listed, so `pip install -r requirements.txt` produced a
+# checkout where importing azure_crud.py failed outright. A floor rather than a
+# pin because nothing here has resolved it against a real install yet; pin it
+# once the Azure half has run against a subscription.
+azure-mgmt-network>=25.0.0

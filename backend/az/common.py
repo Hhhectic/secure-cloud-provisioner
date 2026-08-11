@@ -107,6 +107,89 @@ def storage_client(region=None):
     return StorageManagementClient(credential(), subscription_id())
 
 
+def resource_client(region=None):
+    """A client for resource groups. region is accepted and ignored.
+
+    The third client, and the only one the registry never asks for: a resource
+    group is not a type this tool provisions, it is the container Azure
+    requires before it will accept anything else. `az/storage.py` builds this
+    itself rather than the routes learning that Azure needs two clients where
+    AWS needs one.
+
+    The import path moved between SDK versions and `azure_crud.py` on
+    group/main carries the same fallback, having hit it for real.
+    """
+    try:
+        ResourceManagementClient = _import("azure.mgmt.resource",
+                                           "ResourceManagementClient")
+    except AzureNotConfigured:
+        ResourceManagementClient = _import("azure.mgmt.resource.resources",
+                                           "ResourceManagementClient")
+    return ResourceManagementClient(credential(), subscription_id())
+
+
+# ----------------------------------------------------------- Marking our work
+
+# The tag every resource created here carries.
+#
+# Deliberately the same key and value as `aws/s3_buckets.py` uses. One person
+# may point this tool at both clouds, and two spellings of one idea is how an
+# AWS cleanup and an Azure cleanup end up disagreeing about what "ours" means.
+MANAGED_TAG_KEY = "ManagedBy"
+MANAGED_TAG_VALUE = "secure-cloud-provisioner"
+
+
+def managed_tags():
+    """The tags every resource this tool creates carries."""
+    return {MANAGED_TAG_KEY: MANAGED_TAG_VALUE}
+
+
+def is_managed(tags):
+    """Whether a resource's tags say this tool made it.
+
+    Azure returns None rather than an empty mapping for an untagged resource,
+    which means the same thing here and does not behave the same way.
+    """
+    return (tags or {}).get(MANAGED_TAG_KEY) == MANAGED_TAG_VALUE
+
+
+def ensure_resource_group(name, location):
+    """Makes sure a resource group exists. Returns (created, note).
+
+    Azure will not accept a storage account without one, and there is no AWS
+    equivalent to borrow a default from, so the alternative to creating it is
+    refusing until somebody creates it in the portal - which is a worse first
+    experience than a group that appears and says it appeared. `created` is
+    True only when this call made it, and the note travels back to the caller
+    in the create route's `problems`: a second resource existing is not a
+    failure, but it is not nothing either.
+
+    A group that already exists is left exactly as it is, tags included.
+    Stamping this tool's ownership tag on somebody else's resource group would
+    make the cleanup that reads that tag a liar.
+    """
+    client = resource_client()
+
+    try:
+        client.resource_groups.get(name)
+        return False, None
+    except Exception as e:
+        # Matching on the status code rather than catching
+        # ResourceNotFoundError, which lives behind an import this module
+        # deliberately does not make at scope.
+        if getattr(e, "status_code", None) != 404:
+            raise
+
+    client.resource_groups.create_or_update(
+        name, {"location": location, "tags": managed_tags()})
+
+    return True, (
+        f"Resource group '{name}' did not exist, so it was created in "
+        f"{location}. It carries this tool's tag. Deleting the account does "
+        "not delete the group."
+    )
+
+
 def is_available():
     """Whether an Azure call could be made at all, without making one.
 

@@ -66,7 +66,7 @@ provider-agnostic and `api/app.py` has had one set of routes on the strength of
 it. Registering a second cloud needed two registry entries, no route changes,
 and no change to `scanner/common.py`.
 
-**Three things about the Azure layer that will look wrong until you know why.**
+**Four things about the Azure layer that will look wrong until you know why.**
 
 - The package is `backend/az/`, not `backend/azure/`. The Azure SDK owns
   `azure` as a namespace package, and `pytest.ini` puts `backend/` on the path,
@@ -78,11 +78,17 @@ and no change to `scanner/common.py`.
   the Azure SDK a hard requirement of starting the AWS half — the exact
   objection this file used to record against mounting the two apps into one
   process. `test_azure_provider.py` asserts this by reading the source.
-- Azure is read-only. `azure_crud.py` has working create functions and wiring
-  them into a `create` adapter is the same block every AWS type already has.
-  It has not been done because nothing here has run against a real
-  subscription: the SDK is not in `.venv`, so the Azure findings are tested
-  logic rather than measured behaviour.
+- Azure storage provisions; Azure firewalls do not. `az/storage.py` has
+  `create`, `delete` and `cleanup` wired into the registry like any AWS type,
+  and `az/nsg.py` is still read-only. That split is not indecision: an NSG rule
+  carries a priority deciding which of several overlapping rules wins, so
+  neither creating one nor fixing one can be judged without reading the whole
+  ordered set — the same reason `az/nsg.py` offers no fix.
+- Nothing in `az/` has run against a real subscription. The SDK is still not in
+  `.venv`, so the Azure findings are tested logic rather than measured
+  behaviour, and that now covers a write path as well as a read one. The stubs
+  in `test_azure_provider.py` prove the module asks Azure for the right things.
+  They cannot prove Azure does them.
 
 **There were briefly three user interfaces.** The merge brought a Streamlit
 frontend into `frontend/` beside the served page, with `app.py` next to
@@ -105,6 +111,10 @@ wrong: `git reset --hard aws-half-complete`.
 repository root (the extra six are the Azure half's own suite, which CI had
 never run until the merge). The live smoke test is 154 passed, 0 failed against
 account 679140927523, including instances and the whole bastion blueprint.
+
+Since then, and not yet committed: Azure storage provisioning takes it to 686
+from `backend/` and 692 from the root. The live smoke test has not been re-run
+and does not touch Azure at all — see *Not done*.
 
 **Two things were changed in AWS by hand and are not in any file here.** The
 `iam-audit` customer managed policy was extended twice, first with the six role
@@ -138,7 +148,7 @@ cd backend
 source ../.venv/bin/activate
 
 pytest -v                                   # offline, moto, no credentials
-python main.py                              # the CLI
+python main.py                              # the CLI, AWS and Azure storage
 uvicorn api.app:app --reload --host 127.0.0.1   # API, /docs and the page at /ui
 python scripts/smoke_test.py                # live AWS, free
 python scripts/smoke_test.py --with-instances   # live, launches a t3.micro
@@ -189,7 +199,9 @@ tool's own policy denies. Use the separate `cloudgoat` AWS profile for
 deploying and the default profile for scanning. `docs/benchmark.md` records
 what both found, and the two hazards that cost an hour each.
 
-The Azure half runs from the repository root, is a separate process, and needs
+Azure itself is reached through `backend/` like everything else — option 10 in
+the CLI, and `/resources/azure-storage` over HTTP. What still runs from the
+repository root is the *older* Azure app, which is a separate process and needs
 a different set of dependencies:
 
 ```bash
@@ -214,15 +226,17 @@ Nothing below this line applies to it.
 ```
 main.py                 the Azure app. Separate FastAPI instance, root of repo
 azure_scanner*.py       the Azure scanner, separate from backend/scanner/
-azure_crud.py           Azure provisioning. Functions on group/main; on this
-                        branch it still runs at import and creates real things
+azure_crud.py           Azure provisioning, three functions, reached only by
+                        main.py. Superseded for storage by az/storage.py; its
+                        NSG create has no equivalent in backend/ yet
 security_messages.py    Azure's warning text
 test_azure_scanner.py   on group/main only. Six tests, no cloud calls
 requirements.txt        on group/main only. The Azure SDK, not boto3
 
 archive/       the Streamlit frontend, kept and not used. See its README
 backend/
-  az/          Azure. Named az/ and not azure/ on purpose; SDK imported lazily
+  az/          Azure. Named az/ and not azure/ on purpose; SDK imported lazily.
+               storage.py provisions and deletes; nsg.py reads only
   scanner/     pure rule logic, no boto3 anywhere, no cloud calls
   aws/         all boto3, one module per resource type (iam.py reads only)
   api/         FastAPI over a resource registry, generic across types
@@ -387,6 +401,34 @@ claimed since the first commit that its warning shape is provider-agnostic, and
 two entries in `api/registry.py`, no route changes, no change to
 `scanner/common.py`. An Azure finding is counted and rendered by code that does
 not know which cloud it just described.
+
+Storage now writes as well as reads, and that cost nothing outside `az/` either:
+three adapters in `api/registry.py`, one field in `api/models.py`, and
+`read_only` going false is what opens create, delete, cleanup and the deletion
+plan. The registry claim was only ever tested against a read path before this.
+
+**One switch, not a field per setting.** `create_account` and
+`check_storage_spec` both read `secure_by_default`, which is what makes the
+warnings shown before creation the ones shown after it — the contract
+`_bucket_check_spec` states for S3, asserted across a cloud boundary by a
+parametrized test. The alternative is on `group/main` and shows why: its form
+offered a TLS dropdown beside a scanner with no TLS rule, so it could provision
+a TLS 1.0 account and report it clean. A single switch cannot drift from the
+rules that judge it.
+
+**An account name is checked, not attempted.** `begin_create` on a name you
+already own *updates* that account rather than failing, so the obvious
+try-it-and-catch-the-error would silently rewrite a live account's settings to
+whatever the form said, and report success. `_name_is_available` asks first.
+The same hazard is still live in `create_network_security_group` on
+`group/main`, where the whole rule list is replaced.
+
+**An Azure delete refuses without force.** S3 gives an unforced delete a safe
+failure — a bucket with anything in it refuses, so force there means "empty it
+first". `storage_accounts.delete` succeeds on a full account and takes every
+container and blob with it. Leaving force optional would have made the Azure
+path the quiet one, which is backwards. With force, the routes already demand
+`confirm` repeat the id, and the CLI asks for the account name typed back.
 
 **The Azure package cannot be called `azure`, and the SDK is imported lazily.**
 Two constraints, both invisible until they bite, both verified rather than
@@ -709,9 +751,18 @@ Severity means something — if everything is critical, nothing is.
 - **`_sg_create` still falls back to the default VPC** when a spec omits
   `vpc_id`. The CLI always passes one now, so only API callers can place a
   group somewhere they did not choose.
-- **Azure and AWS are two applications.** See the section at the top. The
-  abstraction was built for a second provider and a second provider exists;
-  they have never met.
+- **No Azure half of the smoke test, and no live run at all.** Every AWS claim
+  here is backed by `scripts/smoke_test.py` against a real account. Azure has
+  nothing equivalent: the SDK is not in `.venv`, no subscription has been
+  pointed at, and the create and delete paths are covered only by stubs shaped
+  like the SDK's own return values. That is the single largest gap in this
+  file, and it is the reason `az/storage.py` still offers no `apply_fix` even
+  though both of its findings are one property update away.
+- **`azure_crud.py` and root `main.py` are a third copy of provisioning.**
+  Storage is now done twice — once there and once in `az/storage.py` — which
+  is the same duplication the scanner had before the merge. The root app is
+  the only thing that can still create an Azure NSG, so it cannot retire until
+  `az/nsg.py` can, and `az/nsg.py` is waiting on the priority-ordering problem.
 - **The frontend covers AWS only.** It is served by the AWS app and calls only
   its routes. Either it grows an Azure half or the README stops promising one.
 
@@ -726,8 +777,11 @@ destructive paths, a live smoke test, and a browser key generator that cannot
 reach the network. The guided form exists at `/ui`. Pre-deployment scanning
 exists on both halves; `POST /resources/{type}/check` creates nothing.
 
-Not done, and it is one thing wearing several hats: the two halves are separate
-programs. Everything in *Not done* above other than that is a refinement.
+Not done: Azure provisioning is half wired — storage creates and deletes
+through the same routes and the same CLI as everything else, network security
+groups still only read, and none of it has run against a subscription. So the
+README's promise is met for AWS and claimed for Azure. Everything else in *Not
+done* above is a refinement.
 
 ## Next
 
@@ -739,18 +793,24 @@ programs. Everything in *Not done* above other than that is a refinement.
    reaches in turn — and following it means traversing edges rather than
    matching statements. Everything cheap in that direction is now done; what
    is left is a different program and should be started as one.
-2. **Finish the Azure half.** Decided and half done: it is registered and
-   read-only: `az/nsg.py` and
-   `az/storage.py` list and scan, and provisioning is deliberately not wired
-   in. `azure_crud.py` on `group/main` has working create functions for
-   resource groups, storage accounts and NSGs; giving them a `create` adapter
-   is the same block of work every AWS type already has. Nothing here has run
-   against a real subscription, because the SDK is not installed in `.venv` —
-   that is the next thing to change, and until it does the Azure findings are
-   tested logic rather than measured behaviour.
-3. Detach `AmazonEC2FullAccess` and friends from `EC2_Dude`, so the documented
+2. **Run the Azure half against a real subscription.** This is now the thing
+   blocking everything else Azure. `az/storage.py` creates, deletes and cleans
+   up, and none of it has spoken to Azure once. Install the SDK
+   (`pip install -r requirements.txt`), point it at a subscription, and write
+   the Azure half of the smoke test. Two things to expect: pinning
+   `azure-mgmt-network`, which is currently a floor, and
+   `test_the_azure_sdk_is_genuinely_absent_here` going red — four tests below
+   it only prove anything while the SDK is missing, so that group needs an
+   SDK-free environment of its own before the install, not after. Then
+   `apply_fix` for storage, which is one property update per finding and is
+   held back only by never having run.
+3. **Azure NSG provisioning, or a decision not to.** The one thing root
+   `main.py` can still do that `backend/` cannot. It needs the whole ordered
+   rule set read before a single rule can be created or narrowed — the same
+   problem blocking `az/nsg.py`'s `apply_fix`, and worth solving once.
+4. Detach `AmazonEC2FullAccess` and friends from `EC2_Dude`, so the documented
    least-privilege policy is the one actually in force and the smoke test
    proves it. Already done for EC2 and S3; SNS, CloudWatch and SSM remain and
    belong to a teammate.
-4. The four smaller Prowler gaps: cross-account bucket policies, password
+5. The four smaller Prowler gaps: cross-account bucket policies, password
    expiry, per-user hardware MFA, multi-region.

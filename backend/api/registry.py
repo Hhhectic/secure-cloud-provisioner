@@ -57,6 +57,10 @@ from scanner.azure_storage_rules import (check_storage_account,
 
 DEFAULT_REGION = "us-east-1"
 
+# Azure's equivalent, used when a spec names no location. Separate from
+# DEFAULT_REGION because "us-east-1" is not a place Azure has heard of.
+DEFAULT_AZURE_LOCATION = "eastus"
+
 # Ports a form should offer, which is not the same list as the ports the
 # scanner warns about. RISKY_PORTS exists to describe what is dangerous;
 # 80 and 443 belong in a menu of things people open on purpose and would be
@@ -1033,10 +1037,12 @@ ROLE = ResourceType(
 # which is the whole argument for having built it this way, finally testable
 # rather than asserted.
 #
-# Read-only in this first pass. Azure provisioning exists on group/main and is
-# deliberately not wired in yet: proving a second cloud fits the registry is
-# one claim, and a create path nobody has run against a real subscription
-# would be another one entirely.
+# Storage provisions; network security groups still do not. That split is not
+# indecision. A storage account is one object with three switches on it, and
+# the rules that judge those switches already exist here. An Azure firewall
+# rule carries a priority deciding which of several overlapping rules wins, so
+# neither creating one nor fixing one can be reasoned about without reading the
+# whole ordered set - which is the same reason az/nsg.py offers no fix.
 
 
 def _az_nsg_list(client, only_ours):
@@ -1076,22 +1082,61 @@ def _az_storage_fix(client, resource_id, warning, options):
     return az_storage.apply_fix(client, resource_id, warning)
 
 
+def _az_storage_create(client, spec):
+    """Creates one storage account, in a resource group the spec has to name.
+
+    The refusal is here rather than in the model because a missing resource
+    group is only a problem for Azure, and ResourceSpec is shared with eight
+    AWS types that have never heard of one. A default would have to be
+    invented - there is no equivalent of the account's default VPC to fall
+    back on - and inventing a place to put somebody's storage is the kind of
+    quiet decision `_sg_create` is still on the Not-done list for making.
+    """
+    group = spec.get("resource_group")
+    if not group:
+        return False, (
+            "Azure puts every resource in a resource group, and this one names "
+            "none. Give a resource group; it will be created if it does not "
+            "already exist."
+        ), []
+
+    return az_storage.create_account(
+        client,
+        spec["name"],
+        group,
+        location=spec.get("region") or DEFAULT_AZURE_LOCATION,
+        secure_by_default=spec.get("secure_by_default", True),
+    )
+
+
+def _az_storage_delete(client, resource_id, options):
+    return az_storage.delete_account(
+        client, resource_id, force=options.get("force", False))
+
+
+def _az_storage_cleanup(client, options):
+    return az_storage.cleanup_all_managed_accounts(
+        client, force=options.get("force", False))
+
+
 AZURE_STORAGE = ResourceType(
     key="azure-storage",
     label="Azure storage account",
     id_label="Account name",
     get_client=az_storage.get_client,
+    create=_az_storage_create,
     list_all=_az_storage_list,
     read=az_storage.read_account_for_scanning,
     check=check_storage_account,
     describe=az_storage.describe_account,
     check_spec=check_storage_spec,
     fix=_az_storage_fix,
-    # Nothing here creates Azure resources, so there is no tag to filter on
-    # and the reader ignores the flag. Offering the box would be offering a
-    # control that does nothing.
-    only_ours_label=None,
-    read_only=True,
+    delete=_az_storage_delete,
+    cleanup=_az_storage_cleanup,
+    # No plan_deletion, for the reason a bucket has none: deleting an account
+    # takes every container and blob with it, and "nothing else would be
+    # destroyed" is the one answer that must not appear in front of this
+    # button. The route says there is no preview instead.
 )
 
 

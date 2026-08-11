@@ -97,6 +97,13 @@ class ResourceSpec(BaseModel):
     # would be half-null whichever one you were using.
     azure_rules: Optional[list[AzureSecurityRule]] = None
 
+    # Azure again. Every Azure resource lives in a resource group and there is
+    # no AWS equivalent to borrow, so this is the one field a second cloud
+    # actually cost the shared model. `region` carries the Azure location
+    # rather than a second field beside it: they are the same idea under two
+    # names, and two fields would be one more pair to keep in step.
+    resource_group: Optional[str] = None
+
     # Alarm. threshold has no default and is not optional in practice: an
     # alarm without one is reported critical by the scanner and refused by the
     # create route, which is a better answer than a number this module

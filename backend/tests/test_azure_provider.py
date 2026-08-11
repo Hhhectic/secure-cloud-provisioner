@@ -317,6 +317,208 @@ def test_a_secure_storage_form_raises_nothing_worse_than_a_note():
     assert summarize(warnings)["warning"] == 0
 
 
+# ============================================== Creating and deleting storage
+#
+# There is no moto for Azure, so these drive a stub shaped like
+# StorageManagementClient that records what it was asked to do. That is the
+# same approach test_alarms.py takes for the parts of AWS moto models wrongly,
+# and it has the same limit: it proves this module asks for the right things,
+# not that Azure does them. Only a live subscription can show the second.
+
+
+class _StubAccount:
+    def __init__(self, name, group=GROUP, tags=None, location="eastus"):
+        self.name = name
+        self.location = location
+        self.tags = tags
+        self.id = (f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{group}"
+                   f"/providers/Microsoft.Storage/storageAccounts/{name}")
+
+
+class _StubPoller:
+    def __init__(self, value):
+        self._value = value
+
+    def result(self):
+        return self._value
+
+
+class _NameAnswer:
+    def __init__(self, available, message=None):
+        self.name_available = available
+        self.message = message
+
+
+class _StubStorageClient:
+    """The slice of StorageManagementClient that az/storage.py touches."""
+
+    def __init__(self, accounts=(), name_available=True):
+        self.accounts = list(accounts)
+        self._name_available = name_available
+        self.created = []
+        self.deleted = []
+        self.storage_accounts = self
+
+    def list(self):
+        return list(self.accounts)
+
+    def check_name_availability(self, parameters):
+        if self._name_available:
+            return _NameAnswer(True)
+        return _NameAnswer(
+            False, f"The name '{parameters['name']}' is already taken.")
+
+    def begin_create(self, group, name, parameters):
+        self.created.append((group, name, parameters))
+        made = _StubAccount(name, group=group, tags=parameters.get("tags"))
+        self.accounts.append(made)
+        return _StubPoller(made)
+
+    def delete(self, group, name):
+        self.deleted.append((group, name))
+        self.accounts = [a for a in self.accounts if a.name != name]
+
+
+@pytest.fixture
+def group_exists(monkeypatch):
+    """The resource group is already there.
+
+    Its own behaviour needs the resource client, which needs the SDK this
+    environment deliberately does not have. Tested separately below by
+    replacing it outright rather than by reaching for a subscription.
+    """
+    monkeypatch.setattr(az_storage, "ensure_resource_group",
+                        lambda name, location: (False, None))
+
+
+def test_a_created_account_carries_the_tag_that_makes_cleanup_possible(
+        group_exists):
+    client = _StubStorageClient()
+    ok, resource_id, _ = az_storage.create_account(client, "demo", GROUP)
+
+    assert ok
+    assert resource_id.endswith("/storageAccounts/demo")
+    _, _, parameters = client.created[0]
+    assert parameters["tags"] == az_common.managed_tags()
+
+
+def test_every_setting_the_scanner_reads_is_stated_rather_than_defaulted(
+        group_exists):
+    """The lesson assign_public_ip taught on the AWS side: an absent setting
+    is not a safe setting, it is the platform's setting."""
+    client = _StubStorageClient()
+    az_storage.create_account(client, "demo", GROUP)
+
+    built = client.created[0][2]["properties"]
+    assert set(built) == {"allowBlobPublicAccess", "supportsHttpsTrafficOnly",
+                          "minimumTlsVersion"}
+    assert built["allowBlobPublicAccess"] is False
+    assert built["supportsHttpsTrafficOnly"] is True
+    assert built["minimumTlsVersion"] == "TLS1_2"
+
+
+@pytest.mark.parametrize("secure", [True, False])
+def test_the_findings_after_creation_are_the_ones_the_form_scan_promised(
+        group_exists, secure):
+    """The contract _bucket_check_spec states for S3, asserted across the
+    cloud boundary: what create builds is what check_spec said it would, so
+    the warnings shown before creation are the ones shown after it.
+
+    This is why there is one secure_by_default switch here and not a field per
+    setting. group/main's form offered a TLS dropdown beside a scanner with no
+    TLS rule, and could therefore build a TLS 1.0 account and call it clean.
+    """
+    client = _StubStorageClient()
+    az_storage.create_account(client, "demo", GROUP, secure_by_default=secure)
+    built = client.created[0][2]["properties"]
+
+    after = check_storage_account({
+        "account_name": "demo",
+        "allow_blob_public_access": built["allowBlobPublicAccess"],
+        "supports_https_traffic_only": built["supportsHttpsTrafficOnly"],
+        "minimum_tls_version": built["minimumTlsVersion"],
+        "public_network_access": "Enabled",
+        "unreadable": {},
+    })
+    before = check_storage_spec({"name": "demo", "secure_by_default": secure})
+
+    assert _settings_of(after) == _settings_of(before)
+
+
+def test_an_existing_account_name_is_refused_rather_than_overwritten(
+        group_exists):
+    """begin_create on a name you already own updates that account instead of
+    failing, so try-it-and-catch would rewrite a live account's settings and
+    report success."""
+    client = _StubStorageClient(name_available=False)
+    ok, message, _ = az_storage.create_account(client, "demo", GROUP)
+
+    assert ok is False
+    assert client.created == []
+    assert "already taken" in message
+
+
+def test_a_resource_group_that_had_to_be_created_is_reported_not_hidden(
+        monkeypatch):
+    """A second resource coming into existence is not a failure, and it is not
+    nothing either. problems is the channel the create route already has."""
+    monkeypatch.setattr(az_storage, "ensure_resource_group",
+                        lambda name, location: (True, f"made {name}"))
+    client = _StubStorageClient()
+    ok, _, problems = az_storage.create_account(client, "demo", GROUP)
+
+    assert ok
+    assert problems == [f"made {GROUP}"]
+
+
+def test_deleting_an_account_refuses_without_force():
+    """S3 gives an unforced delete a safe failure - a bucket with anything in
+    it refuses. Azure's delete succeeds on a full account and takes every blob
+    with it, so the explicit ask is the only thing standing there."""
+    client = _StubStorageClient([_StubAccount("demo")])
+    ok, message = az_storage.delete_account(client, "demo")
+
+    assert ok is False
+    assert client.deleted == []
+    assert "every container and blob" in message
+
+
+def test_a_forced_delete_names_the_group_from_the_resource_id():
+    client = _StubStorageClient([_StubAccount("demo")])
+    ok, message = az_storage.delete_account(
+        client, client.accounts[0].id, force=True)
+
+    assert ok
+    assert client.deleted == [(GROUP, "demo")]
+
+
+def test_cleanup_reaches_only_what_this_tool_tagged():
+    """The bound that makes a cleanup endpoint defensible at all."""
+    client = _StubStorageClient([
+        _StubAccount("ours", tags=az_common.managed_tags()),
+        _StubAccount("someone-elses", tags={"Name": "production"}),
+        _StubAccount("untagged", tags=None),
+    ])
+
+    results = az_storage.cleanup_all_managed_accounts(client, force=True)
+
+    assert [name for _, name in client.deleted] == ["ours"]
+    assert len(results) == 1
+
+
+def test_the_only_ours_filter_means_something_now():
+    """It was accepted and ignored while nothing here created anything."""
+    client = _StubStorageClient([
+        _StubAccount("ours", tags=az_common.managed_tags()),
+        _StubAccount("theirs", tags=None),
+    ])
+
+    assert [a["name"] for a in az_storage.list_accounts(client)] == [
+        "ours", "theirs"]
+    assert [a["name"] for a in
+            az_storage.list_accounts(client, only_ours=True)] == ["ours"]
+
+
 # ====================================== Through the registry and the routes
 
 
@@ -333,9 +535,29 @@ def test_azure_types_are_advertised_alongside_the_aws_ones(api):
     assert {"azure-nsg", "azure-storage"} <= keys
 
 
-def test_azure_types_are_audited_not_provisioned():
+def test_azure_firewalls_are_audited_not_provisioned():
+    """A rule's priority decides which of several overlapping rules wins, so
+    neither creating one nor fixing one can be judged without reading the whole
+    ordered set. Until that exists, this stays read-only."""
     assert registry.AZURE_NSG.read_only is True
-    assert registry.AZURE_STORAGE.read_only is True
+
+
+def test_azure_storage_is_provisioned_like_any_aws_type():
+    """The first cross-cloud create. Nothing in api/app.py changed to allow
+    it: read_only going false is what opens the four routes."""
+    assert registry.AZURE_STORAGE.read_only is False
+    assert registry.AZURE_STORAGE.create is not registry._cannot_create
+    assert registry.AZURE_STORAGE.delete is not registry._cannot_create
+    assert registry.AZURE_STORAGE.cleanup is not registry._cannot_create
+
+
+def test_creating_azure_storage_without_a_resource_group_is_refused():
+    """A missing resource group is an Azure-only problem, so the refusal is in
+    the adapter rather than the model eight AWS types also use."""
+    ok, message, _ = registry.AZURE_STORAGE.create(None, {"name": "demo"})
+
+    assert ok is False
+    assert "resource group" in message
 
 
 def test_an_azure_finding_is_counted_by_code_that_knows_nothing_about_azure(api):
@@ -373,10 +595,23 @@ def test_the_aws_routes_still_work_while_azure_is_unconfigured(api):
     }).status_code == 200
 
 
-def test_azure_cannot_be_created_deleted_or_cleaned_up(api):
+def test_azure_firewalls_cannot_be_created_deleted_or_cleaned_up(api):
     assert api.post("/resources/azure-nsg", json={"name": "x"}).status_code == 405
-    assert api.delete("/resources/azure-storage/x").status_code == 405
+    assert api.delete("/resources/azure-nsg/x").status_code == 405
     assert api.post("/resources/azure-nsg/cleanup").status_code == 405
+
+
+def test_storage_now_fails_at_the_sdk_rather_than_at_the_route(api):
+    """It used to be 405: audited, not provisioned. The destructive routes are
+    open to it now, so the first thing missing is the SDK - which is a 503
+    saying what to install rather than a refusal about what the tool does.
+    Two different answers to two different questions, and the change from one
+    to the other is the whole of this work seen from outside.
+    """
+    resp = api.delete("/resources/azure-storage/x")
+
+    assert resp.status_code == 503
+    assert resp.json()["provider"] == "azure"
 
 
 def test_nothing_in_the_azure_rules_claims_a_cis_control():

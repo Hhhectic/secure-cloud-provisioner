@@ -9,11 +9,22 @@ safe, for the reason `aws/s3_buckets.py` gives at length: a partial audit that
 says which parts are missing beats no audit, and beats a confident wrong answer
 by a great deal more.
 
-Read-only. See `az/nsg.py` for why provisioning is deliberately not wired in
-during this first pass.
+This is the first Azure type that provisions as well as reads, so it is also
+where the registry stops being able to say Azure is audit-only. Two things
+about that are deliberate and are argued where they happen: an account name is
+checked for availability rather than attempted (`_name_is_available`), and a
+delete refuses without force even though Azure would carry it out
+(`delete_account`). `az/nsg.py` is still read-only.
 """
 
-from az.common import AzureNotConfigured, resource_group_of, storage_client
+from az.common import (
+    AzureNotConfigured,
+    ensure_resource_group,
+    is_managed,
+    managed_tags,
+    resource_group_of,
+    storage_client,
+)
 
 
 def get_client(region="us-east-1"):
@@ -24,15 +35,39 @@ def get_client(region="us-east-1"):
 def list_accounts(client, only_ours=False):
     """Every storage account in the subscription.
 
-    only_ours is accepted and ignored: nothing here creates accounts, so there
-    is no tag to filter on.
+    only_ours narrows to accounts carrying this tool's tag. It was accepted
+    and ignored while nothing here created anything, because there was no tag
+    to filter on and a checkbox that does nothing is worse than no checkbox.
+    It means something now.
     """
     return [
         {"id": a.id, "name": a.name,
          "resource_group": resource_group_of(a.id),
          "location": a.location}
         for a in client.storage_accounts.list()
+        if not only_ours or is_managed(getattr(a, "tags", None))
     ]
+
+
+def _locate(client, name):
+    """Resolves an account name or resource id to (resource_group, name).
+
+    The registry's identifier is a single string, and both a bare name and a
+    full Azure resource id are things a person might paste. The group is not
+    optional to any management call, so a bare name costs a listing to find
+    it; an id carries the group already and costs nothing.
+    """
+    group = resource_group_of(name)
+    short = name.split("/")[-1] if group else name
+
+    if group:
+        return group, short
+
+    for candidate in list_accounts(client):
+        if candidate["name"] == short:
+            return candidate["resource_group"], short
+
+    return None, short
 
 
 def read_account_for_scanning(client, name):
@@ -46,16 +81,9 @@ def read_account_for_scanning(client, name):
     be told apart deliberately: None from the SDK means the platform did not
     say, and the scanner is given that rather than a guess in either direction.
     """
-    group = resource_group_of(name)
-    short = name.split("/")[-1] if group else name
-
+    group, short = _locate(client, name)
     if not group:
-        for candidate in list_accounts(client):
-            if candidate["name"] == short:
-                group = candidate["resource_group"]
-                break
-        if not group:
-            return None
+        return None
 
     try:
         found = client.storage_accounts.get_properties(group, short)
@@ -103,6 +131,133 @@ def describe_account(settings):
         "minimum_tls_version": settings.get("minimum_tls_version"),
         "checks_skipped": sorted(settings.get("unreadable") or {}),
     }
+
+
+def _name_is_available(client, name):
+    """Whether Azure will accept this as a new account name, and why not.
+
+    Asked rather than attempted, because `begin_create` on a name that already
+    exists in your own subscription *updates* that account instead of failing.
+    The obvious try-it-and-catch-the-error shape would therefore rewrite a
+    live account's settings to whatever this form said - silently, and
+    reporting success. The same hazard sits in `create_network_security_group`
+    on group/main, where the rule list is replaced wholesale.
+
+    Storage account names are global to all of Azure, so the answer depends on
+    every other customer as well and cannot be worked out locally.
+    """
+    answer = client.storage_accounts.check_name_availability(
+        {"name": name, "type": "Microsoft.Storage/storageAccounts"})
+
+    if getattr(answer, "name_available", False):
+        return True, None
+
+    reason = getattr(answer, "message", None) or getattr(answer, "reason", None)
+    return False, (
+        f"Azure will not accept '{name}' as a new storage account name: "
+        f"{reason} Names are global to all of Azure and must be 3-24 "
+        "characters, lowercase letters and numbers only. If this account "
+        "already exists, scan it rather than creating it."
+    )
+
+
+def create_account(client, name, resource_group, location="eastus",
+                   secure_by_default=True):
+    """Creates one storage account. Returns (ok, id_or_error, problems).
+
+    Every setting the scanner reads is stated explicitly, including the ones
+    whose Azure default is already the value wanted. `aws/instances.py` learned
+    what the alternative costs: `assign_public_ip=False` was implemented as not
+    mentioning it, the subnet's own default decided instead, and every machine
+    came up with a public address. An absent setting is not a safe setting.
+
+    There is one switch here rather than a field per setting, and that is the
+    whole design. The Streamlit form on group/main offered a TLS dropdown
+    beside a scanner with no TLS rule, so it could provision a TLS 1.0 account
+    and report it clean. `secure_by_default` is read by this function and by
+    `check_storage_spec`, which is what makes the warnings somebody sees before
+    creation the same ones they see after it.
+
+    The returned id is the full Azure resource id rather than the name,
+    because it carries the resource group - every later call needs that, and
+    finding it again costs a listing of the whole subscription.
+    """
+    problems = []
+
+    available, why_not = _name_is_available(client, name)
+    if not available:
+        return False, why_not, problems
+
+    created, note = ensure_resource_group(resource_group, location)
+    if created:
+        problems.append(note)
+
+    parameters = {
+        "sku": {"name": "Standard_LRS"},
+        "kind": "StorageV2",
+        "location": location,
+        "tags": managed_tags(),
+        "properties": {
+            "allowBlobPublicAccess": not secure_by_default,
+            "supportsHttpsTrafficOnly": secure_by_default,
+            "minimumTlsVersion": "TLS1_2" if secure_by_default else "TLS1_0",
+        },
+    }
+
+    account = client.storage_accounts.begin_create(
+        resource_group, name, parameters).result()
+
+    return True, account.id, problems
+
+
+def delete_account(client, name, force=False):
+    """Deletes one storage account, and everything inside it.
+
+    Refuses without force, which the routes only accept alongside the
+    account's own id repeated back.
+
+    S3 gives an unforced delete a safe failure: a bucket with anything in it
+    refuses, so force there means "empty it first". Azure has no such halfway
+    state - `storage_accounts.delete` succeeds on a full account and takes
+    every container and blob with it. Leaving force optional here would make
+    the Azure path the quiet one, which is the reverse of how the rest of this
+    tool behaves around anything destructive.
+
+    Not bounded by the tag, exactly as the AWS single delete is not: naming a
+    resource twice is the guard, and refusing to delete something this tool
+    did not create would make it useless for the account it was pointed at.
+    `cleanup_all_managed_accounts` is the bounded one.
+    """
+    group, short = _locate(client, name)
+
+    if not force:
+        return False, (
+            f"Not deleted. Removing '{short}' destroys every container and "
+            "blob inside it, and Azure offers no version of this that stops "
+            "at an account with something in it the way S3 does. Ask for it "
+            "explicitly, with the account's id repeated back."
+        )
+
+    if not group:
+        return False, f"No storage account named '{short}' in this subscription."
+
+    client.storage_accounts.delete(group, short)
+    return True, f"Deleted storage account '{short}' and everything in it."
+
+
+def cleanup_all_managed_accounts(client, force=False):
+    """Deletes every account carrying this tool's tag. Returns [(id, ok, msg)].
+
+    Bounded by the tag, so it cannot reach an account this tool did not make.
+    It is not bounded by who ran it - the tag records which tool, not which
+    person - which on a shared subscription means this destroys a colleague's
+    demo as readily as your own. The same is true of the AWS cleanup and is
+    recorded in CLAUDE.md as an operational hazard rather than fixed here.
+    """
+    return [
+        (account["id"],) + delete_account(client, account["id"], force=force)
+        for account in list_accounts(client, only_ours=True)
+    ]
 
 
 def apply_fix(client, name, warning):

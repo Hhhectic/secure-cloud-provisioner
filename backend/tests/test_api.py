@@ -79,7 +79,10 @@ def test_the_audited_types_are_advertised_as_read_only(client):
     assert entries["snapshot"]["read_only"] is True
     assert entries["role"]["read_only"] is True
     assert entries["azure-nsg"]["read_only"] is True
-    assert entries["azure-storage"]["read_only"] is True
+    # azure-storage is deliberately not here. It provisions, and the guard
+    # this test exists to be is that a type does not become writable quietly -
+    # not that Azure never does.
+    assert entries["azure-storage"]["read_only"] is False
 
 
 def test_an_audited_resource_refuses_the_destructive_routes(client, monkeypatch):
@@ -966,15 +969,18 @@ def test_each_type_says_how_its_list_can_be_narrowed(client):
     """
     entries = {r["key"]: r for r in client.get("/resources").json()["resources"]}
 
-    # Tagged by this tool, so the default wording is right.
-    for key in ("security-group", "bucket", "instance", "alarm", "snapshot"):
+    # Tagged by this tool, so the default wording is right. azure-storage is
+    # here because it tags what it creates with the same key and value the AWS
+    # side uses, which is the whole reason its cleanup can be bounded.
+    for key in ("security-group", "bucket", "instance", "alarm", "snapshot",
+                "azure-storage"):
         assert entries[key]["only_ours_label"] == "only ones this tool made"
 
     # Meaningful, but not by tag - this tool creates no roles at all.
     assert entries["role"]["only_ours_label"] == "only ones somebody here wrote"
 
-    # Nothing to narrow: one account, and two Azure types nothing here creates.
-    for key in ("iam", "azure-nsg", "azure-storage"):
+    # Nothing to narrow: one account, and a type nothing here creates.
+    for key in ("iam", "azure-nsg"):
         assert entries[key]["only_ours_label"] is None
 
 
