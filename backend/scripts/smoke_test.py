@@ -1851,7 +1851,18 @@ def _azure_sweep(resource, location, expect_write):
         ok(f"{resource.label.lower()}s are writable through the registry")
 
 
-def smoke_azure_storage(location, with_writes):
+def smoke_azure_storage(location, with_writes, resource_group=None):
+    """Exercises the storage type. resource_group, when given, is used as-is.
+
+    Inventing a group per run means the principal needs to create resource
+    groups, which is a subscription-wide grant - and a tool whose subject is
+    least privilege should not require one to test itself. Pointed at a group
+    that already exists, `ensure_resource_group` finds it and returns without
+    writing, so Contributor on that one group is the whole requirement.
+
+    A supplied group is never deleted. It is somebody's, this script did not
+    make it, and the AWS half has never removed a container it was handed.
+    """
     heading("Azure storage accounts")
 
     resource = registry.AZURE_STORAGE
@@ -1863,9 +1874,14 @@ def smoke_azure_storage(location, with_writes):
         return
 
     client = resource.get_client(location)
-    group = f"scp-smoke-{suffix()}"
+    supplied_group = bool(resource_group)
+    group = resource_group or f"scp-smoke-{suffix()}"
     name = f"scpsmoke{suffix()}"        # 3-24 lowercase alphanumeric, no hyphens
     created = None
+
+    if supplied_group:
+        print(f"  {DIM}using resource group {group}, which this script will "
+              f"not create or delete{RESET}")
 
     try:
         try:
@@ -1890,8 +1906,13 @@ def smoke_azure_storage(location, with_writes):
                 print(f"        Azure reads and writes are separate grants. The "
                       f"read sweep above worked, so this is a role that covers "
                       f"listing but not creating.")
-                print(f"        Grant Contributor on the subscription, or on a "
-                      f"resource group this script is pointed at.")
+                if supplied_group:
+                    print(f"        Grant Contributor on {group}.")
+                else:
+                    print(f"        Grant Contributor on an existing resource "
+                          f"group and pass --azure-resource-group, which needs "
+                          f"a far narrower grant than letting this script "
+                          f"create one.")
                 return
             raise
 
@@ -1934,14 +1955,14 @@ def smoke_azure_storage(location, with_writes):
                  "period and cannot be reused until it lapses")
         elif created:
             note(f"--keep: storage account {created} left behind in {group}")
-        if created:
-            # Only once something actually reached Azure. The first version
-            # said this unconditionally and printed it after a create that had
-            # failed before touching the subscription, naming a resource group
-            # that was never made.
-            note(f"resource group {group} holds what this run created and is "
-                 "not removed by this script; delete it in the portal if "
-                 "anything is left")
+        if created and not supplied_group:
+            # Only once something actually reached Azure, and only for a group
+            # this script invented. The first version said it unconditionally
+            # and printed it after a create that had failed before touching the
+            # subscription, naming a resource group that was never made.
+            note(f"resource group {group} was created by this run and is not "
+                 "removed by it; delete it in the portal, or pass "
+                 "--azure-resource-group next time to reuse one")
 
 
 def smoke_azure_keyvault(location, with_writes):
@@ -2042,6 +2063,12 @@ def main():
                         help="also create and delete a real Azure storage "
                              "account. The Azure reads run whenever a "
                              "subscription is reachable; this adds the writes")
+    parser.add_argument("--azure-resource-group", metavar="NAME",
+                        help="put the created resources in this existing "
+                             "group instead of inventing one. Needs only "
+                             "Contributor on that group; inventing one needs "
+                             "permission to create groups across the "
+                             "subscription. The group is never deleted")
     args = parser.parse_args()
     KEEP = args.keep
 
@@ -2104,7 +2131,8 @@ def main():
         # machine, and a missing Azure credential is not an AWS failure.
         if azure_configured():
             confirm_azure_identity()
-            smoke_azure_storage(args.azure_location, args.with_azure_resources)
+            smoke_azure_storage(args.azure_location, args.with_azure_resources,
+                                resource_group=args.azure_resource_group)
             smoke_azure_keyvault(args.azure_location, args.with_azure_resources)
             smoke_azure_nsg(args.azure_location)
         else:
