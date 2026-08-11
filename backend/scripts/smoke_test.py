@@ -1868,10 +1868,33 @@ def smoke_azure_storage(location, with_writes):
     created = None
 
     try:
-        made, created, problems = resource.create(client, {
-            "name": name, "resource_group": group, "region": location,
-            "secure_by_default": False,
-        })
+        try:
+            made, created, problems = resource.create(client, {
+                "name": name, "resource_group": group, "region": location,
+                "secure_by_default": False,
+            })
+        except Exception as e:
+            # "whether the login the tool runs under actually grants what the
+            # tool needs" is in this script's own docstring as the thing moto
+            # structurally cannot check, and on the AWS side every gap arrives
+            # as a sentence naming the missing action. Azure's SDK raises
+            # instead, so without this the first missing role ends the run with
+            # a traceback about an HTTP response - which names the action, but
+            # buried in the one format nobody reads as advice.
+            detail = str(e)
+            if "AuthorizationFailed" in detail or "does not have authorization" in detail:
+                action = "unknown action"
+                if "perform action '" in detail:
+                    action = detail.split("perform action '")[1].split("'")[0]
+                fail(f"the service principal cannot {action}")
+                print(f"        Azure reads and writes are separate grants. The "
+                      f"read sweep above worked, so this is a role that covers "
+                      f"listing but not creating.")
+                print(f"        Grant Contributor on the subscription, or on a "
+                      f"resource group this script is pointed at.")
+                return
+            raise
+
         if not check(made, "created a storage account with no hardening"):
             print(f"        {created}")
             created = None
