@@ -432,6 +432,65 @@ const FIELDS = {
      "separately once it exists."],
     ["notify", "checkbox", true],
   ],
+
+  // The Azure types. Every one of them needs a resource group, which has no
+  // AWS equivalent: Azure will not accept any resource without one, and there
+  // is no account default to fall back on the way there is for a VPC. The
+  // adapters in api/registry.py refuse rather than inventing a place to put
+  // somebody's storage, so the field is required here for the same reason.
+  //
+  // Before these entries existed the page fell back to a name-only form for
+  // anything unlisted, so every Azure create submitted without a group and was
+  // refused - the one thing the API and the CLI could do that the page could
+  // not.
+  "azure-storage": [
+    ["name", "text", "3-24 lowercase letters and numbers, globally unique"],
+    ["resource_group", "text", "Azure needs one; it is created if it is new"],
+    ["location", "text", "eastus, westeurope, uksouth…"],
+    ["secure_by_default", "checkbox", true],
+  ],
+  "azure-keyvault": [
+    ["name", "text", "3-24 letters, numbers and hyphens, starting with a letter"],
+    ["resource_group", "text", "Azure needs one; it is created if it is new"],
+    ["location", "text", "eastus, westeurope, uksouth…"],
+    ["secure_by_default", "checkbox", true,
+     "Secure here turns on purge protection, which can never be turned off " +
+     "again. The vault and its name are then held for 90 days after any " +
+     "delete, and nothing - including this tool - can shorten that. For " +
+     "something you intend to throw away, leave this off."],
+  ],
+  "azure-nsg": [
+    ["name", "text", "a name for this firewall"],
+    ["resource_group", "text", "Azure needs one; it is created if it is new"],
+    ["location", "text", "eastus, westeurope, uksouth…"],
+    // No rules editor here yet. The AWS "rules" widget produces AWS-shaped
+    // rules - protocol, from_port, to_port, source - and an Azure rule is a
+    // different shape with a priority that decides which of several
+    // overlapping rules wins. Submitting one as the other would be the exact
+    // drift CLAUDE.md records about the TLS dropdown on group/main. So the
+    // page creates an empty group, which Azure's own final rule leaves
+    // denying everything inbound, and create_nsg says so in its problems.
+    // Rules come from the API or the CLI until a widget exists that knows
+    // about priority.
+  ],
+  "azure-vnet": [
+    ["name", "text", "a name for this network"],
+    ["resource_group", "text", "Azure needs one; it is created if it is new"],
+    ["location", "text", "eastus, westeurope, uksouth…"],
+  ],
+  "azure-vm": [
+    ["name", "text", "a name for this machine"],
+    ["resource_group", "text", "Azure needs one; it is created if it is new"],
+    ["location", "text", "eastus, westeurope, uksouth…"],
+    ["vm_size", "menu", "size — the tool refuses anything larger"],
+    ["public_key", "textarea", "ssh-ed25519 AAAA… — the PUBLIC half only",
+     "The same bargain the AWS key pair form makes. A password would log in, " +
+     "so this never accepts one; a public key is not a secret and is all " +
+     "Azure needs. Generate one below, or with ssh-keygen."],
+    ["open_ports", "multi", "which ports it should answer on"],
+    ["allowed_source", "menu", "where those ports may be reached from"],
+    ["assign_public_ip", "checkbox", false],
+  ],
 };
 
 async function buildCreateForm() {

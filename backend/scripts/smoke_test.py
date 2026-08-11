@@ -63,6 +63,12 @@ from aws import vpcs
 from aws import alarms
 from aws.s3_buckets import PermissionDenied
 from az.common import AzureNotConfigured
+# Safe at module scope for the reason az/common.py is: every SDK import in az/
+# happens inside a function, so importing these costs nothing on a machine with
+# no Azure dependencies and does not stop the AWS half of this script running.
+from az import storage as az_storage
+from az import keyvault as az_keyvault
+from az import vm as az_vm
 from scanner.common import (summarize, fixable, cited, print_warnings,
                             CRITICAL, WARNING, INFO)
 
@@ -1851,6 +1857,31 @@ def _azure_sweep(resource, location, expect_write):
         ok(f"{resource.label.lower()}s are writable through the registry")
 
 
+# How long to wait for a deleted storage account's name to come back. Generous
+# on purpose: the number being measured is "not a retention period", and a
+# minute either way does not change that answer.
+NAME_RELEASE_BUDGET = 180
+
+
+def wait_until_name_is_free(client, name, budget=NAME_RELEASE_BUDGET):
+    """Seconds it took for a deleted account name to be accepted again.
+
+    Returns None if it never was within the budget. Polls rather than sleeping
+    a fixed amount, because the interesting output is the number: a name back
+    in seconds is a different fact from one back in three minutes, and both are
+    a different fact from a vault's, which never comes back at all here.
+    """
+    started = time.time()
+    while True:
+        free, _ = az_storage._name_is_available(client, name)
+        waited = int(time.time() - started)
+        if free:
+            return waited
+        if waited >= budget:
+            return None
+        time.sleep(10)
+
+
 def smoke_azure_storage(location, with_writes, resource_group=None):
     """Exercises the storage type. resource_group, when given, is used as-is.
 
@@ -1948,11 +1979,29 @@ def smoke_azure_storage(location, with_writes, resource_group=None):
     finally:
         if created and not KEEP:
             gone, message = resource.delete(client, created, {"force": True})
-            check(gone, f"deleted {created}")
+            check(gone, f"deleted storage account {name}")
             if not gone:
                 print(f"        {message}")
-            note(f"the name '{created}' is retained for the soft-delete "
-                 "period and cannot be reused until it lapses")
+
+            # A storage account name is released; a vault's is not. This used
+            # to say the opposite - that the name was "retained for the
+            # soft-delete period", which is the vault's constraint borrowed by
+            # a section that had never run.
+            #
+            # It is released without being released *immediately*, which is the
+            # part neither version got right. The delete call returns while the
+            # account is still going away, so the name is briefly still taken
+            # and an assertion made in the next breath fails. Waiting for it is
+            # the only honest way to state the difference from a vault, whose
+            # name is still held whenever this poll gives up.
+            waited = wait_until_name_is_free(client, name)
+            if waited is None:
+                fail(f"the name {name} was still taken "
+                     f"{NAME_RELEASE_BUDGET}s after the delete")
+                print("        A vault's name is held for its whole retention "
+                      "period; a storage account's is not meant to be.")
+            else:
+                ok(f"the name {name} was free again {waited}s after the delete")
         elif created:
             note(f"--keep: storage account {created} left behind in {group}")
         if created and not supplied_group:
@@ -1965,7 +2014,23 @@ def smoke_azure_storage(location, with_writes, resource_group=None):
                  "--azure-resource-group next time to reuse one")
 
 
-def smoke_azure_keyvault(location, with_writes):
+def smoke_azure_keyvault(location, with_writes, resource_group=None):
+    """Exercises the vault type. The same shape as storage, with two differences.
+
+    **It builds the weak one.** A secure-by-default vault turns on purge
+    protection, which can never be turned off and holds the vault and its name
+    for 90 days - so a smoke test that built the secure one would leave
+    something on a shared subscription that nobody, including an administrator,
+    can remove. The secure path is covered by the offline spec test instead.
+    That is the one place in this script where the flag deliberately exercises
+    the less safe configuration, and the reason is that here the safe one is
+    the irreversible one.
+
+    **A deleted name stays taken.** Soft delete is mandatory, so every write run
+    consumes a vault name permanently for the retention period. Measured, not
+    assumed: check_name_availability refuses a just-deleted vault name and
+    allows a just-deleted storage account name.
+    """
     heading("Azure key vaults")
 
     resource = registry.AZURE_KEYVAULT
@@ -1976,21 +2041,471 @@ def smoke_azure_keyvault(location, with_writes):
               f"and delete a real vault.{RESET}")
         return
 
-    note("a deleted vault keeps its name for the soft-delete retention "
-         "period, so this run consumes a name permanently")
+    client = resource.get_client(location)
+    supplied_group = bool(resource_group)
+    group = resource_group or f"scp-smoke-{suffix()}"
+    # 3-24 characters, letters digits and hyphens, and it must start with a
+    # letter - a tighter alphabet than a storage account's.
+    name = f"scpkv{suffix()}"
+    created = None
+
+    if supplied_group:
+        print(f"  {DIM}using resource group {group}, which this script will "
+              f"not create or delete{RESET}")
+    print(f"  {DIM}building the weak one on purpose: purge protection is a "
+          f"one-way door and would leave this vault unremovable.{RESET}")
+
+    try:
+        try:
+            made, created, problems = resource.create(client, {
+                "name": name, "resource_group": group, "region": location,
+                "secure_by_default": False,
+            })
+        except Exception as e:
+            # The same translation the storage section makes, for the same
+            # reason: Azure reports a missing role by raising, and a traceback
+            # about an HTTP response names the action in the one format nobody
+            # reads as advice.
+            detail = str(e)
+            if "AuthorizationFailed" in detail or "does not have authorization" in detail:
+                action = "unknown action"
+                if "perform action '" in detail:
+                    action = detail.split("perform action '")[1].split("'")[0]
+                fail(f"the service principal cannot {action}")
+                print(f"        Grant Contributor on {group}."
+                      if supplied_group else
+                      "        Grant Contributor on an existing resource group "
+                      "and pass --azure-resource-group.")
+                return
+            raise
+
+        if not check(made, "created a key vault with no purge protection"):
+            print(f"        {created}")
+            created = None
+            return
+        for p in problems:
+            note(p)
+
+        settings = resource.read(client, created)
+        if not check(settings is not None, "read it back after creating it"):
+            return
+
+        warnings = resource.check(settings)
+        print(f"\n  {DIM}what Azure actually gave us:{RESET}")
+        print(f"    soft delete:        {settings.get('soft_delete_enabled')}")
+        print(f"    purge protection:   {settings.get('purge_protection_enabled')}")
+        print(f"    retention days:     {settings.get('soft_delete_retention_days')}")
+        print(f"    roles not policies: {settings.get('rbac_authorization')}")
+
+        # Soft delete is mandatory since 2020, so a vault that came back
+        # without it would mean Azure changed something this module states
+        # explicitly rather than assumes.
+        check(settings.get("soft_delete_enabled") is True,
+              "soft delete is on even though the weak option was asked for")
+
+        # Purge protection off comes back as an absent property rather than
+        # false. Reading that as "could not check" is what made this scanner
+        # report an unreadable setting in place of the finding that is the
+        # whole reason it exists, and no stub had reason to leave it out.
+        check(settings.get("purge_protection_enabled") is False,
+              "purge protection off reads back as off, not as unreadable")
+        check("purge_protection_enabled" not in (settings.get("unreadable") or {}),
+              "an absent purge-protection property is not counted as a skipped "
+              "check")
+
+        before = {w["rule"]["setting"] for w in resource.check_spec(
+            {"name": name, "secure_by_default": False})}
+        after = {w["rule"]["setting"] for w in warnings}
+        check(before <= after,
+              "every finding predicted before creation is present after it")
+        if before - after:
+            print(f"        predicted but absent: {sorted(before - after)}")
+
+    finally:
+        if created and not KEEP:
+            gone, message = resource.delete(client, created, {"force": True})
+            check(gone, f"deleted key vault {name}")
+            if not gone:
+                print(f"        {message}")
+            # The opposite of the storage case, and the reason this flag is
+            # separate from the free half of the run.
+            free, _ = az_keyvault._name_is_available(client, name)
+            check(not free,
+                  f"the name {name} is still held after the delete, as soft "
+                  f"delete requires")
+            note(f"the vault name {name} is consumed for its soft-delete "
+                 "retention period and cannot be reused until it lapses")
+        elif created:
+            note(f"--keep: key vault {created} left behind in {group}")
+        if created and not supplied_group:
+            note(f"resource group {group} was created by this run and is not "
+                 "removed by it; delete it in the portal, or pass "
+                 "--azure-resource-group next time to reuse one")
 
 
-def smoke_azure_nsg(location):
+def smoke_azure_nsg(location, with_writes, resource_group=None):
+    """Exercises security groups, which now build as well as read.
+
+    The interesting assertion here is the one no other section can make: the
+    same two rules in two orders are two different firewalls, and this tool
+    now says so. That was the sentence keeping this type read-only, and it is
+    checked against a real subscription rather than against a stub, because
+    what is being claimed is how Azure behaves.
+    """
     heading("Azure network security groups")
 
     resource = registry.AZURE_NSG
-    _azure_sweep(resource, location, expect_write=False)
+    _azure_sweep(resource, location, expect_write=not resource.read_only)
 
-    # Not a gap to be filled later without deciding something first, so it is
-    # stated here rather than left as silence in a passing run.
-    print(f"  {DIM}read-only by design: an NSG rule carries a priority "
-          f"deciding which of several overlapping rules wins, so neither "
-          f"creating nor fixing one can be judged from a single rule.{RESET}")
+    if not with_writes:
+        print(f"  {DIM}writes skipped. Pass --with-azure-resources to create "
+              f"and delete a real group.{RESET}")
+        return
+
+    client = resource.get_client(location)
+    group = resource_group or f"scp-smoke-{suffix()}"
+    created = []
+
+    def build(name, rules):
+        ok, made, _ = resource.create(client, {
+            "name": name, "resource_group": group, "region": location,
+            "azure_rules": rules})
+        if ok:
+            created.append(made)
+        return ok, made
+
+    try:
+        # ---- Priorities come from the list order ---------------------------
+        name = f"scp-nsg-{suffix()}"
+        ok, made = build(name, [
+            {"name": "allow-ssh-anywhere", "direction": "Inbound",
+             "access": "Allow", "protocol": "Tcp",
+             "source_address_prefix": "*", "destination_port_range": "22"},
+            {"name": "web-from-office", "direction": "Inbound",
+             "access": "Allow", "protocol": "Tcp",
+             "source_address_prefix": "203.0.113.0/24",
+             "destination_port_range": "443"},
+        ])
+        if not check(ok, "created a security group open to the world"):
+            print(f"        {made}")
+            return
+
+        settings = resource.read(client, made)
+        if not check(settings is not None, "read it back after creating it"):
+            return
+
+        by_name = {r["name"]: r for r in settings["rules"]}
+        check(by_name.get("allow-ssh-anywhere", {}).get("priority") == 100
+              and by_name.get("web-from-office", {}).get("priority") == 110,
+              "priorities were assigned from the list order, ten apart")
+
+        warnings = resource.check(settings)
+        check(summarize(warnings)[CRITICAL] == 1,
+              "the rule open to everyone is critical and the scoped one is not")
+
+        # ---- Creating over it is refused ------------------------------------
+        again, why = resource.create(client, {
+            "name": name, "resource_group": group, "region": location,
+            "azure_rules": []})[:2]
+        check(again is False and "already exists" in str(why),
+              "creating over an existing group is refused rather than "
+              "replacing its rules")
+
+        # ---- The fix ---------------------------------------------------------
+        target = [w for w in fixable(warnings)
+                  if w["rule"]["setting"] == "open_22"]
+        if check(bool(target), "the open port is offered as a fixable finding"):
+            done, message = resource.fix(client, made, target[0], {})
+            check(done, "applied the fix")
+            if not done:
+                print(f"        {message}")
+            after = resource.check(resource.read(client, made))
+            check(summarize(after)[CRITICAL] == 0,
+                  "re-reading it from Azure shows the exposure gone")
+
+        # ---- Two orders, two firewalls --------------------------------------
+        #
+        # The claim that unblocked this type, checked against Azure rather than
+        # against a stub of it.
+        rules = lambda deny_first: [
+            {"name": "allow-ssh", "direction": "Inbound", "access": "Allow",
+             "protocol": "Tcp", "source_address_prefix": "*",
+             "destination_port_range": "22",
+             "priority": 200 if deny_first else 100},
+            {"name": "deny-ssh", "direction": "Inbound", "access": "Deny",
+             "protocol": "Tcp", "source_address_prefix": "*",
+             "destination_port_range": "22",
+             "priority": 100 if deny_first else 200},
+        ]
+
+        verdicts = {}
+        for deny_first in (True, False):
+            shadow_name = f"scp-nsg-{suffix()}"
+            ok, made_shadow = build(shadow_name, rules(deny_first))
+            if not ok:
+                print(f"        {made_shadow}")
+                continue
+            found = resource.check(resource.read(client, made_shadow))
+            verdicts[deny_first] = summarize(found)[CRITICAL]
+
+        check(verdicts.get(True) == 0 and verdicts.get(False) == 1,
+              "the same two rules in two orders are two different firewalls")
+        print(f"  {DIM}deny first: {verdicts.get(True)} critical; "
+              f"allow first: {verdicts.get(False)} critical{RESET}")
+
+    finally:
+        for made in created:
+            if KEEP:
+                note(f"--keep: security group {made} left behind")
+                continue
+            gone, message = resource.delete(client, made, {"force": True})
+            check(gone, f"deleted {made.split('/')[-1]}")
+            if not gone:
+                print(f"        {message}")
+
+
+def smoke_azure_vnet(location, with_writes, resource_group=None):
+    """Exercises virtual networks. Free, and the fourth Azure type."""
+    heading("Azure virtual networks")
+
+    resource = registry.AZURE_VNET
+    _azure_sweep(resource, location, expect_write=not resource.read_only)
+
+    if not with_writes:
+        print(f"  {DIM}writes skipped. Pass --with-azure-resources to create "
+              f"and delete a real network.{RESET}")
+        return
+
+    client = resource.get_client(location)
+    group = resource_group or f"scp-smoke-{suffix()}"
+    name = f"scp-vnet-{suffix()}"
+    created = None
+
+    spec = {"name": name, "resource_group": group, "region": location,
+            "subnets": [{"name": "app", "address_prefix": "10.20.1.0/24"},
+                        {"name": "data", "address_prefix": "10.20.2.0/24"}]}
+
+    try:
+        before = {w["rule"]["setting"] for w in resource.check_spec(spec)}
+
+        ok, created, problems = resource.create(client, spec)
+        if not check(ok, "created a virtual network with two subnets"):
+            print(f"        {created}")
+            created = None
+            return
+        for p in problems:
+            note(p)
+
+        settings = resource.read(client, created)
+        if not check(settings is not None, "read it back after creating it"):
+            return
+
+        check(len(settings.get("subnets") or []) == 2,
+              "both subnets came back")
+
+        after = {w["rule"]["setting"] for w in resource.check(settings)}
+        check(before <= after,
+              "every finding predicted before creation is present after it")
+        check("subnet_without_firewall" in after,
+              "a subnet with nothing filtering it is reported")
+
+    finally:
+        if created and not KEEP:
+            gone, message = resource.delete(client, created, {"force": True})
+            check(gone, f"deleted virtual network {name}")
+            if not gone:
+                print(f"        {message}")
+        elif created:
+            note(f"--keep: virtual network {created} left behind")
+
+
+def smoke_azure_vm(location, with_writes, resource_group=None):
+    """Exercises virtual machines - the only Azure type that spends money.
+
+    The guardrails are checked whether or not writes are on, because they are
+    refusals that never reach Azure and are the part most worth knowing still
+    holds. The create needs --with-azure-resources *and* a subscription with
+    the compute provider registered, and says which one is missing rather than
+    failing with either.
+    """
+    heading("Azure virtual machines")
+
+    resource = registry.AZURE_VM
+    _azure_sweep(resource, location, expect_write=not resource.read_only)
+
+    # Free, and the half that matters most: a refusal that stopped working
+    # would be silent.
+    refused, why, _ = resource.create(None, {
+        "name": "demo", "resource_group": "rg", "vm_size": "Standard_D64s_v3",
+        "public_key": "ssh-ed25519 AAAA"})
+    check(refused is False and "not a size this tool will create" in str(why),
+          "a size outside the allowlist is refused before Azure is called")
+
+    refused, why, _ = resource.create(None, {
+        "name": "demo", "resource_group": "rg"})
+    check(refused is False and "never accepts a password" in str(why),
+          "a machine cannot be created without a public key")
+
+    if not with_writes:
+        print(f"  {DIM}writes skipped. Pass --with-azure-resources to create "
+              f"and delete a real machine - which costs money.{RESET}")
+        return
+
+    key = _throwaway_public_key()
+    if key is None:
+        note("ssh-keygen is not on this machine, so no machine was built")
+        return
+
+    client = resource.get_client(location)
+    group = resource_group or f"scp-smoke-{suffix()}"
+    name = f"scp-vm-{suffix()}"
+    created = None
+
+    # Asked rather than assumed. Azure restricts sizes per subscription as well
+    # as per region and reports the two identically, so a hardcoded size makes
+    # this section pass or fail on which subscription it is pointed at rather
+    # than on whether the code works. The first live run failed here on
+    # Standard_B1s, which this subscription is not offered in any region.
+    size = az_vm.first_available_size(client, location)
+    if size is None:
+        note(f"none of the sizes this tool allows can be started in "
+             f"{location} by this subscription, so no machine was built. "
+             f"Allowed: {', '.join(sorted(az_vm.ALLOWED_VM_SIZES))}")
+        return
+    if size != az_vm.DEFAULT_VM_SIZE:
+        print(f"  {DIM}{az_vm.DEFAULT_VM_SIZE} is not offered to this "
+              f"subscription in {location}; using {size}{RESET}")
+
+    try:
+        ok, created, problems = resource.create(client, {
+            "name": name, "resource_group": group, "region": location,
+            "vm_size": size,
+            "public_key": key, "open_ports": ["22"], "allowed_source": "*",
+            "assign_public_ip": True})
+
+        for p in problems:
+            note(p)
+
+        if not ok:
+            # Not a failure of this tool. A subscription that has never made a
+            # machine has the compute provider switched off, and turning it on
+            # is an owner's action - so this reports rather than fails, the
+            # same way a missing role does above.
+            if "Microsoft.Compute" in str(created):
+                note("the compute provider is not registered on this "
+                     "subscription, so no machine was built. The message says "
+                     "how to turn it on; everything before this point ran.")
+                print(f"  {DIM}{created}{RESET}")
+            else:
+                fail(f"could not create a machine: {created}")
+            created = None
+            return
+
+        ok_created = check(True, "created a virtual machine")
+
+        settings = resource.read(client, created)
+        if not check(settings is not None, "read it back after creating it"):
+            return
+
+        print(f"\n  {DIM}what Azure actually gave us:{RESET}")
+        print(f"    size:        {settings.get('vm_size')}")
+        print(f"    power state: {settings.get('power_state')}")
+        print(f"    public ip:   {settings.get('public_ip')}")
+        print(f"    passwords:   "
+              f"{'disabled' if settings.get('password_authentication_disabled') else 'ALLOWED'}")
+
+        check(settings.get("password_authentication_disabled") is True,
+              "password login is off, stated rather than left to the platform")
+        check(bool(settings.get("effective_rules")),
+              "the rules filtering it were read from its card and its subnet")
+
+        warnings = resource.check(settings)
+        check("open_22" in {w["rule"]["setting"] for w in warnings},
+              "an administration port open to the world is reported as "
+              "critical on a machine that has a public address")
+
+    finally:
+        if created and not KEEP:
+            gone, message = resource.delete(client, created, {"force": True})
+            check(gone, f"deleted virtual machine {name}")
+            if not gone:
+                print(f"        {message}")
+        elif created:
+            note(f"--keep: virtual machine {created} left behind and billing")
+
+        # The four resources a machine needs are built before it and are not
+        # removed by deleting it - which az/vm.py says plainly and correctly,
+        # because it may not own them. A smoke test is the one caller that
+        # does own them, and it has to clean up after itself whether or not
+        # the machine was ever created.
+        #
+        # This ran second and found the gap the first version had: the create
+        # failed on an unregistered compute provider, the machine never
+        # existed, and a network, a security group, a card and a *static
+        # public address* were left behind billing on a shared subscription.
+        if not KEEP:
+            _remove_vm_scaffolding(location, group, name)
+
+
+def _remove_vm_scaffolding(location, group, name):
+    """Removes the four resources create_vm builds around a machine.
+
+    In order, because Azure enforces it: the card holds the address and the
+    subnet, so it goes first, and the network cannot go while anything is in
+    it. Failures are reported rather than raised - this runs in a finally and
+    must not replace whatever brought it there.
+    """
+    from az.common import network_client
+
+    net = network_client()
+    removed = []
+
+    steps = [
+        ("network card", lambda: net.network_interfaces.begin_delete(
+            group, f"{name}-nic").result()),
+        ("public address", lambda: net.public_ip_addresses.begin_delete(
+            group, f"{name}-ip").result()),
+        ("security group", lambda: net.network_security_groups.begin_delete(
+            group, f"{name}-nsg").result()),
+        ("virtual network", lambda: net.virtual_networks.begin_delete(
+            group, f"{name}-vnet").result()),
+    ]
+
+    for label, step in steps:
+        try:
+            step()
+            removed.append(label)
+        except Exception as e:
+            # A 404 is the ordinary case: the create may have stopped before
+            # building this one.
+            if getattr(e, "status_code", None) not in (404, None):
+                note(f"could not remove the {label} built for {name}: {e}")
+
+    if removed:
+        ok(f"removed the {', '.join(removed)} built around {name}")
+
+
+def _throwaway_public_key():
+    """A public key for a machine that is about to be deleted, or None.
+
+    Generated locally and never sent anywhere but Azure's create call, which is
+    the same bargain the rest of this project makes: only the public half
+    leaves the machine that made it.
+    """
+    import subprocess
+    import tempfile
+
+    directory = tempfile.mkdtemp()
+    path = os.path.join(directory, "id_ed25519")
+    try:
+        subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-f", path,
+                        "-C", "scp-smoke-test"],
+                       check=True, capture_output=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+    with open(path + ".pub") as handle:
+        return handle.read().strip()
 
 
 def report_leftovers(region):
@@ -2069,13 +2584,25 @@ def main():
                              "Contributor on that group; inventing one needs "
                              "permission to create groups across the "
                              "subscription. The group is never deleted")
+    parser.add_argument("--azure-only", action="store_true",
+                        help="run the Azure sections and skip every AWS one. "
+                             "The AWS half creates and destroys real resources "
+                             "in an account this team shares, so making it the "
+                             "unavoidable price of checking Azure is how "
+                             "somebody ends up deleting a colleague's demo to "
+                             "test a storage account")
     args = parser.parse_args()
     KEEP = args.keep
 
-    print(f"Smoke test against live AWS in {args.region}")
+    if args.azure_only:
+        print(f"Smoke test against live Azure in {args.azure_location}")
+        print(f"{DIM}--azure-only is set: no AWS call is made and no AWS "
+              f"identity is needed.{RESET}")
+    else:
+        print(f"Smoke test against live AWS in {args.region}")
     if KEEP:
         print(f"{YELLOW}--keep is set: resources will be left behind{RESET}")
-    if args.with_instances:
+    if args.with_instances and not args.azure_only:
         print(f"{YELLOW}--with-instances is set: a real "
               f"{ec2i.DEFAULT_INSTANCE_TYPE} will be launched and "
               f"terminated{RESET}")
@@ -2083,48 +2610,65 @@ def main():
             print(f"{RED}--keep and --with-instances together will leave a "
                   f"server running and billing.{RESET}")
 
-    if not confirm_identity(args.region):
+    # The AWS identity check is skipped rather than made forgiving. --azure-only
+    # is for a machine that may hold no AWS credential at all, and asking STS
+    # who it is would fail there before a single Azure call was made.
+    if not args.azure_only and not confirm_identity(args.region):
+        return 1
+
+    if args.azure_only and not azure_configured():
+        heading("Azure")
+        fail("--azure-only was passed and no subscription is configured. Put "
+             "AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET and "
+             "AZURE_SUBSCRIPTION_ID in .env at the repository root.")
+        heading("Summary")
+        print(f"  {results['passed']} passed, {results['failed']} failed")
         return 1
 
     try:
-        smoke_security_group(args.region)
-        smoke_bucket(args.region)
-        smoke_key_pair(args.region)
-        if args.with_instances:
-            smoke_instance(args.region)
+        if args.azure_only:
+            heading("AWS")
+            print(f"  {DIM}skipped: --azure-only. Every section below this one "
+                  f"is Azure.{RESET}")
         else:
-            heading("Instances")
-            print(f"  {DIM}skipped. Pass --with-instances to launch and "
-                  f"terminate a real one.{RESET}")
+            smoke_security_group(args.region)
+            smoke_bucket(args.region)
+            smoke_key_pair(args.region)
+            if args.with_instances:
+                smoke_instance(args.region)
+            else:
+                heading("Instances")
+                print(f"  {DIM}skipped. Pass --with-instances to launch and "
+                      f"terminate a real one.{RESET}")
 
-        # Networks are free, so this runs either way. --with-instances adds
-        # the occupied-teardown case, which is the interesting half.
-        smoke_network(args.region, args.with_instances)
+            # Networks are free, so this runs either way. --with-instances adds
+            # the occupied-teardown case, which is the interesting half.
+            smoke_network(args.region, args.with_instances)
 
-        # Read-only and free, so these always run.
-        smoke_account_audit(args.region)
+            # Read-only and free, so these always run.
+            smoke_account_audit(args.region)
 
-        # Free, and creates at most two alarms inside the always-free ten.
-        smoke_alarms(args.region, with_email=args.with_alarm_email)
-        smoke_roles(args.region)
-        smoke_snapshots(args.region)
+            # Free, and creates at most two alarms inside the always-free ten.
+            smoke_alarms(args.region, with_email=args.with_alarm_email)
+            smoke_roles(args.region)
+            smoke_snapshots(args.region)
 
-        # The HTTP layer, which everything above reaches one level below.
-        smoke_api(args.region)
+            # The HTTP layer, which everything above reaches one level below.
+            smoke_api(args.region)
 
-        if args.with_workload:
-            smoke_workload(args.region)
-        else:
-            heading("Workload readings")
-            print(f"  {DIM}skipped. Pass --with-workload to launch a machine "
-                  f"and wait for its readings.{RESET}")
+            if args.with_workload:
+                smoke_workload(args.region)
+            else:
+                heading("Workload readings")
+                print(f"  {DIM}skipped. Pass --with-workload to launch a "
+                      f"machine and wait for its readings.{RESET}")
 
-        if args.with_blueprint:
-            smoke_blueprint(args.region)
-        else:
-            heading("Blueprint: bastion architecture")
-            print(f"  {DIM}skipped. Pass --with-blueprint to build and tear "
-                  f"down a real one.{RESET}")
+            if args.with_blueprint:
+                smoke_blueprint(args.region)
+            else:
+                heading("Blueprint: bastion architecture")
+                print(f"  {DIM}skipped. Pass --with-blueprint to build and "
+                      f"tear down a real one.{RESET}")
 
         # Azure last, and skipped entirely when no subscription is reachable.
         # Every existing invocation of this script expects to pass on an AWS
@@ -2133,8 +2677,14 @@ def main():
             confirm_azure_identity()
             smoke_azure_storage(args.azure_location, args.with_azure_resources,
                                 resource_group=args.azure_resource_group)
-            smoke_azure_keyvault(args.azure_location, args.with_azure_resources)
-            smoke_azure_nsg(args.azure_location)
+            smoke_azure_keyvault(args.azure_location, args.with_azure_resources,
+                                 resource_group=args.azure_resource_group)
+            smoke_azure_nsg(args.azure_location, args.with_azure_resources,
+                            resource_group=args.azure_resource_group)
+            smoke_azure_vnet(args.azure_location, args.with_azure_resources,
+                             resource_group=args.azure_resource_group)
+            smoke_azure_vm(args.azure_location, args.with_azure_resources,
+                           resource_group=args.azure_resource_group)
         else:
             heading("Azure")
             print(f"  {DIM}skipped: no subscription configured. Put the "
@@ -2144,7 +2694,8 @@ def main():
                  "delete paths remain tested logic rather than measured "
                  "behaviour.")
 
-        report_leftovers(args.region)
+        if not args.azure_only:
+            report_leftovers(args.region)
     except Exception:
         print(f"\n{RED}Unhandled error{RESET}")
         traceback.print_exc()

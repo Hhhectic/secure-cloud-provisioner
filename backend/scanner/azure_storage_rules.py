@@ -130,6 +130,10 @@ def check_storage_account(settings):
             "if something very old is still connecting that is worth knowing "
             "on its own.",
             _target(name, "old_tls"),
+            fix={
+                "action": "require_modern_tls",
+                "label": "Require TLS 1.2 or better",
+            },
         ))
 
     # ---- Which containers are actually public --------------------------------

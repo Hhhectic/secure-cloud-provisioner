@@ -494,6 +494,166 @@ def bucket_menu(s3):
             print(f"[{name}] -> {msg}")
 
 
+# ------------------------------------------------------- Azure virtual machines
+
+
+def azure_vm_menu(resource, client):
+    """The one Azure type the generic menu could not take.
+
+    `azure_menu` above is deliberately one menu for every Azure type, on the
+    grounds that each takes the same four answers - a name, a resource group,
+    a location and whether to build it safely. That held for four types and
+    breaks on the fifth, for the same reason `instance_menu` is separate on the
+    AWS side: a machine needs a size, the ports it should answer on, and a
+    public key, and none of those has a default worth inventing.
+
+    It is the only Azure menu that spends money, so the size and the hourly
+    consequence are stated rather than assumed.
+    """
+    label = resource.label
+    print(f"\n--- {label}s ---")
+    print("1. Create - this costs money for as long as it runs")
+    print("2. Scan")
+    print("3. Delete one")
+    print(f"4. Remove all {label.lower()}s this tool made")
+    choice = input("\nSelect action (1-4): ").strip()
+
+    if choice == "1":
+        suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+        default_name = f"scp-vm-{suffix}"
+        name = input(f"{resource.id_label} [{default_name}]: ").strip() or default_name
+
+        group = input("Resource group: ").strip()
+        if not group:
+            print("Azure puts every resource in a resource group, and there is no")
+            print("default worth inventing.")
+            return
+
+        location = input("Location [eastus]: ").strip() or "eastus"
+
+        # The allowlist, off the registry rather than written out again here.
+        sizes = resource.options(client)["vm_size"]
+        print("\nSizes this tool will build. Anything else is refused outright,")
+        print("because a typo should not be able to spend a hundred times more.")
+        for index, size in enumerate(sizes, 1):
+            print(f"  {index}. {size['label']}")
+        picked = input(f"Size [1]: ").strip() or "1"
+        if not picked.isdigit() or not 1 <= int(picked) <= len(sizes):
+            print("Not a valid selection.")
+            return
+        vm_size = sizes[int(picked) - 1]["value"]
+
+        print("\nThis tool never accepts a password for a machine: a password")
+        print("logs in, so sending one puts it in the logs and everything")
+        print("between. Only the public half of a key is sent, and it is not a")
+        print("secret. Generate one with: ssh-keygen -t ed25519")
+        public_key = input("Public key (ssh-ed25519 AAAA...): ").strip()
+        if not public_key:
+            print("Without a key there is no way to log in, so nothing was built.")
+            return
+
+        ports = input("Ports to open, comma separated [22]: ").strip() or "22"
+        open_ports = [p.strip() for p in ports.split(",") if p.strip()]
+
+        print("\nWhere may those ports be reached from? '*' is the whole")
+        print("internet, which is what makes an open administration port")
+        print("critical rather than merely worth knowing.")
+        source = input("Allowed source [*]: ").strip() or "*"
+
+        public = input("Give it a public address? (y/N): ").strip().lower() == "y"
+
+        spec = {
+            "name": name,
+            "resource_group": group,
+            "region": location,
+            "vm_size": vm_size,
+            "public_key": public_key,
+            "open_ports": open_ports,
+            "allowed_source": source,
+            "assign_public_ip": public,
+        }
+
+        planned = resource.check_spec(spec)
+        if planned:
+            print("\nBefore building it, this is what it would be:")
+            _report(planned)
+
+        print(f"\nThis creates a {vm_size} and a virtual network, a security")
+        print("group and a network card around it. It bills until it is")
+        print("deleted, and deleting the machine leaves the other three.")
+        if input("Build it? (y/N): ").strip().lower() != "y":
+            return
+
+        ok, res, problems = resource.create(client, spec)
+        for p in problems:
+            print(f"  [!] {p}")
+        if not ok:
+            print(f"\nError: {res}")
+            return
+
+        print(f"Created: {res}")
+        _report(resource.check(resource.read(client, res)))
+
+    elif choice == "2":
+        found = resource.list_all(client, only_ours=False)
+        if not found:
+            print(f"No {label.lower()}s in this subscription.")
+            return
+        chosen = _choose(found, lambda a: a["name"], "Select one to scan")
+        if not chosen:
+            return
+        settings = resource.read(client, chosen["id"])
+        if settings is None:
+            print("That one is no longer there.")
+            return
+        _report(resource.check(settings))
+        print("\nA machine's findings are fixed on the resources around it -")
+        print("scan its security group to change what it allows.")
+
+    elif choice == "3":
+        found = resource.list_all(client, only_ours=True)
+        if not found:
+            print(f"No {label.lower()}s this tool made.")
+            return
+        chosen = _choose(found, lambda a: a["name"], "Select one to delete")
+        if not chosen:
+            return
+
+        plan = resource.plan_deletion(client, chosen["id"])
+        if plan:
+            print(f"\n{plan['message']}")
+
+        refused, why = resource.delete(client, chosen["id"], {"force": False})
+        if not refused:
+            print(f"\n{why}")
+
+        typed = input(f"\nType the name to confirm ({chosen['name']}): ").strip()
+        if typed != chosen["name"]:
+            print("That did not match. Nothing was deleted.")
+            return
+
+        ok, msg = resource.delete(client, chosen["id"], {"force": True})
+        print(msg)
+
+    elif choice == "4":
+        found = resource.list_all(client, only_ours=True)
+        if not found:
+            print("Nothing to clean up.")
+            return
+        print(f"\nThis deletes {len(found)} machine(s) carrying this tool's tag.")
+        print("The tag records which tool made them, not which person - on a")
+        print("shared subscription this reaches a colleague's work as readily")
+        print("as your own, and this is the type most likely to be running")
+        print("something somebody needs.")
+        for item in found:
+            print(f"  - {item['name']}")
+        if input("\nType DELETE to go ahead: ").strip() != "DELETE":
+            print("Nothing was deleted.")
+            return
+        for resource_id, ok, msg in resource.cleanup(client, {"force": True}):
+            print(f"[{resource_id.split('/')[-1]}] -> {msg}")
+
+
 # ------------------------------------------------------------------------- Entry
 
 
@@ -1154,6 +1314,8 @@ def alarm_menu(cloudwatch):
 _AZURE_NAME_SEEDS = {
     "azure-storage": lambda suffix: f"scp{suffix}",
     "azure-keyvault": lambda suffix: f"scp-{suffix}",
+    "azure-nsg": lambda suffix: f"scp-nsg-{suffix}",
+    "azure-vnet": lambda suffix: f"scp-vnet-{suffix}",
 }
 
 
@@ -1254,9 +1416,34 @@ def azure_menu(resource, client):
             print("That one is no longer there.")
             return
 
-        _report(resource.check(settings))
-        print("\nNothing in the Azure half is fixed automatically yet; each")
-        print("finding says what to change and where.")
+        warnings = resource.check(settings)
+        _report(warnings)
+
+        # This used to say "nothing in the Azure half is fixed automatically
+        # yet", which stopped being true when az/storage.py and az/nsg.py grew
+        # apply_fix. The offer is driven off the warnings themselves rather
+        # than off a list of which types are fixable, so it cannot go stale
+        # again the way that sentence did.
+        can_fix = fixable(warnings)
+        if not can_fix:
+            print("\nNothing here has an automatic fix. Each finding says what")
+            print("to change and where, and some are deliberately left to a")
+            print("person - the reasons are in the module's apply_fix.")
+            return
+
+        print(f"\n{len(can_fix)} of these can be fixed from here:")
+        for index, item in enumerate(can_fix, 1):
+            print(f"  {index}. {item['fix']['label']}")
+        picked = input("\nFix which? (number, or Enter to skip): ").strip()
+        if not picked.isdigit() or not 1 <= int(picked) <= len(can_fix):
+            return
+
+        chosen_fix = can_fix[int(picked) - 1]
+        ok, msg = resource.fix(client, chosen["id"], chosen_fix, {})
+        print(f"\n{msg}")
+        if ok:
+            print("\nRe-reading it from Azure rather than assuming:")
+            _report(resource.check(resource.read(client, chosen["id"])))
 
     elif choice == "4":
         found = resource.list_all(client, only_ours=True)
@@ -1319,7 +1506,10 @@ def main():
     print("9. Alarms - tell me when spending or load goes up")
     print("10. Azure storage accounts")
     print("11. Azure key vaults - these hold the keys other things depend on")
-    resource = input("\nSelect resource type (1-11): ").strip()
+    print("12. Azure network security groups (the Azure firewall)")
+    print("13. Azure virtual networks")
+    print("14. Azure servers (compute) - these cost money")
+    resource = input("\nSelect resource type (1-14): ").strip()
 
     try:
         if resource == "1":
@@ -1346,6 +1536,15 @@ def main():
         elif resource == "11":
             azure_menu(registry.AZURE_KEYVAULT,
                        registry.AZURE_KEYVAULT.get_client(REGION))
+        elif resource == "12":
+            azure_menu(registry.AZURE_NSG,
+                       registry.AZURE_NSG.get_client(REGION))
+        elif resource == "13":
+            azure_menu(registry.AZURE_VNET,
+                       registry.AZURE_VNET.get_client(REGION))
+        elif resource == "14":
+            azure_vm_menu(registry.AZURE_VM,
+                          registry.AZURE_VM.get_client(REGION))
         else:
             print("Not a valid selection.")
     except AzureNotConfigured as e:

@@ -167,6 +167,49 @@ def resource_client(region=None):
     return ResourceManagementClient(credential(), subscription_id())
 
 
+# --------------------------------------------------- Flattening what Azure says
+
+
+def plain(value):
+    """An SDK value as plain data, with any enum reduced to its string.
+
+    The readers in this package exist to turn SDK objects into dictionaries the
+    scanners can read, and `scanner/` is not allowed to know that an Azure SDK
+    exists. An enum leaking through is that rule being broken invisibly,
+    because the Azure SDK's enums are `str` subclasses and behave like strings
+    everywhere it is convenient to check:
+
+        SecurityRuleDirection.INBOUND == "Inbound"      -> True
+        isinstance(SecurityRuleDirection.INBOUND, str)  -> True
+        json.dumps(SecurityRuleDirection.INBOUND)       -> '"Inbound"'
+
+    and in exactly one place where it is not:
+
+        str(SecurityRuleDirection.INBOUND)  -> 'SecurityRuleDirection.INBOUND'
+
+    Since Python 3.11 a `class X(str, Enum)` renders as its qualified name
+    rather than its value, so any coercion through `str()` silently produces
+    something that matches nothing. `scanner/azure_nsg_rules.py` compares
+    `str(rule["direction"]).lower() != "inbound"` and so skipped every rule of
+    every real group: a network security group opening SSH, RDP and every other
+    port to the whole internet scanned completely clean. It was found by
+    pointing the tool at a group built to be as bad as possible and getting one
+    note back, and nothing offline could have shown it, because the stubs
+    quite reasonably used ordinary strings.
+
+    Applied in the readers rather than in the scanners, and rather than by
+    making the scanners stop calling `str()`. The boundary is where the SDK's
+    types are supposed to stop, and a scanner defending itself against a type
+    it is not allowed to import is the wrong shape of fix.
+    """
+    if isinstance(value, (list, tuple)):
+        return [plain(item) for item in value]
+    # .value is what every Azure enum carries and no plain string, int or None
+    # has. Deliberately not isinstance(Enum), which would need the import this
+    # module spends its whole docstring avoiding.
+    return getattr(value, "value", value)
+
+
 # ----------------------------------------------------------- Marking our work
 
 # The tag every resource created here carries.

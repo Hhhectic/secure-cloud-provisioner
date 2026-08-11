@@ -1,0 +1,712 @@
+"""Tests for the Azure capabilities that used to live outside `backend/`.
+
+Network security group creation, virtual networks and virtual machines were in
+the root `azure_crud.py` and in `archive/streamlit-gui/`, reachable only from a
+separate process or a page nobody runs. This file covers them where they live
+now, plus the two things that made the first of them possible: the priority
+evaluator in `scanner/azure_nsg_effective.py`, and the name rules in
+`az/names.py`.
+
+Stubs shaped like the SDK's return values, for the reason the rest of the Azure
+tests use them: there is no moto for Azure. Where a stub models something Azure
+does that the code got wrong, it says so - that is the lesson of
+`_StubVaultClient`, which had grown a `begin_delete` because the code called
+one and so could never have shown that no such method exists.
+"""
+
+import pytest
+
+from api import registry
+from az import names as az_names
+from az import nsg as az_nsg
+from az import vnet as az_vnet
+from az import vm as az_vm
+from scanner import azure_nsg_effective as effective
+from scanner.azure_nsg_rules import check_nsg
+from scanner.azure_vnet_rules import check_vnet, check_vnet_spec
+from scanner.azure_vm_rules import check_vm, check_vm_spec
+from scanner.common import CRITICAL, WARNING, INFO, fixable, summarize
+
+SUBSCRIPTION = "00000000-1111-2222-3333-444444444444"
+GROUP = "rg-demo"
+
+
+def _settings_of(warnings):
+    return {w["rule"]["setting"] for w in warnings}
+
+
+def _rule(name="allow-ssh", priority=100, access="Allow", source="*",
+          ports="22", direction="Inbound", protocol="Tcp"):
+    return {"name": name, "priority": priority, "access": access,
+            "source_address_prefix": source, "destination_port_range": ports,
+            "direction": direction, "protocol": protocol}
+
+
+# ======================================================== Which rule wins
+#
+# The sentence that kept az/nsg.py read-only, and the root Azure app alive with
+# it: a rule's priority decides which of several overlapping rules wins, so
+# neither creating one nor fixing one can be judged without reading the whole
+# ordered set.
+
+
+def test_the_lower_priority_number_decides():
+    allow = _rule("allow", priority=100)
+    deny = _rule("deny", priority=200, access="Deny")
+
+    assert effective.decide([allow, deny], "22")[0] == "Allow"
+    assert effective.decide([_rule("allow", priority=200),
+                             _rule("deny", priority=100, access="Deny")],
+                            "22")[0] == "Deny"
+
+
+def test_the_same_two_rules_in_two_orders_are_two_different_firewalls():
+    """The whole argument for this module in one assertion. A per-rule scanner
+    calls both of these critical, and one of them is closed."""
+    open_set = [_rule("allow", priority=100),
+                _rule("deny", priority=200, access="Deny")]
+    closed_set = [_rule("allow", priority=200),
+                  _rule("deny", priority=100, access="Deny")]
+
+    assert summarize(check_nsg(_nsg(open_set)))[CRITICAL] == 1
+    assert summarize(check_nsg(_nsg(closed_set)))[CRITICAL] == 0
+
+
+def test_a_shadowed_rule_is_reported_as_worth_knowing_rather_than_silenced():
+    """Not reported as critical, and not dropped either. It is one priority
+    change away from being live, and somebody reading the group should be able
+    to see it without diffing the rule list themselves."""
+    warnings = check_nsg(_nsg([_rule("allow", priority=200),
+                               _rule("deny", priority=100, access="Deny")]))
+
+    assert "shadowed_open_22" in _settings_of(warnings)
+    assert all(w["level"] != CRITICAL for w in warnings)
+
+
+def test_nothing_matching_falls_through_to_azures_own_final_deny():
+    """A group with no rules allows nothing inbound from outside, which is why
+    a new one is safe and useless."""
+    assert effective.decide([], "22")[0] == "DenyByDefault"
+
+
+def test_a_rule_for_other_addresses_does_not_decide_this_packet():
+    """It is not evidence of safety either - it simply is not this packet's
+    rule, so the default deny is what answers."""
+    decision, _ = effective.decide([_rule("office", source="203.0.113.0/24")],
+                                   "22")
+    assert decision == "DenyByDefault"
+
+
+def test_a_rule_for_another_protocol_does_not_open_the_port():
+    """UDP on 22 is not SSH."""
+    assert effective.decide([_rule(protocol="Udp")], "22")[0] == "DenyByDefault"
+    assert effective.decide([_rule(protocol="*")], "22")[0] == "Allow"
+
+
+def test_an_outbound_rule_is_not_an_inbound_one():
+    assert effective.decide([_rule(direction="Outbound")],
+                            "22")[0] == "DenyByDefault"
+
+
+def test_a_port_range_covers_what_is_inside_it():
+    assert effective.decide([_rule(ports="20-30")], "22")[0] == "Allow"
+    assert effective.decide([_rule(ports="30-40")], "22")[0] == "DenyByDefault"
+    assert effective.decide([_rule(ports="*")], "22")[0] == "Allow"
+
+
+def test_an_unreadable_priority_sorts_last_rather_than_first():
+    """A rule whose priority cannot be read must not be able to shadow
+    everything behind it, which is what a default of zero would do."""
+    rules = [_rule("broken", priority=None, access="Deny"),
+             _rule("allow", priority=100)]
+
+    assert effective.decide(rules, "22")[0] == "Allow"
+
+
+def _nsg(rules, **overrides):
+    base = {"nsg_name": "demo-nsg", "resource_group": GROUP,
+            "location": "eastus", "rules": list(rules),
+            "attached_to": ["/subscriptions/x/subnets/one"]}
+    base.update(overrides)
+    return base
+
+
+# ============================================================ Name rules
+
+
+@pytest.mark.parametrize("kind,name,ok", [
+    ("azure-storage", "scpdemo123", True),
+    ("azure-storage", "SCPdemo", False),          # capitals
+    ("azure-storage", "scp-demo", False),         # hyphen
+    ("azure-storage", "ab", False),               # too short
+    ("azure-keyvault", "scp-demo", True),
+    ("azure-keyvault", "1scp", False),            # must start with a letter
+    ("azure-keyvault", "scp-", False),            # must not end with a hyphen
+    ("azure-vm", "scp-vm-1", True),
+    ("azure-vm", "scp vm", False),                # spaces
+    ("resource-group", "scp-demo", True),
+    ("resource-group", "scp-demo.", False),       # trailing period
+    ("container", "my-container", True),
+    ("container", "my--container", False),        # doubled hyphen
+])
+def test_a_name_azure_would_refuse_is_refused_locally(kind, name, ok):
+    """Locally decidable, so decided locally. Azure answers a malformed
+    storage account name with the same generic refusal it gives a taken one,
+    which tells somebody who typed a capital letter only that the name is
+    unavailable."""
+    assert az_names.check(kind, name)[0] is ok
+
+
+def test_a_refusal_says_what_is_allowed():
+    ok, why = az_names.check("azure-storage", "Not-Valid")
+    assert ok is False
+    assert "lowercase" in why and "3 to 24" in why
+
+
+def test_an_unknown_kind_has_no_opinion():
+    """Silence here means "no opinion", not "fine". A type nobody wrote a rule
+    for should not be blocked by the module that exists to catch typos."""
+    assert az_names.check("something-else", "!!!") == (True, None)
+
+
+# ============================== Network security groups, now that they build
+
+
+class _NotFound(Exception):
+    status_code = 404
+
+
+class _StubPoller:
+    def __init__(self, value):
+        self._value = value
+
+    def result(self):
+        return self._value
+
+
+class _StubNsgOps:
+    def __init__(self, groups=()):
+        self.groups = list(groups)
+        self.created = []
+        self.deleted = []
+
+    def list_all(self):
+        return list(self.groups)
+
+    def get(self, group, name):
+        for found in self.groups:
+            if found.name == name:
+                return found
+        raise _NotFound()
+
+    def begin_create_or_update(self, group, name, body):
+        self.created.append((group, name, body))
+        made = _StubNsg(name, group=group, tags=body.get("tags"))
+        self.groups.append(made)
+        return _StubPoller(made)
+
+    def begin_delete(self, group, name):
+        self.deleted.append((group, name))
+        self.groups = [g for g in self.groups if g.name != name]
+        return _StubPoller(None)
+
+
+class _StubNsg:
+    def __init__(self, name, group=GROUP, tags=None, rules=()):
+        self.name = name
+        self.location = "eastus"
+        self.tags = tags
+        self.id = (f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{group}"
+                   f"/providers/Microsoft.Network/networkSecurityGroups/{name}")
+        self.security_rules = list(rules)
+        self.default_security_rules = []
+        self.network_interfaces = []
+        self.subnets = []
+
+
+class _StubNetClient:
+    def __init__(self, groups=()):
+        self.network_security_groups = _StubNsgOps(groups)
+
+
+@pytest.fixture
+def group_exists(monkeypatch):
+    monkeypatch.setattr(az_nsg, "ensure_resource_group",
+                        lambda name, location: (False, None))
+
+
+def test_priorities_come_from_the_list_order(group_exists):
+    """The list order is the precedence, which is the only arrangement where
+    what somebody typed and what Azure does are the same thing. The root app
+    numbers rules 100+index regardless of what the caller asked for."""
+    client = _StubNetClient()
+    az_nsg.create_nsg(client, "demo", GROUP, rules=[
+        _rule("first", priority=None), _rule("second", priority=None),
+        _rule("third", priority=None)])
+
+    sent = client.network_security_groups.created[0][2]
+    assert [r["properties"]["priority"]
+            for r in sent["properties"]["securityRules"]] == [100, 110, 120]
+
+
+def test_a_half_ordered_rule_set_is_refused_rather_than_resolved(group_exists):
+    """"These three are automatic and this one is 400" has an answer only if
+    somebody decides what it is, and guessing produces the silent misordering
+    this refusal exists to prevent."""
+    ok, why, _ = az_nsg.create_nsg(_StubNetClient(), "demo", GROUP, rules=[
+        _rule("a", priority=200), _rule("b", priority=None)])
+
+    assert ok is False
+    assert "half ordered" in why
+
+
+def test_two_rules_at_one_priority_are_refused(group_exists):
+    ok, why, _ = az_nsg.create_nsg(_StubNetClient(), "demo", GROUP, rules=[
+        _rule("a", priority=200), _rule("b", priority=200)])
+
+    assert ok is False
+    assert "no defined winner" in why
+
+
+def test_a_priority_azure_reserves_is_refused(group_exists):
+    ok, why, _ = az_nsg.create_nsg(_StubNetClient(), "demo", GROUP,
+                                   rules=[_rule("a", priority=65000)])
+    assert ok is False
+    assert "reserved" in why
+
+
+def test_creating_over_an_existing_group_is_refused(group_exists):
+    """`begin_create_or_update` on a group you already own replaces its entire
+    rule list and reports success, so creating a group with a name somebody
+    else used deletes their firewall. The root app does exactly this."""
+    client = _StubNetClient([_StubNsg("taken")])
+
+    ok, why, _ = az_nsg.create_nsg(client, "taken", GROUP,
+                                   rules=[_rule("a", priority=None)])
+
+    assert ok is False
+    assert "already exists" in why
+    assert "replace its entire rule list" in why
+    assert client.network_security_groups.created == []
+
+
+def test_a_group_with_no_rules_says_it_allows_nothing(group_exists):
+    ok, _, problems = az_nsg.create_nsg(_StubNetClient(), "demo", GROUP,
+                                        rules=[])
+    assert ok
+    assert any("denies all inbound" in p for p in problems)
+
+
+def test_a_created_group_carries_the_tag(group_exists):
+    client = _StubNetClient()
+    az_nsg.create_nsg(client, "demo", GROUP, rules=[])
+
+    assert client.network_security_groups.created[0][2]["tags"] == {
+        "ManagedBy": "secure-cloud-provisioner"}
+
+
+def test_the_rule_body_is_camel_case(group_exists):
+    """A plain dict handed to the SDK is the request body, serialized as
+    written. The vault create paid for this lesson: a snake_case key is not the
+    field it looks like, it is an unrecognised one."""
+    client = _StubNetClient()
+    az_nsg.create_nsg(client, "demo", GROUP, rules=[_rule("a", priority=None)])
+
+    properties = (client.network_security_groups.created[0][2]
+                  ["properties"]["securityRules"][0]["properties"])
+    assert "sourceAddressPrefix" in properties
+    assert "destinationPortRange" in properties
+    assert not any("_" in key for key in properties)
+
+
+def test_an_unforced_group_delete_refuses():
+    client = _StubNetClient([_StubNsg("demo")])
+    ok, why = az_nsg.delete_nsg(client, "demo")
+
+    assert ok is False
+    assert "firewall" in why
+
+
+def test_the_group_cleanup_reaches_only_what_this_tool_tagged():
+    ours = _StubNsg("ours", tags={"ManagedBy": "secure-cloud-provisioner"})
+    theirs = _StubNsg("theirs", tags={"Name": "somebody else's"})
+    client = _StubNetClient([ours, theirs])
+
+    done = az_nsg.cleanup_all_managed_nsgs(client, force=True)
+
+    assert [name for _, name in client.network_security_groups.deleted] == ["ours"]
+    assert len(done) == 1
+
+
+def test_the_deletion_plan_lists_what_stops_being_protected():
+    """The one Azure type with a preview, and the reason is the reverse of the
+    reason the other two have none: deleting a group destroys nothing inside it
+    and exposes everything attached to it."""
+    found = _StubNsg("demo")
+    found.subnets = [type("S", (), {"id": "/subscriptions/x/subnets/one"})()]
+    client = _StubNetClient([found])
+
+    plan = az_nsg.plan_deletion(client, "demo")
+
+    assert plan["destroys"]["network interfaces or subnets left unprotected"] == 1
+    assert "stop being filtered" in plan["message"]
+
+
+# ================================================= Virtual network rules
+
+
+def _vnet(subnets, **overrides):
+    base = {"vnet_name": "demo-vnet", "resource_group": GROUP,
+            "location": "eastus", "address_prefixes": ["10.20.0.0/16"],
+            "subnets": subnets, "ddos_protection_enabled": True,
+            "peerings": [], "unreadable": {}}
+    base.update(overrides)
+    return base
+
+
+def test_a_subnet_with_no_security_group_is_reported():
+    warnings = check_vnet(_vnet([{"name": "app", "network_security_group": None}]))
+
+    assert "subnet_without_firewall" in _settings_of(warnings)
+    assert summarize(warnings)[WARNING] == 1
+
+
+def test_a_subnet_with_a_security_group_is_left_alone():
+    warnings = check_vnet(_vnet([
+        {"name": "app", "network_security_group": "/subscriptions/x/nsg/one"}]))
+
+    assert "subnet_without_firewall" not in _settings_of(warnings)
+
+
+def test_a_gateway_subnet_is_not_reported_for_having_no_group():
+    """Azure refuses to let a gateway subnet carry one, so reporting its
+    absence would be reporting a rule Azure enforces against us."""
+    warnings = check_vnet(_vnet([
+        {"name": "GatewaySubnet", "network_security_group": None}]))
+
+    assert "subnet_without_firewall" not in _settings_of(warnings)
+
+
+def test_a_network_form_says_it_will_filter_nothing_before_it_is_built():
+    """az/vnet.py attaches no group to a subnet it creates, so this fires on
+    every subnet in a new network - which is correct and is the point."""
+    warnings = check_vnet_spec({"name": "demo",
+                                "subnets": [{"name": "app"}, {"name": "data"}]})
+
+    assert [w["rule"]["setting"] for w in warnings].count(
+        "subnet_without_firewall") == 2
+
+
+def test_an_unreadable_network_setting_is_a_finding_not_a_silence():
+    warnings = check_vnet(_vnet([], unreadable={"subnets": "the login could not"}))
+
+    assert "unreadable_subnets" in _settings_of(warnings)
+
+
+def test_ddos_and_peering_are_notes_rather_than_faults():
+    warnings = check_vnet(_vnet([], ddos_protection_enabled=False,
+                                peerings=["hub"]))
+
+    assert summarize(warnings)[WARNING] == 0
+    assert {"no_ddos_protection", "peered"} <= _settings_of(warnings)
+
+
+# ======================================================= Virtual machines
+
+
+def _vm(**overrides):
+    base = {"vm_name": "demo-vm", "resource_group": GROUP, "location": "eastus",
+            "vm_size": "Standard_B1s", "public_ip": None,
+            "password_authentication_disabled": True,
+            "os_disk_encrypted": True, "encryption_at_host": True,
+            "effective_rules": [], "unreadable": {}}
+    base.update(overrides)
+    return base
+
+
+def test_a_size_outside_the_allowlist_is_refused_not_warned_about():
+    """A refusal rather than a warning, for the reason aws/instances.py gives:
+    a confirmation prompt does not survive a typo."""
+    ok, why, _ = az_vm.create_vm(None, "demo", GROUP,
+                                 vm_size="Standard_D64s_v3",
+                                 ssh_public_key="ssh-ed25519 AAAA")
+    assert ok is False
+    assert "not a size this tool will create" in why
+
+
+def test_a_machine_cannot_be_created_without_a_public_key():
+    """This tool never accepts a password for a machine it builds. A password
+    logs in, so putting one in a request body puts it in the logs."""
+    ok, why, _ = az_vm.create_vm(None, "demo", GROUP, ssh_public_key=None)
+
+    assert ok is False
+    assert "never accepts a password" in why
+
+
+def test_a_private_key_offered_as_a_public_one_is_refused():
+    ok, why, _ = az_vm.create_vm(None, "demo", GROUP,
+                                 ssh_public_key="-----BEGIN OPENSSH PRIVATE KEY-----")
+    assert ok is False
+    assert "private half" in why
+
+
+def test_this_module_never_asks_for_a_password():
+    """The archived Streamlit version reads AZURE_VM_ADMIN_PASSWORD from the
+    environment and sends it. Asserted by parsing the source, the same way
+    test_this_module_never_calls_create_key_pair does on the AWS side.
+
+    Parsed rather than grepped, and the difference matters here: this module's
+    docstring names AZURE_VM_ADMIN_PASSWORD while explaining that it does not
+    use it, so a substring search fails on the explanation. What must not exist
+    is a password reaching the request body or being read from anywhere - which
+    is a question about code, not about prose.
+    """
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parent.parent / "az" / "vm.py").read_text())
+
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            doc = ast.get_docstring(node, clean=False)
+            if doc:
+                docstrings.add(doc)
+
+    banned = ("admin_password", "adminPassword", "AZURE_VM_ADMIN_PASSWORD",
+              "disablePasswordAuthentication=False")
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if node.value in docstrings:
+                continue
+            for word in banned:
+                assert word not in node.value, (
+                    f"{word!r} appears in a string literal on line {node.lineno}")
+        if isinstance(node, ast.keyword) and node.arg:
+            assert node.arg not in banned, f"line {node.lineno}"
+        if isinstance(node, ast.Name):
+            assert node.id not in banned, f"line {node.lineno}"
+
+
+def test_an_open_admin_port_is_critical_only_when_the_machine_is_reachable():
+    """A wide-open rule on a machine with no public address is a warning, not a
+    crisis - it is one public IP away from being one, which is exactly how it
+    usually happens, so it is not silence either."""
+    exposed = check_vm(_vm(public_ip="4.5.6.7",
+                           effective_rules=[_rule("allow-ssh")]))
+    private = check_vm(_vm(public_ip=None,
+                           effective_rules=[_rule("allow-ssh")]))
+
+    assert "open_22" in _settings_of(exposed)
+    assert summarize(exposed)[CRITICAL] >= 1
+    assert "open_22_no_public_address" in _settings_of(private)
+    assert summarize(private)[CRITICAL] == 0
+
+
+def test_a_machines_exposure_is_decided_by_the_same_evaluator_as_a_groups():
+    """A machine behind a denied rule is not exposed, and the machine rules do
+    not reimplement that - they ask scanner/azure_nsg_effective.py."""
+    warnings = check_vm(_vm(public_ip="4.5.6.7", effective_rules=[
+        _rule("allow-ssh", priority=200),
+        _rule("deny-ssh", priority=100, access="Deny")]))
+
+    assert "open_22" not in _settings_of(warnings)
+
+
+def test_password_login_is_critical_on_a_reachable_machine():
+    warnings = check_vm(_vm(public_ip="4.5.6.7",
+                            password_authentication_disabled=False))
+
+    assert _find_level(warnings, "password_login_allowed") == CRITICAL
+
+
+def test_password_login_is_a_warning_on_an_unreachable_one():
+    warnings = check_vm(_vm(password_authentication_disabled=False))
+
+    assert _find_level(warnings, "password_login_allowed") == WARNING
+
+
+def _find_level(warnings, setting):
+    for w in warnings:
+        if w["rule"]["setting"] == setting:
+            return w["level"]
+    raise AssertionError(f"no {setting} in {_settings_of(warnings)}")
+
+
+def test_a_machine_form_is_judged_the_same_way_the_machine_will_be():
+    """The parity contract, across the fifth type."""
+    before = check_vm_spec({"name": "demo", "open_ports": ["22"],
+                            "allowed_source": "*", "assign_public_ip": True})
+    after = check_vm(_vm(vm_name="demo", public_ip="4.5.6.7",
+                         encryption_at_host=False,
+                         effective_rules=[_rule("allow-22")]))
+
+    assert _settings_of(before) <= _settings_of(after)
+
+
+def test_an_unreadable_machine_network_is_a_finding_not_a_silence():
+    warnings = check_vm(_vm(unreadable={"effective_rules": "the login could not"}))
+
+    assert "unreadable_effective_rules" in _settings_of(warnings)
+
+
+def test_a_machine_delete_says_what_it_leaves_behind():
+    """Reporting success and leaving somebody to find four billable leftovers
+    later would be true and misleading."""
+    class _Ops:
+        def list_all(self):
+            return []
+
+        def begin_delete(self, group, name):
+            return _StubPoller(None)
+
+    client = type("C", (), {"virtual_machines": _Ops()})()
+    ok, message = az_vm.delete_vm(
+        client,
+        f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{GROUP}"
+        f"/providers/Microsoft.Compute/virtualMachines/demo",
+        force=True)
+
+    assert ok
+    assert "still there" in message
+    assert "-nic" in message
+
+
+class _StubSku:
+    def __init__(self, name, restrictions=(), resource_type="virtualMachines"):
+        self.name = name
+        self.resource_type = resource_type
+        self.restrictions = list(restrictions)
+
+
+class _StubSkuOps:
+    def __init__(self, skus):
+        self._skus = list(skus)
+
+    def list(self, filter=None):
+        return list(self._skus)
+
+
+class _StubComputeClient:
+    def __init__(self, skus=()):
+        self.resource_skus = _StubSkuOps(skus)
+
+
+def test_a_size_the_subscription_cannot_start_is_not_offered():
+    """Azure restricts sizes per subscription as well as per region and
+    reports the two identically. Every classic B-series size came back
+    restricted on the subscription this was built against - in nine regions,
+    with four cores of unused quota."""
+    client = _StubComputeClient([
+        _StubSku("Standard_B1s", restrictions=["NotAvailableForSubscription"]),
+        _StubSku("Standard_F1als_v7"),
+        _StubSku("Standard_D96as_v4"),          # real, but not allowlisted
+        _StubSku("Standard_F1als_v7", resource_type="disks"),
+    ])
+
+    assert az_vm.available_sizes(client, "eastus") == ["Standard_F1als_v7"]
+
+
+def test_the_cheapest_available_size_is_the_one_chosen():
+    """Preference order rather than alphabetical: burstable before fixed,
+    smaller before larger."""
+    client = _StubComputeClient([
+        _StubSku("Standard_F1als_v7"), _StubSku("Standard_B1s"),
+        _StubSku("Standard_D2ls_v7")])
+
+    assert az_vm.first_available_size(client, "eastus") == "Standard_B1s"
+
+
+def test_a_subscription_offered_nothing_gets_none_rather_than_a_guess():
+    client = _StubComputeClient([
+        _StubSku("Standard_B1s", restrictions=["NotAvailableForSubscription"])])
+
+    assert az_vm.available_sizes(client, "eastus") == []
+    assert az_vm.first_available_size(client, "eastus") is None
+
+
+def test_asking_which_sizes_are_available_never_raises():
+    """Called to improve a refusal. A refusal that fails while explaining
+    itself is worse than the plain one."""
+    class _Broken:
+        resource_skus = property(lambda self: (_ for _ in ()).throw(
+            RuntimeError("no")))
+
+    assert az_vm.available_sizes(_Broken(), "eastus") == []
+
+
+def test_an_unavailable_size_names_what_can_be_started_instead():
+    """Relaying Azure's own message leaves the caller to go and find out what
+    would work. The answer is one call away and this makes it."""
+    client = _StubComputeClient([_StubSku("Standard_F1als_v7")])
+
+    why = az_vm._why_the_machine_was_refused(
+        Exception("(SkuNotAvailable) The requested VM size ... is currently "
+                  "not available in location 'eastus'."),
+        GROUP, client=client, location="eastus")
+
+    assert "Standard_F1als_v7" in why
+    assert "eastus" in why
+
+
+def test_an_unavailable_size_with_no_alternative_says_it_is_the_subscription():
+    """The distinction that cost the time: this reads like a region being full
+    and is not. Quota was four cores and unused."""
+    why = az_vm._why_the_machine_was_refused(
+        Exception("(SkuNotAvailable) not available in location 'eastus'."),
+        GROUP, client=_StubComputeClient([]), location="eastus")
+
+    assert "restriction on the subscription rather than on the region" in why
+
+
+def test_an_unregistered_compute_provider_is_explained_rather_than_raised():
+    """The first real create failed on this and the SDK's own message names the
+    fix in a form that does not look like one. Found against a subscription
+    that had never made a machine."""
+    why = az_vm._why_the_machine_was_refused(
+        Exception("(MissingSubscriptionRegistration) The subscription is not "
+                  "registered to use namespace 'Microsoft.Compute'."), GROUP)
+
+    assert "Microsoft.Compute" in why
+    assert "Register" in why
+    assert "free" in why
+
+
+def test_a_missing_role_names_the_action_it_needs():
+    why = az_vm._why_the_machine_was_refused(
+        Exception("(AuthorizationFailed) The client does not have "
+                  "authorization to perform action "
+                  "'Microsoft.Compute/virtualMachines/write'."), GROUP)
+
+    assert "'Microsoft.Compute/virtualMachines/write'" in why
+    assert GROUP in why
+
+
+# ============================================== Through the registry
+
+
+def test_the_three_new_types_are_registered_and_writable():
+    for key in ("azure-nsg", "azure-vnet", "azure-vm"):
+        resource = registry.get(key)
+        assert resource is not None, key
+        assert resource.read_only is False, key
+        assert resource.create is not registry._cannot_create, key
+
+
+def test_creating_any_azure_type_without_a_resource_group_is_refused():
+    """A missing resource group is an Azure-only problem, so the refusal is in
+    the adapter rather than in the model eight AWS types also use."""
+    for key in ("azure-nsg", "azure-vnet", "azure-vm"):
+        ok, message, _ = registry.get(key).create(None, {"name": "demo"})
+        assert ok is False, key
+        assert "resource group" in message, key
+
+
+def test_the_machine_form_offers_only_the_allowlist():
+    """Off the registry rather than written out again in JavaScript, so the
+    menu cannot drift from what az/vm.py will actually build."""
+    offered = {c["value"] for c in registry.AZURE_VM.options(None)["vm_size"]}
+
+    assert offered == az_vm.ALLOWED_VM_SIZES

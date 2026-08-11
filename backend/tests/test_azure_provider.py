@@ -29,6 +29,7 @@ own return values rather than a fake service, which is the same approach
 import os
 import subprocess
 import sys
+from enum import Enum
 from pathlib import Path
 
 import pytest
@@ -295,12 +296,16 @@ def test_the_scanner_tolerates_a_group_that_is_not_there():
     assert check_nsg({}) == []
 
 
-def test_nothing_about_an_azure_rule_is_offered_as_a_fix():
-    """Azure evaluates rules in priority order, so narrowing one without
-    reading the rest can be silently undone by another."""
+def test_an_azure_rule_is_now_offered_as_a_fix():
+    """This used to assert the opposite, and the reason it did was real: Azure
+    evaluates rules in priority order, so narrowing one without reading the
+    rest could be silently undone by another. scanner/azure_nsg_effective.py
+    reads the whole ordered set, which is what makes a change here judgeable
+    rather than a guess."""
     warnings = check_nsg(_nsg(_rule(destination_port_range="*")))
     assert warnings
-    assert fixable(warnings) == []
+    assert fixable(warnings)
+    assert all(w["fix"]["action"] == "deny_rule" for w in fixable(warnings))
 
 
 # ============================================== Storage account rules
@@ -430,6 +435,169 @@ def test_an_account_still_accepting_its_key_is_a_warning():
 def test_an_account_requiring_entra_id_says_nothing():
     assert "shared_key_allowed" not in _settings_of(
         check_storage_account(_account(allow_shared_key_access=False)))
+
+
+# ============================== The SDK's enums, which are not quite strings
+#
+# The Azure SDK returns enums where the scanners expect strings, and they are
+# `str` subclasses, so they behave like strings everywhere it is convenient to
+# check and in exactly one place where it is not. Every stub in this file used
+# ordinary strings, quite reasonably, and so none of them could show it.
+#
+# What it cost: `scanner/azure_nsg_rules.py` compares
+# `str(rule["direction"]).lower() != "inbound"` and continues when it does not
+# match. Against a real subscription every rule of every group was skipped, and
+# a network security group opening SSH, RDP and all 65,535 other ports to the
+# whole internet came back with one note saying it was not attached to
+# anything. Found by building the worst group that could be built and getting
+# a clean scan.
+
+
+class _SdkEnum(str, Enum):
+    """Shaped like azure.mgmt.network.models.SecurityRuleDirection and friends.
+
+    The point of this class is the one line it does not contain: no `__str__`.
+    Since Python 3.11 a `class X(str, Enum)` renders through `str()` as
+    'X.MEMBER' rather than as its value, while still comparing equal to the
+    value and still serializing to JSON as the value. Anything that reads it
+    the convenient way sees a string; anything that coerces it sees a name that
+    matches nothing.
+    """
+
+    INBOUND = "Inbound"
+    ALLOW = "Allow"
+    TCP = "Tcp"
+    ENABLED = "Enabled"
+    DISABLED = "Disabled"
+
+
+def test_the_sdk_enum_stub_really_does_reproduce_the_trap():
+    """The stub is only worth having if it fails the way the SDK does. If a
+    future Python makes str(X.MEMBER) return the value again, this is the test
+    that says so, rather than three tests below quietly passing for a new
+    reason."""
+    assert _SdkEnum.INBOUND == "Inbound"
+    assert isinstance(_SdkEnum.INBOUND, str)
+    assert str(_SdkEnum.INBOUND) != "Inbound"
+
+
+def test_plain_reduces_an_sdk_enum_to_the_value_the_scanners_compare():
+    assert az_common.plain(_SdkEnum.INBOUND) == "Inbound"
+    assert str(az_common.plain(_SdkEnum.INBOUND)) == "Inbound"
+    # Plain data goes through untouched, including the None that means
+    # "Azure did not say".
+    assert az_common.plain("Inbound") == "Inbound"
+    assert az_common.plain(None) is None
+    assert az_common.plain(100) == 100
+    assert az_common.plain([_SdkEnum.ALLOW, "x"]) == ["Allow", "x"]
+
+
+class _StubSecurityRule:
+    """One rule as the SDK hands it over: enums, not strings."""
+
+    def __init__(self, name, direction=_SdkEnum.INBOUND,
+                 access=_SdkEnum.ALLOW, protocol=_SdkEnum.TCP, priority=100,
+                 source_address_prefix="*", destination_port_range="22"):
+        self.name = name
+        self.direction = direction
+        self.access = access
+        self.protocol = protocol
+        self.priority = priority
+        self.source_address_prefix = source_address_prefix
+        self.destination_port_range = destination_port_range
+        self.source_address_prefixes = None
+        self.destination_port_ranges = None
+
+
+class _StubNsg:
+    def __init__(self, name, rules, group=GROUP):
+        self.name = name
+        self.location = "eastus"
+        self.id = (f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{group}"
+                   f"/providers/Microsoft.Network/networkSecurityGroups/{name}")
+        self.security_rules = list(rules)
+        self.default_security_rules = []
+        self.network_interfaces = []
+        self.subnets = []
+
+
+class _StubNsgOperations:
+    def __init__(self, groups):
+        self._groups = list(groups)
+
+    def list_all(self):
+        return list(self._groups)
+
+    def get(self, group, name):
+        for found in self._groups:
+            if found.name == name:
+                return found
+        raise _NotFound()
+
+
+class _StubNetworkClient:
+    def __init__(self, groups=()):
+        self.network_security_groups = _StubNsgOperations(groups)
+
+
+def test_a_rule_carrying_sdk_enums_is_still_judged_open_to_everyone():
+    """The regression that matters. Before `plain`, this group scanned clean
+    against a real subscription: the reader passed the enums straight through
+    and every rule fell out of the scanner's first filter."""
+    client = _StubNetworkClient([
+        _StubNsg("demo", [_StubSecurityRule("allow-ssh-from-anywhere")])])
+
+    settings = az_nsg.read_nsg_for_scanning(client, "demo")
+    warnings = check_nsg(settings)
+
+    assert "demo:allow-ssh-from-anywhere:open_22" in _settings_of(warnings) or \
+        any(w["rule"]["setting"] == "open_22" for w in warnings)
+    assert summarize(warnings)["critical"] >= 1
+
+
+def test_the_reader_hands_the_scanner_strings_rather_than_sdk_types():
+    """Stated directly rather than inferred from a finding firing. `scanner/`
+    is not allowed to know the Azure SDK exists, and a value that merely
+    behaves like a string most of the time is that rule being broken
+    invisibly."""
+    client = _StubNetworkClient([
+        _StubNsg("demo", [_StubSecurityRule("allow-ssh-from-anywhere")])])
+
+    rule = az_nsg.read_nsg_for_scanning(client, "demo")["rules"][0]
+
+    for field in ("direction", "access", "protocol"):
+        assert type(rule[field]) is str, f"{field} reached the scanner as an SDK type"
+        assert str(rule[field]) == rule[field]
+
+
+def test_a_rule_that_names_its_source_is_still_left_alone():
+    """The other half of the fix being right. Making the open case fire is
+    worth nothing if it fires on everything."""
+    client = _StubNetworkClient([
+        _StubNsg("demo", [_StubSecurityRule(
+            "web-from-office", source_address_prefix="203.0.113.0/24",
+            destination_port_range="443")])])
+
+    warnings = check_nsg(az_nsg.read_nsg_for_scanning(client, "demo"))
+
+    assert summarize(warnings)["critical"] == 0
+
+
+def test_a_storage_enum_does_not_make_a_restricted_account_look_open():
+    """The same trap in the other direction. Here a coerced enum does not hide
+    a finding, it invents one: an account whose network access is Disabled
+    would be reported as reachable from anywhere."""
+    account = _Fields(
+        name="demostorage", id=STORAGE_ID, location="eastus",
+        public_network_access=_SdkEnum.DISABLED,
+        minimum_tls_version=_SdkEnum.ENABLED)
+    settings = az_storage.read_account_for_scanning(
+        _StubStorageClient(account=account), STORAGE_ID)
+
+    assert settings["public_network_access"] == "Disabled"
+    assert type(settings["public_network_access"]) is str
+    assert "reachable_from_anywhere" not in _settings_of(
+        check_storage_account(settings))
 
 
 # ==================================== Reading those two off the SDK
@@ -857,15 +1025,56 @@ class _StubVaultClient:
                    "deleted state.")
 
     def begin_create_or_update(self, group, name, parameters):
+        """Models the asymmetry that a stub reading its own input cannot see.
+
+        A plain dict handed to the SDK is the request body, serialized as
+        written, so what arrives here is camelCase. What comes back out of
+        `get` is a model object, whose attributes are snake_case. The previous
+        version of this stub stored the request and answered from a fixed
+        `_StubVault`, so both halves could be spelled the same way and the
+        create still looked correct - which is exactly how `tenant_id` reached
+        a real subscription and came back as "an invalid value was provided
+        for 'tenantId'".
+
+        The translation below is the SDK's and Azure's, done here so that a
+        create written in the wrong language fails offline too.
+        """
         self.created.append((group, name, parameters))
-        made = _StubVault(name, group=group, tags=parameters.get("tags"))
+        sent = parameters.get("properties", {})
+
+        model = {
+            "enable_soft_delete": sent.get("enableSoftDelete"),
+            "enable_rbac_authorization": sent.get("enableRbacAuthorization"),
+            "soft_delete_retention_in_days": sent.get(
+                "softDeleteRetentionInDays"),
+            "access_policies": sent.get("accessPolicies") or [],
+            "public_network_access": sent.get("publicNetworkAccess"),
+            "network_acls": None,
+        }
+
+        # Azure reports this property only when it is on. Absent from the
+        # request means absent from the response, which is the same fact
+        # `create_vault` relies on when it omits the key rather than sending
+        # false - and the reason the reader must treat null as off.
+        if sent.get("enablePurgeProtection"):
+            model["enable_purge_protection"] = True
+        else:
+            model["enable_purge_protection"] = None
+
+        made = _StubVault(name, group=group, tags=parameters.get("tags"),
+                          **model)
         self.vault_list.append(made)
         return _StubPoller(made)
 
-    def begin_delete(self, group, name):
+    def delete(self, group, name):
+        """`delete`, not `begin_delete`. A vault delete is one of the few
+        management calls Azure answers synchronously, and the operations class
+        carries no `begin_delete` at all - so the old spelling was an
+        AttributeError that only ever fired against a real subscription,
+        because this stub had been written to offer whatever the code called.
+        """
         self.deleted.append((group, name))
         self.vault_list = [v for v in self.vault_list if v.name != name]
-        return _StubWaiter()
 
 
 class _NotFound(Exception):
@@ -896,7 +1105,11 @@ def test_a_created_vault_carries_the_tag_and_names_its_tenant(
     assert resource_id.endswith("/vaults/demo")
     _, _, parameters = client.created[0]
     assert parameters["tags"] == az_common.managed_tags()
-    assert parameters["properties"]["tenant_id"] == "a-tenant"
+    # camelCase, because this dict is the request body rather than a model.
+    # Spelled tenant_id it is not a wrongly-valued field, it is an
+    # unrecognised one, and Azure answers that the tenant id is invalid when
+    # what it means is that there was not one.
+    assert parameters["properties"]["tenantId"] == "a-tenant"
 
 
 def test_soft_delete_is_stated_as_on_whichever_way_the_switch_is_set(
@@ -908,18 +1121,25 @@ def test_soft_delete_is_stated_as_on_whichever_way_the_switch_is_set(
         client = _StubVaultClient()
         az_keyvault.create_vault(client, "demo", GROUP,
                                  secure_by_default=secure)
-        assert client.created[0][2]["properties"]["enable_soft_delete"] is True
+        assert client.created[0][2]["properties"]["enableSoftDelete"] is True
 
 
 def test_purge_protection_off_is_sent_as_absent_not_as_false(
         vault_group_exists):
     """The API rejects an explicit false: once enabled it can never be
     disabled, so Azure models "not on" as absent. The one setting this module
-    cannot state outright, and Azure's constraint rather than a choice here."""
+    cannot state outright, and Azure's constraint rather than a choice here.
+
+    Absent means the key is not in the body. It used to mean the key was there
+    with None beside it, which is what a model would have serialized away and
+    what a raw dict sends as an explicit null - a different request, and the
+    reason this now asserts the key is missing rather than that its value is
+    None.
+    """
     client = _StubVaultClient()
     az_keyvault.create_vault(client, "demo", GROUP, secure_by_default=False)
 
-    assert client.created[0][2]["properties"]["enable_purge_protection"] is None
+    assert "enablePurgeProtection" not in client.created[0][2]["properties"]
 
 
 def test_creating_a_secure_vault_warns_that_it_cannot_be_fully_removed(
@@ -1063,10 +1283,10 @@ def test_a_vault_reads_back_as_the_form_scan_promised(vault_group_exists,
 
     after = check_key_vault({
         "vault_name": "demo",
-        "soft_delete_enabled": built["enable_soft_delete"],
-        "purge_protection_enabled": built["enable_purge_protection"] is True,
-        "rbac_authorization": built["enable_rbac_authorization"],
-        "soft_delete_retention_days": built["soft_delete_retention_in_days"],
+        "soft_delete_enabled": built["enableSoftDelete"],
+        "purge_protection_enabled": built.get("enablePurgeProtection") is True,
+        "rbac_authorization": built["enableRbacAuthorization"],
+        "soft_delete_retention_days": built["softDeleteRetentionInDays"],
         "access_policy_count": 0,
         "public_network_access": "Enabled",
         "unreadable": {},
@@ -1087,16 +1307,54 @@ def api():
     return TestClient(app, base_url="http://127.0.0.1:8000")
 
 
+@pytest.fixture
+def azure_unconfigured(monkeypatch):
+    """Removes the Azure credentials for the duration of one test.
+
+    The three tests below assert what happens when Azure cannot be reached,
+    and used to get that condition by being run on a machine that happened to
+    have no credentials. Once `backend/environment.py` started reading `.env`
+    and somebody put real ones in it, they stopped testing what they claim:
+    `test_an_unconfigured_azure_is_a_503` began answering 200, because the
+    offline suite had quietly started listing a real subscription over the
+    network.
+
+    That is the same failure `test_the_page_starts_without` was rewritten to
+    avoid, one layer along - it blocks the SDK in a subprocess rather than
+    hoping the SDK is absent, and this blocks the credentials rather than
+    hoping they are. A test for the unconfigured case has to build the
+    unconfigured case.
+    """
+    for name in ("AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET",
+                 "AZURE_SUBSCRIPTION_ID"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_azure_types_are_advertised_alongside_the_aws_ones(api):
     keys = {r["key"] for r in api.get("/resources").json()["resources"]}
     assert {"azure-nsg", "azure-storage"} <= keys
 
 
-def test_azure_firewalls_are_audited_not_provisioned():
-    """A rule's priority decides which of several overlapping rules wins, so
-    neither creating one nor fixing one can be judged without reading the whole
-    ordered set. Until that exists, this stays read-only."""
-    assert registry.AZURE_NSG.read_only is True
+def test_azure_firewalls_are_provisioned_like_any_other_type():
+    """The last Azure capability that lived only in the root app, and the thing
+    keeping it alive. It was read-only because a rule's priority decides which
+    of several overlapping rules wins and nothing here read the ordered set;
+    that is now scanner/azure_nsg_effective.py's job."""
+    assert registry.AZURE_NSG.read_only is False
+    assert registry.AZURE_NSG.create is not registry._cannot_create
+    assert registry.AZURE_NSG.delete is not registry._cannot_create
+    assert registry.AZURE_NSG.cleanup is not registry._cannot_create
+
+
+def test_every_azure_type_provisions_through_the_same_registry():
+    """Five types, one set of routes, no route changes for any of them."""
+    for resource in (registry.AZURE_NSG, registry.AZURE_STORAGE,
+                     registry.AZURE_KEYVAULT, registry.AZURE_VNET,
+                     registry.AZURE_VM):
+        assert resource.read_only is False
+        assert resource.create is not registry._cannot_create
+        assert resource.delete is not registry._cannot_create
+        assert resource.cleanup is not registry._cannot_create
 
 
 def test_azure_storage_is_provisioned_like_any_aws_type():
@@ -1129,11 +1387,18 @@ def test_an_azure_finding_is_counted_by_code_that_knows_nothing_about_azure(api)
     }).json()
 
     assert body["counts"]["critical"] == 1
-    assert body["fixable_count"] == 0
+    # fixable_count used to be asserted as 0 here, which was incidental rather
+    # than a property of form scans: azure-nsg had no fix at all. It has one
+    # now, and azure-storage's form scan has always reported fixable findings,
+    # so 1 is the consistent answer. What this test is actually about is the
+    # line below and the counts above - both produced by api/app.py, which has
+    # no idea which cloud it just described.
+    assert body["fixable_count"] == 1
     assert body["warnings"][0]["level"] == "critical"
 
 
-def test_an_unconfigured_azure_is_a_503_that_says_what_to_install(api):
+def test_an_unconfigured_azure_is_a_503_that_says_what_to_install(
+        api, azure_unconfigured):
     """Not a 500. Nothing is broken - this deployment simply has no Azure
     dependencies, which is the ordinary state of the AWS half."""
     resp = api.get("/resources/azure-nsg")
@@ -1141,7 +1406,8 @@ def test_an_unconfigured_azure_is_a_503_that_says_what_to_install(api):
     assert resp.json()["provider"] == "azure"
 
 
-def test_the_aws_routes_still_work_while_azure_is_unconfigured(api):
+def test_the_aws_routes_still_work_while_azure_is_unconfigured(
+        api, azure_unconfigured):
     """The property that matters most. One provider being unavailable must
     not take the other down with it."""
     assert api.get("/health").json() == {"status": "ok"}
@@ -1152,13 +1418,18 @@ def test_the_aws_routes_still_work_while_azure_is_unconfigured(api):
     }).status_code == 200
 
 
-def test_azure_firewalls_cannot_be_created_deleted_or_cleaned_up(api):
-    assert api.post("/resources/azure-nsg", json={"name": "x"}).status_code == 405
-    assert api.delete("/resources/azure-nsg/x").status_code == 405
-    assert api.post("/resources/azure-nsg/cleanup").status_code == 405
+def test_azure_firewalls_now_fail_at_the_sdk_rather_than_at_the_route(
+        api, azure_unconfigured):
+    """They used to answer 405: audited, not provisioned. The destructive
+    routes are open to them now, so the first thing missing is the credential -
+    which is a 503 naming what to set rather than a refusal about what the tool
+    does. The same change azure-storage went through, one type later."""
+    assert api.delete("/resources/azure-nsg/x").status_code == 503
+    assert api.post("/resources/azure-nsg/cleanup").status_code == 503
 
 
-def test_storage_now_fails_at_the_sdk_rather_than_at_the_route(api):
+def test_storage_now_fails_at_the_sdk_rather_than_at_the_route(
+        api, azure_unconfigured):
     """It used to be 405: audited, not provisioned. The destructive routes are
     open to it now, so the first thing missing is the SDK - which is a 503
     saying what to install rather than a refusal about what the tool does.

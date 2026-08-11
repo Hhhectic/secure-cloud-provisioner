@@ -36,6 +36,8 @@ from aws import roles
 from az import nsg as az_nsg
 from az import storage as az_storage
 from az import keyvault as az_keyvault
+from az import vnet as az_vnet
+from az import vm as az_vm
 from scanner.rules import (
     check_firewall_rules,
     check_group_usage,
@@ -56,6 +58,8 @@ from scanner.azure_nsg_rules import check_nsg, check_nsg_spec
 from scanner.azure_storage_rules import (check_storage_account,
                                          check_storage_spec)
 from scanner.azure_keyvault_rules import check_key_vault, check_key_vault_spec
+from scanner.azure_vnet_rules import check_vnet, check_vnet_spec
+from scanner.azure_vm_rules import check_vm, check_vm_spec
 
 DEFAULT_REGION = "us-east-1"
 
@@ -1056,22 +1060,63 @@ def _az_nsg_fix(client, resource_id, warning, options):
     return az_nsg.apply_fix(client, resource_id, warning)
 
 
+def _az_nsg_create(client, spec):
+    """Creates one security group, in a resource group the spec has to name.
+
+    The same refusal the other two Azure types make, for the same reason: a
+    resource group has no AWS equivalent to default from.
+    """
+    group = spec.get("resource_group")
+    if not group:
+        return False, (
+            "Azure puts every resource in a resource group, and this one names "
+            "none. Give a resource group; it will be created if it does not "
+            "already exist."
+        ), []
+
+    return az_nsg.create_nsg(
+        client,
+        spec.get("name"),
+        group,
+        location=spec.get("region") or spec.get("location") or "eastus",
+        # azure_rules, not rules: the AWS field carries a different shape, and
+        # check_nsg_spec reads the same key for the same reason.
+        rules=spec.get("azure_rules") or [],
+    )
+
+
+def _az_nsg_delete(client, resource_id, options):
+    return az_nsg.delete_nsg(
+        client, resource_id, force=options.get("force", False))
+
+
+def _az_nsg_cleanup(client, options):
+    return az_nsg.cleanup_all_managed_nsgs(
+        client, force=options.get("force", False))
+
+
 AZURE_NSG = ResourceType(
     key="azure-nsg",
     label="Azure network security group",
     id_label="Group name",
     get_client=az_nsg.get_client,
+    create=_az_nsg_create,
     list_all=_az_nsg_list,
     read=az_nsg.read_nsg_for_scanning,
     check=check_nsg,
     describe=az_nsg.describe_nsg,
     check_spec=check_nsg_spec,
     fix=_az_nsg_fix,
-    # Nothing here creates Azure resources, so there is no tag to filter on
-    # and the reader ignores the flag. Offering the box would be offering a
-    # control that does nothing.
-    only_ours_label=None,
-    read_only=True,
+    delete=_az_nsg_delete,
+    cleanup=_az_nsg_cleanup,
+    # This type creates resources now, so the tag means something and the box
+    # is worth offering. It did not until create_nsg arrived.
+    only_ours_label="only ones this tool made",
+    # The one Azure type with a deletion preview, and the reason is the reverse
+    # of the reason the other two have none: deleting a group destroys nothing
+    # inside it and exposes everything attached to it, which is a list this can
+    # actually produce.
+    plan_deletion=az_nsg.plan_deletion,
 )
 
 
@@ -1208,9 +1253,169 @@ AZURE_KEYVAULT = ResourceType(
 )
 
 
+# --------------------------------------------------------- Azure virtual networks
+
+
+def _az_vnet_list(client, only_ours):
+    return [{"id": v["id"], "name": v["name"]}
+            for v in az_vnet.list_vnets(client, only_ours=only_ours)]
+
+
+def _az_vnet_fix(client, resource_id, warning, options):
+    return az_vnet.apply_fix(client, resource_id, warning)
+
+
+def _az_vnet_create(client, spec):
+    group = spec.get("resource_group")
+    if not group:
+        return False, (
+            "Azure puts every resource in a resource group, and this one names "
+            "none. Give a resource group; it will be created if it does not "
+            "already exist."
+        ), []
+
+    return az_vnet.create_vnet(
+        client,
+        spec.get("name"),
+        group,
+        location=spec.get("region") or spec.get("location") or "eastus",
+        address_prefixes=spec.get("address_prefixes"),
+        subnets=spec.get("subnets"),
+    )
+
+
+def _az_vnet_delete(client, resource_id, options):
+    return az_vnet.delete_vnet(
+        client, resource_id, force=options.get("force", False))
+
+
+def _az_vnet_cleanup(client, options):
+    return az_vnet.cleanup_all_managed_vnets(
+        client, force=options.get("force", False))
+
+
+AZURE_VNET = ResourceType(
+    key="azure-vnet",
+    label="Azure virtual network",
+    id_label="Network name",
+    get_client=az_vnet.get_client,
+    create=_az_vnet_create,
+    list_all=_az_vnet_list,
+    read=az_vnet.read_vnet_for_scanning,
+    check=check_vnet,
+    describe=az_vnet.describe_vnet,
+    check_spec=check_vnet_spec,
+    fix=_az_vnet_fix,
+    delete=_az_vnet_delete,
+    cleanup=_az_vnet_cleanup,
+    only_ours_label="only ones this tool made",
+    plan_deletion=az_vnet.plan_deletion,
+)
+
+
+# ------------------------------------------------------- Azure virtual machines
+
+
+def _az_vm_list(client, only_ours):
+    return [{"id": v["id"], "name": v["name"]}
+            for v in az_vm.list_vms(client, only_ours=only_ours)]
+
+
+def _az_vm_fix(client, resource_id, warning, options):
+    return az_vm.apply_fix(client, resource_id, warning)
+
+
+def _az_vm_create(client, spec):
+    group = spec.get("resource_group")
+    if not group:
+        return False, (
+            "Azure puts every resource in a resource group, and this one names "
+            "none. Give a resource group; it will be created if it does not "
+            "already exist."
+        ), []
+
+    return az_vm.create_vm(
+        client,
+        spec.get("name"),
+        group,
+        location=spec.get("region") or spec.get("location") or "eastus",
+        vm_size=spec.get("vm_size"),
+        admin_username=spec.get("admin_username") or "azureuser",
+        # public_key, matching the AWS key-pair field. There is deliberately no
+        # private key field anywhere in this project; see CLAUDE.md.
+        ssh_public_key=spec.get("public_key") or spec.get("ssh_public_key"),
+        vnet_name=spec.get("vnet_name"),
+        subnet_name=spec.get("subnet_name") or "default",
+        nsg_name=spec.get("nsg_name"),
+        assign_public_ip=bool(spec.get("assign_public_ip")),
+        open_ports=spec.get("open_ports"),
+        allowed_source=spec.get("allowed_source"),
+        encryption_at_host=bool(spec.get("encryption_at_host")),
+    )
+
+
+def _az_vm_delete(client, resource_id, options):
+    return az_vm.delete_vm(
+        client, resource_id, force=options.get("force", False))
+
+
+def _az_vm_cleanup(client, options):
+    return az_vm.cleanup_all_managed_vms(
+        client, force=options.get("force", False))
+
+
+def _az_vm_options(client):
+    """What a machine form may offer.
+
+    Here rather than in the page for the reason every other options callable
+    is: the allowlist is enforced in az/vm.py, and a menu hardcoded in
+    JavaScript would be a second copy of it that goes wrong at a different
+    time.
+
+    The ports and the sources are the same lists the AWS forms offer, and
+    deliberately so - a port is the same port on either cloud and the scanner
+    describes it in the same words. Only the "everyone" value differs: Azure
+    writes `*` where AWS writes 0.0.0.0/0, and offering the AWS spelling would
+    produce a rule Azure accepts and treats as a single address.
+    """
+    return {
+        "vm_size": [{"value": size, "label": size}
+                    for size in sorted(az_vm.ALLOWED_VM_SIZES)],
+        "open_ports": _port_choices(),
+        "allowed_source": [
+            {"value": "*", "label": "* — the entire internet"},
+            {"value": "VirtualNetwork",
+             "label": "VirtualNetwork — only this network"},
+            {"value": "10.0.0.0/8", "label": "10.0.0.0/8 — private networks only"},
+            {"value": "192.168.0.0/16",
+             "label": "192.168.0.0/16 — private networks only"},
+        ],
+    }
+
+
+AZURE_VM = ResourceType(
+    key="azure-vm",
+    label="Azure virtual machine",
+    id_label="Machine name",
+    get_client=az_vm.get_client,
+    create=_az_vm_create,
+    list_all=_az_vm_list,
+    read=az_vm.read_vm_for_scanning,
+    check=check_vm,
+    describe=az_vm.describe_vm,
+    check_spec=check_vm_spec,
+    fix=_az_vm_fix,
+    delete=_az_vm_delete,
+    cleanup=_az_vm_cleanup,
+    options=_az_vm_options,
+    only_ours_label="only ones this tool made",
+    plan_deletion=az_vm.plan_deletion,
+)
+
+
 REGISTRY = {r.key: r for r in (SECURITY_GROUP, BUCKET, KEY_PAIR, INSTANCE, IAM,
                                ROLE, AZURE_NSG, AZURE_STORAGE, AZURE_KEYVAULT,
-                               SNAPSHOT, ALARM, VPC)}
+                               AZURE_VNET, AZURE_VM, SNAPSHOT, ALARM, VPC)}
 
 
 def get(resource_type):

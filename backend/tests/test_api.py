@@ -54,7 +54,8 @@ def test_resource_types_are_advertised(client):
     keys = {r["key"] for r in client.get("/resources").json()["resources"]}
     assert keys == {"security-group", "bucket", "key-pair", "instance",
                     "network", "iam", "snapshot", "alarm", "role",
-                    "azure-nsg", "azure-storage", "azure-keyvault"}
+                    "azure-nsg", "azure-storage", "azure-keyvault",
+                    "azure-vnet", "azure-vm"}
 
 
 def test_every_resource_says_whether_it_can_be_changed(client):
@@ -78,11 +79,14 @@ def test_the_audited_types_are_advertised_as_read_only(client):
     assert entries["iam"]["read_only"] is True
     assert entries["snapshot"]["read_only"] is True
     assert entries["role"]["read_only"] is True
-    assert entries["azure-nsg"]["read_only"] is True
-    # azure-storage is deliberately not here. It provisions, and the guard
-    # this test exists to be is that a type does not become writable quietly -
-    # not that Azure never does.
-    assert entries["azure-storage"]["read_only"] is False
+    # No Azure type is here any more. azure-nsg was, until the priority
+    # ordering that blocked it was solved in scanner/azure_nsg_effective.py;
+    # all five Azure types now provision. The guard this test exists to be is
+    # that a type does not become writable quietly - not that Azure never
+    # does - so the Azure half is asserted the other way round below.
+    for key in ("azure-storage", "azure-keyvault", "azure-nsg", "azure-vnet",
+                "azure-vm"):
+        assert entries[key]["read_only"] is False
 
 
 def test_an_audited_resource_refuses_the_destructive_routes(client, monkeypatch):
@@ -973,14 +977,18 @@ def test_each_type_says_how_its_list_can_be_narrowed(client):
     # here because it tags what it creates with the same key and value the AWS
     # side uses, which is the whole reason its cleanup can be bounded.
     for key in ("security-group", "bucket", "instance", "alarm", "snapshot",
-                "azure-storage"):
+                "azure-storage", "azure-keyvault", "azure-nsg", "azure-vnet",
+                "azure-vm"):
         assert entries[key]["only_ours_label"] == "only ones this tool made"
 
     # Meaningful, but not by tag - this tool creates no roles at all.
     assert entries["role"]["only_ours_label"] == "only ones somebody here wrote"
 
-    # Nothing to narrow: one account, and a type nothing here creates.
-    for key in ("iam", "azure-nsg"):
+    # Nothing to narrow: one account. azure-nsg used to be here because
+    # nothing created one and so nothing carried the tag; create_nsg changed
+    # that, and a filter that silently returns everything is worse on a type
+    # this tool can now destroy than on one it could only read.
+    for key in ("iam",):
         assert entries[key]["only_ours_label"] is None
 
 

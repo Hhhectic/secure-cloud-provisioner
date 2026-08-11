@@ -21,6 +21,7 @@ this file disagreed with `scanner/rules.py` about what that means, one of them
 would be wrong.
 """
 
+from scanner import azure_nsg_effective as effective
 from scanner.common import (
     CRITICAL,
     WARNING,
@@ -115,6 +116,28 @@ def check_nsg(settings):
             continue
 
         for port in _ports_covered(rule.get("destination_port_range")):
+            # An Allow sitting behind a Deny at a lower priority never applies,
+            # and calling it an exposure is how a scanner teaches people to
+            # skim past it. Azure decides by priority, lowest first, and stops
+            # at the first match - so the whole ordered set has to be read
+            # before any one rule can be judged. That sentence was the reason
+            # this file was per-rule and the reason az/nsg.py was read-only;
+            # scanner/azure_nsg_effective.py is where it is now answered.
+            blocker = effective.shadowed_by(rules, rule, port)
+            if blocker:
+                warnings.append(_warning(
+                    INFO,
+                    f"'{rule_name}' on '{name}' would open port {port} "
+                    f"({ADMIN_PORTS[port]}) to the entire internet, but it "
+                    f"never takes effect: '{blocker.get('name')}' denies the "
+                    f"same traffic at priority {blocker.get('priority')}, and "
+                    "Azure stops at the first rule that matches. This is worth "
+                    "knowing rather than acting on - the rule is one priority "
+                    "change away from being live.",
+                    _target(name, f"shadowed_open_{port}", rule_name),
+                ))
+                continue
+
             warnings.append(_warning(
                 CRITICAL,
                 f"Port {port} ({ADMIN_PORTS[port]}) is reachable from the "
@@ -122,20 +145,37 @@ def check_nsg(settings):
                 f"'{rule_name}'. Anyone can try to log in. Limit this to the "
                 "addresses that genuinely need it.",
                 _target(name, f"open_{port}", rule_name),
+                # Sets the rule to Deny rather than narrowing it, because
+                # narrowing needs an address this finding does not carry and
+                # `POST /fix` deliberately accepts nothing from the caller.
+                # See az/nsg.apply_fix.
+                fix={
+                    "action": "deny_rule",
+                    "label": f"Close port {port} by denying this rule",
+                },
             ))
 
         # A rule opening everything is worth saying separately. The loop above
         # reports the two doors it knows the names of; this is the fact that
         # every other door is open too, which is a different sentence.
         if str(rule.get("destination_port_range", "")).strip() == "*":
-            warnings.append(_warning(
-                CRITICAL,
-                f"'{rule_name}' on '{name}' allows the entire internet to "
-                "reach every port, not only the well-known ones. Anything "
-                "listening on this machine is reachable, including things "
-                "nobody meant to expose and things installed later.",
-                _target(name, "open_all_ports", rule_name),
-            ))
+            # Judged on port 22 as the representative: a rule covering every
+            # port is shadowed for "everything" only if it is shadowed for the
+            # doors that matter, and a Deny narrower than the Allow leaves the
+            # rest of the range open.
+            if not effective.shadowed_by(rules, rule, "22"):
+                warnings.append(_warning(
+                    CRITICAL,
+                    f"'{rule_name}' on '{name}' allows the entire internet to "
+                    "reach every port, not only the well-known ones. Anything "
+                    "listening on this machine is reachable, including things "
+                    "nobody meant to expose and things installed later.",
+                    _target(name, "open_all_ports", rule_name),
+                    fix={
+                        "action": "deny_rule",
+                        "label": "Close every port by denying this rule",
+                    },
+                ))
 
     # ---- Whether the group is doing anything at all --------------------------
     if not settings.get("attached_to"):

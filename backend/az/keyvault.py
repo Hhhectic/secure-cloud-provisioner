@@ -16,12 +16,14 @@ Every SDK import happens inside `az/common.py`, inside a function, so importing
 this module costs nothing on a machine with only the AWS half installed.
 """
 
+from az import names
 from az.common import (
     AzureNotConfigured,
     ensure_resource_group,
     is_managed,
     keyvault_client,
     managed_tags,
+    plain,
     resource_group_of,
     tenant_id,
 )
@@ -113,8 +115,11 @@ def read_vault_for_scanning(client, name):
         # about who: naming them would put a list of exactly which identities
         # to phish into a response this tool hands to a browser.
         "access_policy_count": len(policies),
-        "public_network_access": prop("public_network_access"),
-        "network_default_action": getattr(acls, "default_action", None),
+        # plain() on both: the scanner lowercases these through str(), and an
+        # SDK enum renders there as its qualified name rather than its value.
+        # See az/common.plain.
+        "public_network_access": plain(prop("public_network_access")),
+        "network_default_action": plain(getattr(acls, "default_action", None)),
     }
 
     # A setting Azure did not report is a question this scan did not get an
@@ -122,13 +127,30 @@ def read_vault_for_scanning(client, name):
     # rather than scored clean, because a partial audit that says which parts
     # are missing beats a confident wrong answer.
     #
-    # rbac_authorization is not in this list. Azure returns null for a vault
-    # created before the setting existed, and null there means access policies,
-    # which is a documented default rather than a gap in the read.
+    # Two settings are not in this list, both because null is an answer here
+    # rather than a silence.
+    #
+    # rbac_authorization: Azure returns null for a vault created before the
+    # setting existed, and null there means access policies, a documented
+    # default.
+    #
+    # purge_protection_enabled: Azure only ever reports this property when it
+    # is on. Off is modelled as absent, which is the same fact `create_vault`
+    # relies on when it omits the key rather than sending false - the API
+    # rejects an explicit false, because the setting cannot be turned back off
+    # once on. So null means off, and calling it unreadable made every vault
+    # without purge protection report "could not check" in place of the finding
+    # that is the whole reason this scanner exists. It also split the contract
+    # this project asserts everywhere else: `check_spec` said no_purge_protection
+    # before the vault was built and the scan said unreadable_purge_protection
+    # after, for the same vault and the same setting. Found on the first real
+    # create; no stub had reason to leave the property out.
     unreadable = {}
-    for key in ("soft_delete_enabled", "purge_protection_enabled"):
+    for key in ("soft_delete_enabled",):
         if settings[key] is None:
             unreadable[key] = "Azure did not report this setting for this vault"
+
+    settings["purge_protection_enabled"] = bool(settings["purge_protection_enabled"])
 
     settings["unreadable"] = unreadable
     return settings
@@ -196,12 +218,39 @@ def create_vault(client, name, resource_group, location="eastus",
     the platform closed the foot-gun, the rule stays because older vaults exist
     and this one states the value rather than relying on that.
 
-    **Purge protection is sent as None rather than False when off.** The API
-    rejects an explicit false - once enabled it can never be disabled, so Azure
-    models "not on" as absent. That is the one place this module cannot state a
-    value outright, and it is Azure's constraint rather than a choice here.
+    **Purge protection is left out entirely when off, not sent as false.** The
+    API rejects an explicit false - once enabled it can never be disabled, so
+    Azure models "not on" as absent. That is the one place this module cannot
+    state a value outright, and it is Azure's constraint rather than a choice
+    here.
+
+    **The keys are camelCase, because this dict is the request body.** A plain
+    dict handed to the SDK is serialized as JSON exactly as written rather than
+    being mapped from the model's Python names, so a snake_case key is not the
+    field it looks like - it is an unrecognised one, silently dropped. That is
+    how this read `tenant_id` and failed with "an invalid value was provided
+    for 'tenantId'": the value was not invalid, it was absent, because the
+    field carrying it was spelled in the language of the model rather than of
+    the wire. `az/storage.py` has always written camelCase here and is why the
+    storage path worked while this one did not. It also means None is an
+    explicit null rather than an omission, which is the reason purge protection
+    is added conditionally below instead of being set to None.
+
+    The read path is unaffected and stays snake_case: `vaults.get` returns a
+    model object, where the Python names are the real ones.
     """
     problems = []
+
+    # Locally decidable, so decided locally. See az/names.py - and note that a
+    # vault's alphabet is not a storage account's, which is the kind of
+    # difference that turns into a confusing refusal from Azure.
+    legal, why_not = names.check("azure-keyvault", name)
+    if not legal:
+        return False, why_not, problems
+
+    legal, why_not = names.check("resource-group", resource_group)
+    if not legal:
+        return False, why_not, problems
 
     available, why_not = _name_is_available(client, name)
     if not available:
@@ -211,22 +260,32 @@ def create_vault(client, name, resource_group, location="eastus",
     if created:
         problems.append(note)
 
+    properties = {
+        "tenantId": tenant_id(),
+        "sku": {"family": "A", "name": "standard"},
+        # Mandatory since 2020; stated rather than assumed.
+        "enableSoftDelete": True,
+        "softDeleteRetentionInDays": 90 if secure_by_default else 7,
+        # Roles rather than the vault's own policy list, so that who can open
+        # this vault is visible to the same audit that reads every other
+        # permission in the subscription.
+        "enableRbacAuthorization": secure_by_default,
+        # Required by the API whenever the vault is not using roles, and
+        # harmless when it is. Empty is the honest starting point: this tool
+        # grants nobody access to a vault it has just made, and the scanner
+        # reports an empty list as a note rather than a fault.
+        "accessPolicies": [],
+    }
+
+    # Added only when on. See the docstring: absent and false are different
+    # requests, and this dict is the body rather than a model.
+    if secure_by_default:
+        properties["enablePurgeProtection"] = True
+
     parameters = {
         "location": location,
         "tags": managed_tags(),
-        "properties": {
-            "tenant_id": tenant_id(),
-            "sku": {"family": "A", "name": "standard"},
-            # Mandatory since 2020; stated rather than assumed.
-            "enable_soft_delete": True,
-            "soft_delete_retention_in_days": 90 if secure_by_default else 7,
-            # None, not False. See the docstring.
-            "enable_purge_protection": True if secure_by_default else None,
-            # Roles rather than the vault's own policy list, so that who can
-            # open this vault is visible to the same audit that reads every
-            # other permission in the subscription.
-            "enable_rbac_authorization": secure_by_default,
-        },
+        "properties": properties,
     }
 
     vault = client.vaults.begin_create_or_update(
@@ -256,6 +315,15 @@ def delete_vault(client, name, force=False):
     taken; with purge protection on, not even an administrator can shorten
     that. A message saying only "deleted" would be true and would mislead
     somebody who then tries to reuse the name.
+
+    `delete` rather than `begin_delete`: a vault delete is one of the few
+    management calls Azure answers synchronously, so there is no poller to wait
+    on and `begin_delete` does not exist on this operations class at all. The
+    creates next door are long-running and do have one, which is what made the
+    wrong spelling look right. It fails as an AttributeError at the moment of
+    deleting rather than as anything the type checker or the offline suite
+    could catch, because the stubs modelled the call this code made rather than
+    the call the SDK offers.
     """
     group, short = _locate(client, name)
 
@@ -270,7 +338,7 @@ def delete_vault(client, name, force=False):
     if not group:
         return False, f"No key vault named '{short}' in this subscription."
 
-    client.vaults.begin_delete(group, short).wait()
+    client.vaults.delete(group, short)
 
     return True, (
         f"Deleted key vault '{short}'. Soft delete is mandatory on Azure key "
@@ -295,14 +363,28 @@ def cleanup_all_managed_vaults(client, force=False):
 
 
 def apply_fix(client, name, warning):
-    """Not offered, for the reason `az/storage.py` gives.
+    """Not offered, and now for one reason rather than two.
 
-    Nothing in `az/` has run against a real subscription, so a fix path here
-    would be code that has never once done what it claims. Two of the findings
-    would also be one-way doors: purge protection cannot be turned off once
-    turned on, and switching a vault to role-based access revokes every
-    existing access policy at the moment it takes effect. Neither belongs
-    behind a button until somebody has watched it happen.
+    The reason recorded here used to lead with "nothing in `az/` has run
+    against a real subscription". That is no longer true, and `az/storage.py`
+    fixes three of its findings as of the same run. What is left is the reason
+    that was always the stronger of the two: **every fix a vault has is a
+    one-way door, and this function takes no confirmation.**
+
+    Purge protection can never be switched off once switched on - it locks the
+    vault and its name for the full retention period against everybody
+    including an administrator. Moving to role-based authorization revokes
+    every existing access policy at the moment it takes effect, and this module
+    deliberately does not read who holds those policies, so it cannot tell the
+    caller who is about to lose access. Restricting network access can lock out
+    whoever pressed the button.
+
+    `POST /fix` carries a rule id and nothing else - no `confirm`, no repeated
+    resource name, none of the guards `DELETE` demands before doing something
+    irreversible. Offering an irreversible change through the one destructive
+    path with no confirmation on it would make the quiet route the dangerous
+    one, which is the same objection `az/storage.py`'s delete records. If a
+    vault fix is ever wanted, the guard has to come first.
     """
     return False, (
         "Key vault findings are reported rather than fixed. Two of them cannot "

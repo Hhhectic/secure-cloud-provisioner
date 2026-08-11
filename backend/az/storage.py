@@ -17,11 +17,13 @@ delete refuses without force even though Azure would carry it out
 (`delete_account`). `az/nsg.py` is still read-only.
 """
 
+from az import names
 from az.common import (
     AzureNotConfigured,
     ensure_resource_group,
     is_managed,
     managed_tags,
+    plain,
     resource_group_of,
     storage_client,
 )
@@ -101,7 +103,13 @@ def read_account_for_scanning(client, name):
                                             None),
         "supports_https_traffic_only": getattr(
             found, "enable_https_traffic_only", None),
-        "minimum_tls_version": getattr(found, "minimum_tls_version", None),
+        # plain() here and on public_network_access below: both come back as
+        # SDK enums, which render through str() as their qualified name rather
+        # than their value. See az/common.plain - the same trap that made the
+        # network security group scanner silent, and which here would make the
+        # network rule fire on an account that is in fact restricted.
+        "minimum_tls_version": plain(getattr(found, "minimum_tls_version",
+                                             None)),
         # Absent means Enabled, and absent is the common case. Azure only
         # populates this once somebody sets it, so every account that has
         # never had its network access restricted returns None here - which
@@ -114,8 +122,8 @@ def read_account_for_scanning(client, name):
         #
         # The AWS half learned this exact lesson from assign_public_ip - see
         # "An absent setting is not a safe setting" in CLAUDE.md.
-        "public_network_access": getattr(found, "public_network_access", None)
-                                 or "Enabled",
+        "public_network_access": plain(getattr(found, "public_network_access",
+                                               None)) or "Enabled",
         # Null is documented as equivalent to true here, unlike the two
         # settings below: Azure says an unset allowSharedKeyAccess permits the
         # account key. That is a documented default rather than a guess, so it
@@ -141,7 +149,7 @@ def read_account_for_scanning(client, name):
             {"name": c.name,
              # None means private. Azure spells the other two "Blob" (objects
              # readable, listing not) and "Container" (both).
-             "public_access": getattr(c, "public_access", None)}
+             "public_access": plain(getattr(c, "public_access", None))}
             for c in client.blob_containers.list(group, short)
         ]
         containers_unreadable = None
@@ -237,6 +245,17 @@ def create_account(client, name, resource_group, location="eastus",
     """
     problems = []
 
+    # Locally decidable, so decided locally. Azure answers a malformed name
+    # with the same generic refusal it gives a taken one, which tells somebody
+    # who typed a capital letter only that the name is unavailable.
+    legal, why_not = names.check("azure-storage", name)
+    if not legal:
+        return False, why_not, problems
+
+    legal, why_not = names.check("resource-group", resource_group)
+    if not legal:
+        return False, why_not, problems
+
     available, why_not = _name_is_available(client, name)
     if not available:
         return False, why_not, problems
@@ -313,19 +332,80 @@ def cleanup_all_managed_accounts(client, force=False):
     ]
 
 
-def apply_fix(client, name, warning):
-    """Not yet. Both findings here are one call away from being fixable.
+# What each fixable finding changes, as {action: (properties, sentence)}.
+#
+# A table rather than a chain of ifs, because the thing worth checking at a
+# glance is that every action here is one property and that no action touches a
+# property another one does. The keys are the `action` strings
+# `scanner/azure_storage_rules.py` puts in its `fix` blocks, and a mismatch
+# between the two is caught by a test rather than by a caller getting "cannot
+# fix that" for a button the page drew from the same scanner.
+#
+# camelCase, because these dicts are the request body. See az/common.plain and
+# the create path: a plain dict is serialized as written, so a snake_case key
+# here would be silently dropped and the fix would report success having
+# changed nothing - which is the worst outcome available to a security tool.
+_FIXES = {
+    "disable_public_blob_access": (
+        {"allowBlobPublicAccess": False},
+        "Containers in '{name}' can no longer be opened to anonymous readers. "
+        "Any container already set to public is now unreachable without "
+        "credentials; nothing was deleted.",
+    ),
+    "require_https": (
+        {"supportsHttpsTrafficOnly": True},
+        "'{name}' now refuses unencrypted connections. Anything still "
+        "addressing it over plain HTTP will start failing, which is the "
+        "point - those requests were exposing whatever they carried.",
+    ),
+    "require_modern_tls": (
+        {"minimumTlsVersion": "TLS1_2"},
+        "'{name}' now requires TLS 1.2 or better. Clients too old to offer it "
+        "will stop connecting.",
+    ),
+}
 
-    Turning off anonymous access and requiring HTTPS are single property
-    updates, and the AWS side fixes their equivalents. They are not offered
-    here because nothing in this module has been run against a real
-    subscription: the Azure SDK is not installed in this environment, so a fix
-    path would be code that has never once done what it claims. Reporting a
-    finding that has not been tested is a smaller lie than offering to act on
-    it.
+
+def apply_fix(client, name, warning):
+    """Applies one storage finding's fix. Returns (ok, message).
+
+    Only the three settings in `_FIXES` are offered, and each is a single
+    property update. The route re-reads the account and re-runs the scanner
+    before calling this, so the warning handed over is one this tool derived
+    rather than one a caller described - see "Fixes are re-derived server-side"
+    in CLAUDE.md.
+
+    Two findings are deliberately not fixable here, and neither is an oversight:
+
+    `shared_key_allowed` would be one property, and turning the account key off
+    is the right end state, but it breaks every application still authenticating
+    with that key - and this tool cannot see who those are. That is a migration,
+    not a fix, and a button that silently starts a migration is worse than no
+    button.
+
+    `reachable_from_anywhere` would need a network rule naming which addresses
+    keep access, which is information the caller has and the finding does not.
+    Applying the obvious default - deny everything - would lock the account
+    away from whoever pressed it, including this tool.
+
+    Uses `update` rather than `begin_create`, which is the difference between
+    changing one property and rewriting the account: `begin_create` on a name
+    you already own replaces the whole configuration with whatever was sent,
+    which is the hazard `_name_is_available` exists to keep out of the create
+    path. Every property not named here keeps its value.
     """
-    return False, (
-        "Azure storage findings are reported rather than fixed, for now. "
-        "Both are a single setting change in the portal: turn off anonymous "
-        "blob access, and require secure transfer."
-    )
+    group, short = _locate(client, name)
+    if not group:
+        return False, f"No storage account named '{short}' in this subscription."
+
+    action = (warning or {}).get("fix", {}).get("action")
+    if action not in _FIXES:
+        return False, (
+            f"There is no automatic fix for '{action}'. The findings this can "
+            f"fix are: {', '.join(sorted(_FIXES))}."
+        )
+
+    properties, sentence = _FIXES[action]
+    client.storage_accounts.update(group, short, {"properties": properties})
+
+    return True, sentence.format(name=short)

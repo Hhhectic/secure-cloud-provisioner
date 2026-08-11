@@ -54,11 +54,13 @@ backend/api/app.py      the tool. /resources/..., /blueprints/..., /ui, /docs
 ```
 
 `main.py` still exists and still runs on its own, and nothing depends on it any
-more. Azure is reached through `backend/api/app.py` like everything else:
-`azure-nsg` and `azure-storage` are `ResourceType` entries in
-`api/registry.py`, their rules live in `scanner/azure_*_rules.py` and return
-the same warning shape as every AWS rule, and the page at `/ui` grows tabs for
-them without being told they exist.
+more — and as of the Azure provisioning work it can no longer do anything
+`backend/` cannot. Azure is reached through `backend/api/app.py` like
+everything else: `azure-nsg`, `azure-storage`, `azure-keyvault`, `azure-vnet`
+and `azure-vm` are `ResourceType` entries in `api/registry.py`, their rules
+live in `scanner/azure_*_rules.py` and return the same warning shape as every
+AWS rule, and the page at `/ui` grows tabs for them without being told they
+exist.
 
 That settled a claim this project had been making without evidence.
 `scanner/common.py` has said since the first commit that its warning shape is
@@ -78,18 +80,23 @@ and no change to `scanner/common.py`.
   the Azure SDK a hard requirement of starting the AWS half — the exact
   objection this file used to record against mounting the two apps into one
   process. `test_azure_provider.py` asserts this by reading the source.
-- Azure storage and key vaults provision; Azure firewalls do not.
-  `az/storage.py` and `az/keyvault.py` have `create`, `delete` and `cleanup`
-  wired into the registry like any AWS type, and `az/nsg.py` is still
-  read-only. That split is not indecision: an NSG rule carries a priority
-  deciding which of several overlapping rules wins, so neither creating one nor
-  fixing one can be judged without reading the whole ordered set — the same
-  reason `az/nsg.py` offers no fix.
-- Nothing in `az/` has run against a real subscription. The SDK is installed
-  now, so that is no longer what is missing — it is credentials and a run.
-  Until there is one, the Azure findings and now the create and delete paths
-  with them are tested logic rather than measured behaviour, which is why
-  `az/storage.py` still declines to offer fix actions.
+- **All five Azure types provision now, and the firewall was the last one.**
+  This bullet used to say storage and vaults provisioned and firewalls did
+  not, because an NSG rule carries a priority deciding which of several
+  overlapping rules wins and nothing here read the ordered set.
+  `scanner/azure_nsg_effective.py` reads it, which is what unblocked
+  `create_nsg`, `apply_fix`, and the two types built on top of them —
+  `az/vnet.py` and `az/vm.py`. `azure-nsg`, `azure-storage`, `azure-keyvault`,
+  `azure-vnet` and `azure-vm` are all `ResourceType` entries with create,
+  delete and cleanup, and none of it needed a route change.
+- **`az/` has now run against a real subscription.** This bullet used to say
+  the opposite and it was the largest gap in this file. Storage accounts, key
+  vaults, security groups and virtual networks create, scan, fix, delete and
+  clean up against subscription `74baf379-b419-4e16-a50b-98bc450901c9`. Four
+  bugs came out of the first run and none could have been found offline — see
+  *What a real subscription taught us*. Virtual machines too: one has been
+  built, scanned and destroyed, after three refusals that are worth reading —
+  see *Three refusals stood between here and a running machine*.
 
 **Neither SDK is a hard requirement, and that is now symmetric.** The paragraph
 above was true of Azure from the first commit and false of AWS the whole time:
@@ -130,9 +137,14 @@ repository root (the extra six are the Azure half's own suite, which CI had
 never run until the merge). The live smoke test is 154 passed, 0 failed against
 account 679140927523, including instances and the whole bastion blueprint.
 
-Since then, on this branch: the merge with `group/main` and then Azure storage
-and key vault provisioning take it to **720 from `backend/`**. The live smoke
-test has not been re-run and does not touch Azure at all — see *Not done*.
+Since then, on this branch: the merge with `group/main`, Azure storage and key
+vault provisioning, the first live Azure run, and then network security group,
+virtual network and virtual machine provisioning take it to **779 from
+`backend/`**, 7 skipped. The live *AWS* smoke test has not been re-run. The
+Azure half of it has, against a real subscription: `python
+scripts/smoke_test.py --azure-only --with-azure-resources
+--azure-resource-group scp-demo` is **47 passed, 0 failed**, and that includes
+building and destroying a real virtual machine.
 
 **The root suite does not collect, and it arrived that way.** `ebdb579` renamed
 `run_azure_security_scan` to `scan_azure_payload` in `azure_scanner_engine.py`
@@ -172,7 +184,7 @@ The AWS half, which is what the rest of this file is about:
 
 ```bash
 cd backend
-source ../.venv/bin/activate
+source /home/user/scp-venv/bin/activate      # not ../.venv: see below
 
 pytest -v                                   # offline, moto, no credentials
                                             # run from backend/, not the root:
@@ -187,7 +199,24 @@ python scripts/make_vulnerable.py           # deliberately weak demo resources
 python scripts/make_vulnerable.py --with-public-snapshot   # also publishes a blank snapshot
 python scripts/make_vulnerable.py --clean   # remove everything tagged as ours
 python scripts/cloudwatch_harness.py        # live, free tier, creates alarms
+
+python scripts/smoke_test.py --azure-only   # live Azure, free, no AWS call
+python scripts/smoke_test.py --azure-only --with-azure-resources \
+    --azure-resource-group scp-demo         # live Azure, creates and deletes
 ```
+
+`--azure-only` skips every AWS section and does not ask STS who it is, so it
+runs on a machine holding no AWS credential. It exists because the AWS half
+creates and destroys real resources in an account this team shares, and making
+that the unavoidable price of checking Azure is how somebody ends up deleting a
+colleague's demo to test a storage account.
+
+`--with-azure-resources` creates and deletes one storage account and one key
+vault. Both are free; the vault is not free of consequences, because soft
+delete is mandatory and every write run consumes a vault name for its retention
+period. Pass `--azure-resource-group` with a group that already exists:
+inventing one needs permission to create resource groups across the
+subscription, while reusing one needs only Contributor on that group.
 
 The alarm section of the smoke test runs on every pass — ten alarms are free
 forever and it creates at most one, skipping itself if the account is already
@@ -239,7 +268,26 @@ uvicorn main:app --reload --port 8001    # Azure scan and deploy
 python -m pytest test_azure_scanner.py   # on group/main: six tests
 ```
 
-`.venv` now holds both SDKs, so `/ui` scans Azure as well as AWS. It did not
+**The virtualenv is `/home/user/scp-venv`, and this file used to say
+`../.venv`.** There is no `.venv` in the repository and there does not appear
+ever to have been one on this machine, so the documented activation line fails
+before anything else is tried. It also arrived without `pytest` or `moto`, so
+the offline suite could not run until both were installed — the SDKs were
+there and the test tools were not, which is a confusing way to be broken
+because the application starts fine. If you are setting this up again:
+
+```bash
+python3 -m venv /home/user/scp-venv
+/home/user/scp-venv/bin/pip install -r backend/requirements.txt -r requirements.txt
+/home/user/scp-venv/bin/pip install pytest moto
+```
+
+A checkout is also missing `.env`, which is gitignored and therefore absent
+from any fresh clone and from every git worktree — `backend/environment.py`
+looks for it beside the worktree's own root, not the main checkout's, so a
+worktree needs its own copy or a symlink to one.
+
+That virtualenv holds both SDKs, so `/ui` scans Azure as well as AWS. It did not
 until recently, and the reason for the change is worth knowing: the page is one
 process, so whether it can reach Azure is decided by the interpreter running
 uvicorn. A second virtualenv beside it does not help — `main.py` and the
@@ -264,9 +312,10 @@ Nothing below this line applies to it.
 ```
 main.py                 the Azure app. Separate FastAPI instance, root of repo
 azure_scanner*.py       the Azure scanner, separate from backend/scanner/
-azure_crud.py           Azure provisioning, reached only by main.py. Superseded
-                        for storage and key vaults; its NSG and virtual network
-                        creates have no equivalent in backend/ yet
+azure_crud.py           Azure provisioning, reached only by main.py. Fully
+                        superseded now: every create in it exists in backend/az/
+                        with a guard it does not have (it replaces an existing
+                        group's whole rule list and reports success)
 security_messages.py    Azure's warning text. Orphaned: azure_scanner.py is the
                         only thing that reads it and nothing reads that
 test_azure_scanner.py   six tests, no cloud calls. Does not currently import
@@ -277,7 +326,8 @@ archive/       two Streamlit frontends, kept and not used. See their READMEs
 backend/
   environment.py  reads the repository's .env at whichever entrypoint starts
   az/          Azure. Named az/ and not azure/ on purpose; SDK imported lazily.
-               storage.py and keyvault.py provision; nsg.py reads only
+               Five types, all provisioning: storage, keyvault, nsg, vnet, vm.
+               names.py holds what Azure will accept as a name, as refusals
   scanner/     pure rule logic, no boto3 anywhere, no cloud calls
   aws/         all boto3, one module per resource type (iam.py reads only).
                common.py imports the SDK lazily, mirroring az/common.py
@@ -743,6 +793,210 @@ and, behind `--with-blueprint`, the whole bastion architecture. It executes no
 JavaScript at all; the page is covered separately by the two Node suites in
 `frontend/`, described under *Not done*.
 
+## What a real subscription taught us
+
+The Azure half passed 96 offline tests and had never once spoken to Azure. The
+first run against subscription `74baf379-b419-4e16-a50b-98bc450901c9` found
+four bugs, three of them in code the offline suite covered. They are worth
+reading as a set, because three of the four are the same mistake: **a stub
+written to match the code cannot disagree with it.**
+
+- **A dict handed to the SDK is the request body, not a model.** `create_vault`
+  sent `tenant_id`, `enable_soft_delete`, `enable_purge_protection`. Those are
+  the *model's* Python names; a plain dict is serialized as written, so what
+  Azure received had no `tenantId` in it at all and answered "an invalid value
+  was provided for 'tenantId'" — which sends you to look at the value, and the
+  value was fine. The keys are camelCase now, which is what `az/storage.py` had
+  always written and why storage worked while vaults did not. The read path is
+  unaffected and stays snake_case: `vaults.get` returns a model, where the
+  Python names are the real ones.
+- **Absent and false are different requests.** Purge protection off was sent as
+  `None`, which a model would omit and a raw dict sends as an explicit `null`.
+  It is now left out of the body entirely, and the offline test asserts the key
+  is missing rather than that its value is None.
+- **A key vault delete is synchronous.** The code called `begin_delete`, which
+  does not exist on `VaultsOperations` — the creates next door are long-running
+  and do have a poller, which is what made the wrong spelling look right. The
+  stub had grown a `begin_delete` because the code called one. It failed as an
+  `AttributeError` at the moment of deleting, and left a vault behind.
+- **The SDK's enums are `str` subclasses that lie to `str()`.** This is the bad
+  one. `SecurityRuleDirection.INBOUND == "Inbound"` is true, `isinstance(...,
+  str)` is true, and `json.dumps` writes `"Inbound"` — so it looks like a
+  string in every way anyone would check, including in a debugger. But since
+  Python 3.11 a `class X(str, Enum)` renders through `str()` as
+  `'SecurityRuleDirection.INBOUND'`, and `scanner/azure_nsg_rules.py` filters
+  on `str(rule["direction"]).lower() != "inbound"`. Every rule of every real
+  group was skipped. **A network security group opening SSH, RDP and all
+  65,535 other ports to the entire internet scanned completely clean** — one
+  informational note saying it was not attached to anything. Found by building
+  the worst group that could be built and getting a clean scan back.
+
+  `az/common.plain` reduces an enum to its value, and the readers call it on
+  every field a scanner reads. It is fixed at the boundary rather than in the
+  scanners, because the boundary is where the SDK's types are supposed to stop
+  and `scanner/` is not allowed to know the SDK exists. The same trap in
+  `az/storage.py` and `az/keyvault.py` runs the other way and invents findings
+  instead of hiding them: an account whose network access is `Disabled` would
+  be reported as reachable from anywhere.
+
+  `_SdkEnum` in `test_azure_provider.py` models it, and
+  `test_the_sdk_enum_stub_really_does_reproduce_the_trap` asserts the stub
+  still fails the way the SDK does — because if a future Python makes `str()`
+  return the value again, the three tests underneath it would all start passing
+  for a new reason.
+
+Two smaller things measured rather than assumed:
+
+- **A deleted storage account name comes back; a deleted vault name does not.**
+  The smoke test claimed the storage name was "retained for the soft-delete
+  period", which is the vault's constraint borrowed by a section that had never
+  run. Storage accounts have no such retention. But the name is not free
+  *immediately* either — the delete returns while the account is still going
+  away — so the check polls, and reports how long it took. Ten seconds, in
+  practice.
+- **An absent property is an answer, not a silence.** Azure reports
+  `enablePurgeProtection` only when it is on, so a vault without it returns
+  null — and the reader filed that under `unreadable`, which suppressed the
+  `no_purge_protection` finding and replaced it with "could not check". That
+  split the contract this project asserts everywhere else: `check_spec` said
+  `no_purge_protection` before the vault was built and the scan said
+  `unreadable_purge_protection` after, about the same vault and the same
+  setting. `rbac_authorization` already had this reasoning written next to it;
+  purge protection needed the same and did not have it.
+
+## The five Azure types, and what each one refused to do
+
+Everything the root app and the archive could do that `backend/` could not is
+now here. That was four capabilities and they arrived together, because the
+first of them unblocked the rest.
+
+**The priority problem, solved once.** `scanner/azure_nsg_effective.py` reads a
+security group's whole ordered rule set and answers what Azure would actually
+do with a packet: rules sort by priority, lowest first, the first match decides,
+and nothing after it is consulted. That sentence is why `az/nsg.py` was
+read-only for its whole life, why it offered no fix, and therefore why the root
+app could not retire. Three things depend on it now — creating a group, fixing
+a rule, and judging a machine's exposure — and all three would have been
+guesses without it.
+
+It also makes the scanner right in a way it was not. The same two rules in two
+orders are two different firewalls, and the per-rule version called both of
+them critical. An Allow sitting behind a Deny is now reported as *shadowed* —
+an informational note rather than a crisis, because it is one priority change
+from being live, and dropping it entirely would hide that. Verified against a
+real subscription: identical rules, priorities swapped, opposite verdicts.
+
+**What each type will not do, and why it is a decision rather than a gap.**
+
+- `az/storage.py` fixes three findings and refuses two. Turning off the account
+  key is one property and would break every application still using it, which
+  this tool cannot see — that is a migration, not a fix. Restricting network
+  access needs to know which addresses keep it, and the obvious default locks
+  out whoever pressed the button.
+- `az/keyvault.py` fixes nothing, and the reason changed rather than
+  disappeared. It used to be "nothing here has ever run"; it is now that every
+  vault fix is a one-way door and `POST /fix` carries a rule id and nothing
+  else — no `confirm`, none of the guards `DELETE` demands. Purge protection
+  can never be switched off. Moving to role-based authorization revokes every
+  access policy at once. Offering an irreversible change through the one
+  unguarded path would make the quiet route the dangerous one.
+- `az/nsg.py` fixes a rule by setting it to **Deny**, not by deleting it and
+  not by narrowing it. Narrowing needs an address the finding does not carry,
+  and `POST /fix` deliberately accepts nothing from the caller. Denying leaves
+  the name, the ports and the priority intact, so what was intended stays
+  legible and re-opening it is one field.
+- `az/vnet.py` fixes nothing: a subnet with no security group is fixed by
+  attaching one, and which one decides what the subnet allows. An empty group
+  would cut off whatever is running there and a permissive one would be this
+  tool writing somebody's firewall and calling it a fix.
+- `az/vm.py` fixes nothing, because every finding it reports is about a
+  resource that is not the machine. An open port is a rule on its security
+  group, which `az/nsg.py` now fixes. Password authentication is set at
+  creation and cannot be changed afterwards.
+
+**A machine's exposure is not on the machine.** An EC2 instance carries its
+security groups; an Azure machine is filtered by a group on its network card,
+or on its subnet, or both, or neither. `read_vm_for_scanning` reads all of
+them and hands one list to the same evaluator a group's own scan uses, so the
+two cannot disagree about what a rule set means.
+
+**Passwords are refused rather than discouraged.** `deploy_azure_vm` in the
+archive reads `AZURE_VM_ADMIN_PASSWORD` and sends it. This does not, and the
+refusal is the same position as *Key pairs are import-only*: a password logs
+in, so putting one in a request body puts it in the logs and in everything
+between. Only the public half of a key is accepted.
+`test_this_module_never_asks_for_a_password` parses the AST to enforce it —
+parses rather than greps, because the module's own docstring names the variable
+while explaining that it does not use it.
+
+**Sizes are an allowlist.** `ALLOWED_VM_SIZES` is four burstable sizes and
+anything else is refused outright, mirroring `aws/instances.py`. The difference
+between the smallest of them and a size somebody reaches for by habit is about
+a hundred times the hourly cost, and a confirmation prompt does not survive a
+typo.
+
+**Name rules are refusals, checked before Azure is called.** `az/names.py` came
+from `archive/streamlit-gui/preflight.py`, where it could only be applied to a
+form. Azure answers a malformed storage account name with the same generic
+refusal it gives a taken one, so somebody who typed a capital letter is told
+only that the name is unavailable.
+
+## Three refusals stood between here and a running machine
+
+A machine has now been built, scanned and destroyed against a real
+subscription. Getting there took three separate refusals, each invisible until
+the one before it was cleared, and none of them a defect in this code. They are
+worth reading in order, because the shape repeats: **Azure reports "you may
+not" and "there is none" in the same words.**
+
+**One: the compute provider was not registered.** A subscription that has never
+created a machine has `Microsoft.Compute` switched off, and the create fails
+with `MissingSubscriptionRegistration`. The service principal could not fix it
+— registering a provider is an owner's action and this principal holds
+Contributor on a resource group. Cleared by an owner running `az provider
+register --namespace Microsoft.Compute`. It is free.
+
+**Two: every size in the allowlist was refused.** `Standard_B1s` came back
+`SkuNotAvailable`, which reads exactly like a region being full — and was not.
+`resource_skus.list` showed all four classic B-series sizes restricted
+`NotAvailableForSubscription` in nine regions, while the quota was four cores
+and entirely unused. Azure declines to offer some machine families to some
+subscriptions regardless of capacity or quota, and says so in the language of
+capacity. The allowlist now spans three generations — classic B, Bsv2, and the
+1-2 vCPU v7 sizes — and nothing in it exceeds 2 vCPU, which is what keeps the
+guardrail meaningful. `available_sizes` asks which of them the subscription can
+actually start, so the refusal names what would work instead of relaying
+Azure's message. This subscription is offered none of the burstable families
+and runs `Standard_F1als_v7`.
+
+**Three: nothing, and it booted.** 1 vCPU, running, public address, password
+authentication off, port 22 open to the world and correctly reported critical
+because the machine had a public address. Deleted with its disk, and the four
+resources built around it removed after it.
+
+**Two things the failures taught, both now fixed.** The exception escaped
+`create_vm` and took `problems` with it, so the caller got a traceback and the
+subscription quietly held a network, a security group, a card and a *static
+public address* it never heard about — against this project's own stated
+position that partial failures report exactly what exists. And the smoke test
+cleaned up only the machine, so a create that failed before making one leaked
+all four. `_remove_vm_scaffolding` removes them in the order Azure enforces,
+whether or not the machine was ever built.
+
+**The smoke test asks which size to use rather than naming one.** A hardcoded
+size makes that section pass or fail on which subscription it is pointed at
+rather than on whether the code works, which is the same failure as a test that
+only holds on a machine lacking an SDK.
+
+**Two tests were reaching the network without meaning to.** Once
+`backend/environment.py` started reading `.env` and somebody put real
+credentials in it, `test_an_unconfigured_azure_is_a_503` began answering 200 —
+the offline suite had quietly started listing a live subscription. They now
+delete the four `AZURE_*` variables through a fixture, which is the same
+correction `test_the_page_starts_without` already made one layer along: a test
+for the unconfigured case has to *build* the unconfigured case rather than hope
+the machine provides it.
+
 ## Style
 
 Comments explain *why*, not what. Test names are sentences describing the
@@ -752,21 +1006,25 @@ Severity means something — if everything is critical, nothing is.
 
 ## Not done
 
-- **The page cannot create an Azure resource, though everything else can.**
-  `frontend/app.js` builds its create form from a hardcoded `FIELDS` map per
-  type and falls back to a name-only form for anything unlisted, so
-  `azure-storage` and `azure-keyvault` submit without a resource group and are
-  refused. They provision correctly through the API and through the CLI. Two
-  entries in that map close it, plus whatever `resource_group` needs to look
-  like as a field.
+- **The page can create Azure resources now, except a firewall with rules.**
+  `frontend/app.js` had a hardcoded `FIELDS` map with no Azure entries, so
+  every Azure create fell back to a name-only form, submitted without a
+  resource group and was refused. All five types have entries now. The
+  exception is `azure-nsg`, whose form creates an *empty* group: the existing
+  `rules` widget produces AWS-shaped rules and an Azure rule is a different
+  shape carrying a priority, so submitting one as the other would be exactly
+  the drift recorded under *One switch, not a field per setting*. Rules come
+  from the API or the CLI until a widget exists that knows about priority.
+  Nothing about the page's rendering is covered by a test; see below.
 
-- **Four Azure capabilities are still only in the root app or the archive.**
-  Network security group creation and virtual networks are in `azure_crud.py`;
-  `deploy_azure_vm` and a set of name-validation rules are in
-  `archive/streamlit-gui/`. The NSG one is blocked on the priority-ordering
-  problem, the virtual network is small, and an Azure VM is the counterpart of
-  `aws/instances.py` and the only one of the four that spends money. Until all
-  four land, the root app cannot retire.
+- **The four Azure capabilities that lived outside `backend/` have landed.**
+  Network security group creation was in `azure_crud.py`; virtual networks,
+  `deploy_azure_vm` and the name-validation rules were in
+  `archive/streamlit-gui/`. All four are in `az/` now — see *The five Azure
+  types*. The root app can retire whenever somebody decides to delete it; it
+  no longer does anything `backend/` cannot. Note that CLAUDE.md used to say
+  virtual networks were in `azure_crud.py` and they were not — that file has
+  resource groups, security groups, storage and vaults, and nothing else.
 
 - **The frontend's untested half is its rendering, not its logic.**
   `frontend/` is plain HTML and JS served at `/ui`, with no build step and
@@ -853,13 +1111,21 @@ Severity means something — if everything is critical, nothing is.
 - **`_sg_create` still falls back to the default VPC** when a spec omits
   `vpc_id`. The CLI always passes one now, so only API callers can place a
   group somewhere they did not choose.
-- **No Azure half of the smoke test, and no live run at all.** Every AWS claim
-  here is backed by `scripts/smoke_test.py` against a real account. Azure has
-  nothing equivalent: no subscription has been pointed at, and the create and
-  delete paths are covered only by stubs shaped like the SDK's own return
-  values. That is the single largest gap in this file, and it is the reason
-  `az/storage.py` still offers no `apply_fix` even though both of its findings
-  are one property update away.
+- **The Azure smoke test covers all five types; three gaps are left.**
+  This entry used to say there was no Azure half and no live run at all, which
+  was the single largest gap in this file. `--azure-only
+  --with-azure-resources` is 47 passed, 0 failed, and builds and destroys a
+  real virtual machine. What is still open:
+
+  - **No `apply_fix` for vaults, virtual networks or machines.** Each is a
+    deliberate refusal with a reason written next to it rather than an
+    omission — see *The five Azure types*. Storage and security groups fix.
+  - **One subscription, one region, one service principal.** Everything
+    measured was measured in `eastus` against one tenant. The role the
+    principal holds was never enumerated — `azure-mgmt-authorization` is not
+    installed and adding it just to ask was not worth it — so "the writes
+    worked" is what is known, rather than which grant made them work. It
+    demonstrably cannot register a resource provider.
 - **`main.py` is still a second application, and now a second copy of
   provisioning.** `backend/` is one program serving both clouds; the Azure app
   at the repository root is not part of it and shares nothing but the
@@ -884,11 +1150,15 @@ destructive paths, a live smoke test, and a browser key generator that cannot
 reach the network. The guided form exists at `/ui`. Pre-deployment scanning
 exists on both halves; `POST /resources/{type}/check` creates nothing.
 
-Not done: Azure provisioning is half wired — storage creates and deletes
-through the same routes and the same CLI as everything else, network security
-groups still only read, and none of it has run against a subscription. So the
-README's promise is met for AWS and claimed for Azure. Everything else in *Not
-done* above is a refinement.
+Azure is now met rather than claimed, and on the same terms as AWS. Five types
+— storage accounts, key vaults, security groups, virtual networks and virtual
+machines — create, scan, fix, delete and clean up through the same registry,
+the same routes, the same CLI and the same page as every AWS type. All of it
+has run against a real subscription, including a machine that booted, was
+scanned with an administration port open to the internet, and was destroyed.
+
+Not done: the page cannot yet submit firewall *rules*, only an empty group.
+Everything else in *Not done* above is a refinement.
 
 ## Next
 
@@ -900,28 +1170,24 @@ done* above is a refinement.
    reaches in turn — and following it means traversing edges rather than
    matching statements. Everything cheap in that direction is now done; what
    is left is a different program and should be started as one.
-2. **Run the Azure half against a real subscription.** The one thing blocking
-   everything else Azure, and now blocked on nothing but a client secret.
-   All five SDK packages are in `.venv`, `backend/environment.py` reads `.env`,
-   and the tenant is `46afa685-72bb-4930-894e-29cb85d7c7c3`
-   (`group4capstonelolgmail.onmicrosoft.com`). What is missing is
-   `AZURE_SUBSCRIPTION_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` from a
-   service principal — `az/common.py` uses `ClientSecretCredential` only, on
-   purpose, so a portal login or `az login` will not do.
+2. **The Azure half is done; what is left is the page and the benchmark.**
+   This item has been "run Azure against a real subscription" and then
+   "register the compute provider" and both are finished — all five types
+   create, scan, fix, delete and clean up against
+   `74baf379-b419-4e16-a50b-98bc450901c9`, machines included. What remains on
+   the Azure side is small: a rules widget so the page can submit a firewall
+   with rules rather than an empty group, and no external benchmark has ever
+   been pointed at the Azure rules the way Prowler and CloudGoat were pointed
+   at the AWS ones. The second is the more valuable and the more honest gap.
 
-   Two things to know before the first run. Being Global Administrator in Entra
-   grants no role on a subscription; that is a separate permission system, and
-   *Access management for Azure resources* in Entra ID → Properties is the
-   elevation. And a secure-by-default key vault turns on purge protection,
-   which can never be turned off and locks the vault and its name for 90 days
-   — so test vaults with the weak option, and let the offline spec test cover
-   the secure path.
-
-   Start with **3. Scan** in the CLI: read-only, creates nothing, and proves
-   the credentials and the role assignment before anything gets built. Then
-   write `scripts/azure_smoke_test.py` as the counterpart of the AWS one, and
-   then `apply_fix` for storage, which is one property update per finding and
-   is held back only by never having run.
+   Two things still worth knowing before touching a subscription. Being Global
+   Administrator in Entra grants no role on a subscription; that is a separate
+   permission system, and *Access management for Azure resources* in Entra ID →
+   Properties is the elevation. And a secure-by-default key vault turns on
+   purge protection, which can never be turned off and locks the vault and its
+   name for 90 days — so test vaults with the weak option, which is what the
+   smoke test does deliberately, and let the offline spec test cover the secure
+   path.
 3. **Azure NSG provisioning, or a decision not to.** The one thing root
    `main.py` can still do that `backend/` cannot, and therefore the thing
    keeping it alive. It needs the whole ordered rule set read before a single
