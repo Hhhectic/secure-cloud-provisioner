@@ -41,6 +41,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# This is an entrypoint, and the two that existed when environment.py was
+# written are not the only ones. Without this the Azure sections below find no
+# credentials and skip themselves, on a machine whose .env is correct and
+# complete - which is the same quiet failure environment.py was written to end,
+# reappearing one script over. AWS is unaffected either way: boto3 reads
+# ~/.aws itself, which is why nobody noticed.
+import environment
+
+environment.load()
+
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError, WaiterError
 
