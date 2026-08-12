@@ -129,12 +129,34 @@ def apply(warnings, entries=None, today=None):
     return warnings
 
 
-def audit(warnings, entries=None, today=None, problem=None):
+def _resource_of(rule_id):
+    """The resource half of a rule id.
+
+    Rule ids are `<resource>:<setting>`, except a security group rule's, which
+    is `<group>:<rule>:<setting>`. The resource is the first field either way.
+    """
+    return (rule_id or "").split(":")[0]
+
+
+def audit(warnings, entries=None, today=None, problem=None, scanned=None):
     """Findings about the acknowledgements themselves.
 
     An acknowledgement is a decision to stop looking at something. Left
     unexamined it becomes a decision nobody remembers making, about a resource
     that may no longer be the one it was written for.
+
+    `scanned` is the set of resource ids this scan actually looked at, and
+    entries about anything else are left alone. Without it the unmatched check
+    compares every acknowledgement against one resource's findings and reports
+    each one that is not about *that* resource - which is most of them, every
+    time. Two entries for one S3 bucket produced two informational findings on
+    every scan of every other resource in either cloud, and the message had to
+    hedge with "or it is about a resource this scan did not look at" because it
+    genuinely could not tell the two apart.
+
+    None means no scope, which is the whole-account sweep this cannot do from
+    a single resource: there, an entry matching nothing really has outlived
+    whatever it was written for.
     """
     entries = entries if entries is not None else load()[0]
     today = today or date.today()
@@ -157,6 +179,13 @@ def audit(warnings, entries=None, today=None, problem=None):
     for entry in entries:
         rule_id = entry["rule_id"]
         expires = _expires_on(entry)
+
+        # Both checks below are about this entry's own resource, so neither can
+        # be answered while looking at a different one. An expired entry is
+        # scoped for the same reason as an unmatched one: the finding it stops
+        # suppressing is on that resource, and that is where saying so helps.
+        if scanned is not None and _resource_of(rule_id) not in scanned:
+            continue
 
         if expires and expires < today:
             found.append(_warning(

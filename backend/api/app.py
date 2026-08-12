@@ -259,7 +259,7 @@ def _must_be_writable(known):
         )
 
 
-def _acknowledge(warnings):
+def _acknowledge(warnings, scanned=None):
     """Marks what somebody has already decided to live with.
 
     Applied here rather than inside the rules, so scanner/ stays a pure
@@ -267,14 +267,21 @@ def _acknowledge(warnings):
     on disk. Nothing is removed: an acknowledged finding keeps its level and
     its place in the list, and summarize() counts it twice - once by severity
     and once as acknowledged.
+
+    `scanned` names the resources this scan covered, so the audit only reports
+    acknowledgements it is in a position to judge. Every caller here scans one
+    resource; passing None would ask "does this entry match anything?" of a
+    scan that looked at one thing.
     """
     entries, problem = acknowledged.load()
     acknowledged.apply(warnings, entries)
-    return warnings + acknowledged.audit(warnings, entries, problem=problem)
+    return warnings + acknowledged.audit(warnings, entries, problem=problem,
+                                         scanned=scanned)
 
 
 def _scan(known, client, resource_id):
-    return _acknowledge(known.check(known.read(client, resource_id)))
+    return _acknowledge(known.check(known.read(client, resource_id)),
+                        scanned={resource_id})
 
 
 def _describe_and_scan(known, client, resource_id):
@@ -287,7 +294,8 @@ def _describe_and_scan(known, client, resource_id):
     had already been in memory.
     """
     settings = known.read(client, resource_id)
-    return known.describe(settings), _acknowledge(known.check(settings))
+    return known.describe(settings), _acknowledge(known.check(settings),
+                                                  scanned={resource_id})
 
 
 # ------------------------------------------------------------------ Discovery
