@@ -1000,3 +1000,47 @@ def test_a_filterable_type_is_not_decided_by_whether_it_is_read_only(client):
     for key in ("snapshot", "role"):
         assert entries[key]["read_only"] is True
         assert entries[key]["only_ours_label"] is not None
+
+
+# ----------------------------------------------------- what a row is keyed by
+
+
+AZURE_LISTS = [
+    ("azure-nsg", "az.nsg", "list_nsgs"),
+    ("azure-storage", "az.storage", "list_accounts"),
+    ("azure-keyvault", "az.keyvault", "list_vaults"),
+    ("azure-vnet", "az.vnet", "list_vnets"),
+    ("azure-vm", "az.vm", "list_vms"),
+]
+
+
+@pytest.mark.parametrize("key,module,func", AZURE_LISTS)
+def test_an_azure_row_is_keyed_by_the_identifier_the_routes_accept(
+        key, module, func, monkeypatch):
+    """A row's id has to survive being one segment of a URL path.
+
+    The list returned the full ARM path, which carries eight slashes, and a
+    route takes its id as a single path segment - so /resources/azure-storage/
+    <that> matched no route and 404'd before any Azure code ran. The page
+    passes a row's id straight into scan, fix and delete, so all three failed
+    against a resource it had just created.
+
+    The readers accept either form, which is exactly why the offline suite
+    never noticed: every test that called one passed it a name, and every test
+    that called a route used a type whose id had no slashes in it.
+    """
+    import importlib
+
+    from api import registry
+
+    arm = (f"/subscriptions/0000/resourceGroups/rg/providers/"
+           f"Microsoft.Whatever/things/thing-one")
+    monkeypatch.setattr(importlib.import_module(module), func,
+                        lambda *a, **k: [{"id": arm, "name": "thing-one"}])
+
+    known = registry.get(key)
+    rows = known.list_all(object(), False)
+
+    assert rows == [{"id": "thing-one", "name": "thing-one"}], (
+        f"{key} keyed its row by {rows[0]['id']!r}, which no route accepts"
+    )

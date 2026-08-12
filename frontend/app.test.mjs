@@ -50,8 +50,14 @@ const STUB_TYPES = [
   // The second cloud, which the page has never been asked about. It reaches
   // these through the registry like anything else, and that is the claim
   // worth testing: nothing in app.js knows the word Azure.
+  //
+  // read_only was true here long after it stopped being true of the tool, so
+  // this file asserted that the page offers no Azure form at all - protecting
+  // behaviour the application had already replaced. All five Azure types
+  // create, scan, fix and delete now.
   { key: "azure-storage", label: "Azure storage account",
-    id_label: "Account name", read_only: true, only_ours_label: null },
+    id_label: "Account name", read_only: false,
+    only_ours_label: "only ones this tool made" },
 ];
 
 
@@ -581,24 +587,36 @@ const azTab = [...$(document, "types").children]
   .find((b) => b.textContent.includes("Azure storage account"));
 
 check(Boolean(azTab), "a tab appears for a type from the second cloud");
-check(azTab.textContent.includes("audit only"),
-      "labelled audit only, because Azure is read-only here");
+check(!azTab.textContent.includes("audit only"),
+      "not labelled audit only, because Azure provisions like anything else");
 
 await azTab.click();
 await new Promise((r) => setTimeout(r, 60));
 
+/* The form is the half that broke silently. app.js held a hardcoded field map
+ * with no Azure entries, so every Azure type fell back to a name-only form and
+ * submitted without the resource group Azure cannot place anything without. A
+ * name-only form looks perfectly reasonable on screen. */
 const azCreate = $(document, "create-body");
-check(azCreate.textContent.includes("audited by this tool, not created by it"),
-      "choosing it explains why there is nothing to fill in");
-check(azCreate.querySelectorAll("input, select").length === 0,
-      "and offers no form, rather than one that would 405");
-check(!$(document, "create-live"),
-      "with no live check either, there being nothing to check");
+const azCaptions = [...azCreate.querySelectorAll(".field label")]
+  .map((l) => l.textContent);
+for (const asked of ["name", "resource group", "location", "secure defaults"]) {
+  check(azCaptions.includes(asked), `the create form asks for ${asked}`);
+}
 
 const azRow = document.querySelector("#list tr.clickable");
 if (check(Boolean(azRow), "the account is listed")) {
   await azRow.click();
   await new Promise((r) => setTimeout(r, 60));
+
+  /* The identifier a row carries is the one every per-resource route takes,
+   * and the page passes it through untouched. It does not, and must not, know
+   * that Azure has a second identifier: the registry hands back the name in
+   * `id` precisely so this stays true. It once handed back the full ARM path
+   * instead, and detail, fix and delete all 404'd against a resource the page
+   * had just created. */
+  check(sent.some((r) => r.path === "/resources/azure-storage/demostorage"),
+        "and is read back by the identifier the list gave, unaltered");
 
   const azFinding = $(document, "detail-body").querySelector(".finding");
   check(Boolean(azFinding) && azFinding.classList.contains("critical"),
