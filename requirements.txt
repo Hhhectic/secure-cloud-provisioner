@@ -12,3 +12,10 @@ azure-mgmt-storage==21.0.0
 azure-mgmt-network>=25.0.0
 # az/keyvault.py. Resolved against a real install at 14.0.1.
 azure-mgmt-keyvault>=14.0.0
+# az/vm.py, which arrived with virtual machine provisioning and was listed
+# nowhere at all - not here and not in backend/requirements.txt. A checkout
+# that installed both files still could not open the Azure virtual machine tab,
+# and said so as a 503 naming a module rather than as an import error, which is
+# the lazy-import design working: the page starts, one type is unavailable.
+# Resolved against a real install at 38.2.0.
+azure-mgmt-compute>=38.0.0

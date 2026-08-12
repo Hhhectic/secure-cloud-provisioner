@@ -314,7 +314,15 @@ async function loadList() {
 
     tr.append(text("td", r.id));
     tr.append(text("td", r.name || ""));
-    tr.append(text("td", r.unreachable ? "?" : (r.worst_level || "clean")));
+    // Not scanned is not clean. counts is the signal, because worst_level is
+    // null for both "nothing was found" and "nothing was looked for" - and
+    // "scan each" is off by default, so the second is what the page shows on
+    // first load. Printing a verdict there labelled a storage account with two
+    // critical findings clean until somebody happened to tick a box. The
+    // Findings column beside this one has always said "—" for the same case.
+    tr.append(text("td", r.unreachable ? "?"
+      : !r.counts ? "not scanned"
+      : (r.worst_level || "clean")));
     tr.append(text("td", r.counts
       ? `${r.counts.critical} critical, ${r.counts.warning} warning, ${r.counts.info} info`
       : (r.unreachable || "—")));

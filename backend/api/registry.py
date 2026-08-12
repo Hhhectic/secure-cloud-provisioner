@@ -1162,17 +1162,38 @@ ROLE = ResourceType(
 # which is the whole argument for having built it this way, finally testable
 # rather than asserted.
 #
-# Storage provisions; network security groups still do not. That split is not
-# indecision. A storage account is one object with three switches on it, and
-# the rules that judge those switches already exist here. An Azure firewall
-# rule carries a priority deciding which of several overlapping rules wins, so
-# neither creating one nor fixing one can be reasoned about without reading the
-# whole ordered set - which is the same reason az/nsg.py offers no fix.
+# All five types provision now. That used to read "storage provisions; network
+# security groups still do not", because an Azure firewall rule carries a
+# priority deciding which of several overlapping rules wins and nothing here
+# read the ordered set. scanner/azure_nsg_effective.py reads it, which is what
+# unblocked creating a group, fixing a rule, and the two types built on top.
+
+
+def _az_summary(resources):
+    """List rows for the routes, keyed by name rather than by ARM path.
+
+    `id` here means the identifier every per-resource route accepts, and a
+    route takes it as one path segment: /resources/azure-storage/{id}. This
+    used to hand back the full ARM path, which is nine segments separated by
+    the one character a path parameter cannot carry - so the request never
+    matched the route at all and 404'd before any Azure code ran. The readers
+    themselves take either form quite happily, which is what made this hard to
+    see from the inside: every offline test that called one directly passed.
+
+    What it cost was the page. It passes a row's id straight to scan, fix and
+    delete, so creating an Azure resource worked and then the detail panel said
+    "Not Found" about the thing it had just built, no fix buttons appeared, and
+    the delete modal opened empty with its button disabled forever.
+
+    The name is unique per resource group rather than per subscription for
+    every type but storage, so this is the same ambiguity the routes already
+    had by taking a name at all; it is not introduced here.
+    """
+    return [{"id": r["name"], "name": r["name"]} for r in resources]
 
 
 def _az_nsg_list(client, only_ours):
-    return [{"id": g["id"], "name": g["name"]}
-            for g in az_nsg.list_nsgs(client, only_ours=only_ours)]
+    return _az_summary(az_nsg.list_nsgs(client, only_ours=only_ours))
 
 
 def _az_nsg_fix(client, resource_id, warning, options):
@@ -1241,8 +1262,7 @@ AZURE_NSG = ResourceType(
 
 
 def _az_storage_list(client, only_ours):
-    return [{"id": a["id"], "name": a["name"]}
-            for a in az_storage.list_accounts(client, only_ours=only_ours)]
+    return _az_summary(az_storage.list_accounts(client, only_ours=only_ours))
 
 
 def _az_storage_fix(client, resource_id, warning, options):
@@ -1312,8 +1332,7 @@ AZURE_STORAGE = ResourceType(
 
 
 def _az_keyvault_list(client, only_ours):
-    return [{"id": v["id"], "name": v["name"]}
-            for v in az_keyvault.list_vaults(client, only_ours=only_ours)]
+    return _az_summary(az_keyvault.list_vaults(client, only_ours=only_ours))
 
 
 def _az_keyvault_fix(client, resource_id, warning, options):
@@ -1379,8 +1398,7 @@ AZURE_KEYVAULT = ResourceType(
 
 
 def _az_vnet_list(client, only_ours):
-    return [{"id": v["id"], "name": v["name"]}
-            for v in az_vnet.list_vnets(client, only_ours=only_ours)]
+    return _az_summary(az_vnet.list_vnets(client, only_ours=only_ours))
 
 
 def _az_vnet_fix(client, resource_id, warning, options):
@@ -1440,8 +1458,7 @@ AZURE_VNET = ResourceType(
 
 
 def _az_vm_list(client, only_ours):
-    return [{"id": v["id"], "name": v["name"]}
-            for v in az_vm.list_vms(client, only_ours=only_ours)]
+    return _az_summary(az_vm.list_vms(client, only_ours=only_ours))
 
 
 def _az_vm_fix(client, resource_id, warning, options):
@@ -1501,9 +1518,25 @@ def _az_vm_options(client):
     writes `*` where AWS writes 0.0.0.0/0, and offering the AWS spelling would
     produce a rule Azure accepts and treats as a single address.
     """
+    # Only the sizes this subscription can actually start, not the whole
+    # allowlist. Azure restricts sizes per subscription as well as per region
+    # and reports both as SkuNotAvailable, so a menu built from ALLOWED_VM_SIZES
+    # offered fourteen sizes here of which nine could never launch - and the
+    # three Standard_B1* entries a person reaches for first were all among
+    # them. az/vm.py already had available_sizes and already used it to explain
+    # a refusal; the form was still offering the unfiltered list, so the page
+    # led people into exactly the failure that function exists to prevent.
+    #
+    # Location is the account default because the form's own location field is
+    # free text that may be empty when the menus are built. A size list for the
+    # wrong region is a worse menu than this, but an empty one is worse still,
+    # so an unanswerable lookup falls back to the allowlist rather than
+    # offering nothing.
+    startable = az_vm.available_sizes(client, DEFAULT_AZURE_LOCATION)
+
     return {
         "vm_size": [{"value": size, "label": size}
-                    for size in sorted(az_vm.ALLOWED_VM_SIZES)],
+                    for size in (startable or sorted(az_vm.ALLOWED_VM_SIZES))],
         "open_ports": _port_choices(),
         "allowed_source": [
             {"value": "*", "label": "* — the entire internet"},

@@ -1071,3 +1071,258 @@ def test_a_filterable_type_is_not_decided_by_whether_it_is_read_only(client):
     for key in ("snapshot", "role"):
         assert entries[key]["read_only"] is True
         assert entries[key]["only_ours_label"] is not None
+
+
+# ----------------------------------------------------- what a row is keyed by
+
+
+AZURE_LISTS = [
+    ("azure-nsg", "az.nsg", "list_nsgs"),
+    ("azure-storage", "az.storage", "list_accounts"),
+    ("azure-keyvault", "az.keyvault", "list_vaults"),
+    ("azure-vnet", "az.vnet", "list_vnets"),
+    ("azure-vm", "az.vm", "list_vms"),
+]
+
+
+@pytest.mark.parametrize("key,module,func", AZURE_LISTS)
+def test_an_azure_row_is_keyed_by_the_identifier_the_routes_accept(
+        key, module, func, monkeypatch):
+    """A row's id has to survive being one segment of a URL path.
+
+    The list returned the full ARM path, which carries eight slashes, and a
+    route takes its id as a single path segment - so /resources/azure-storage/
+    <that> matched no route and 404'd before any Azure code ran. The page
+    passes a row's id straight into scan, fix and delete, so all three failed
+    against a resource it had just created.
+
+    The readers accept either form, which is exactly why the offline suite
+    never noticed: every test that called one passed it a name, and every test
+    that called a route used a type whose id had no slashes in it.
+    """
+    import importlib
+
+    from api import registry
+
+    arm = (f"/subscriptions/0000/resourceGroups/rg/providers/"
+           f"Microsoft.Whatever/things/thing-one")
+    monkeypatch.setattr(importlib.import_module(module), func,
+                        lambda *a, **k: [{"id": arm, "name": "thing-one"}])
+
+    known = registry.get(key)
+    rows = known.list_all(object(), False)
+
+    assert rows == [{"id": "thing-one", "name": "thing-one"}], (
+        f"{key} keyed its row by {rows[0]['id']!r}, which no route accepts"
+    )
+
+
+# --------------------------------------------- a deletion plan in either shape
+
+
+class _Planner:
+    """The two attributes _deletion_plan reads off a ResourceType."""
+
+    label = "Azure network security group"
+
+    def __init__(self, plan):
+        self._plan = plan
+
+    def plan_deletion(self, client, resource_id):
+        return self._plan
+
+
+AZURE_PLANNERS = [
+    ("az.nsg", "read_nsg_for_scanning",
+     {"attached_to": ["subnet-a", "nic-b"]}),
+    ("az.vnet", "read_vnet_for_scanning",
+     {"subnets": [{"name": "default"}]}),
+    ("az.vm", "read_vm_for_scanning",
+     {"vm_name": "demo", "public_ip": "203.0.113.9"}),
+]
+
+
+@pytest.mark.parametrize("module,reader,settings", AZURE_PLANNERS)
+def test_an_azure_deletion_plan_reaches_the_route_without_a_500(
+        module, reader, settings, monkeypatch):
+    """The producers and the consumer disagreed about the shape, in production.
+
+    AWS returns a flat list of things a delete destroys. All three Azure
+    planners return {"items", "destroys", "message"}, and the route did
+    DeletionPlanItem(**item) over it - which iterates a dict as its keys and
+    raises TypeError on the first one. GET /deletion-plan and DELETE both
+    answered 500 for azure-nsg, azure-vnet and azure-vm, so those three could
+    not be deleted through the API at all. The offline suite never caught it
+    because it exercised the planners and the route separately; this drives the
+    real planner into the real route, which is the only place they meet.
+    """
+    import importlib
+
+    from api.app import _deletion_plan
+
+    mod = importlib.import_module(module)
+    monkeypatch.setattr(mod, reader, lambda *a, **k: settings)
+
+    known = _Planner(mod.plan_deletion(object(), "demo"))
+    got = _deletion_plan(known, object(), "azure-thing", "demo")
+
+    assert got.preview_available is True
+    assert got.confirm_with == "demo"
+    # Its own sentence survives. The generic one counts items and says they
+    # would be destroyed, which is false of a security group - deleting one
+    # destroys nothing and merely stops filtering whatever was behind it.
+    assert "To go ahead, repeat the delete with confirm=demo." in got.message
+    assert len(got.message) > len("To go ahead, repeat the delete with "
+                                  "confirm=demo.")
+    for item in got.items:
+        assert item.kind and item.id and item.label
+
+
+def test_the_aws_shape_still_writes_its_own_sentence_from_a_count():
+    """The list form is the older contract and must not have shifted."""
+    from api.app import _deletion_plan
+
+    known = _Planner([
+        {"kind": "server", "id": "i-1", "label": "web",
+         "created_by_this_tool": False},
+        {"kind": "subnet", "id": "subnet-1", "label": "public",
+         "created_by_this_tool": True},
+    ])
+    got = _deletion_plan(known, object(), "network", "vpc-1")
+
+    assert got.preview_available is True
+    assert got.destroys == {"server": 1, "subnet": 1}
+    assert got.foreign_count == 1
+    assert "Deleting this would destroy 2 things." in got.message
+    assert "1 running machine would be terminated" in got.message
+
+
+def test_a_planner_that_cannot_read_the_resource_says_there_is_no_preview():
+    """None must not become an empty inventory in front of a delete button."""
+    from api.app import _deletion_plan
+
+    got = _deletion_plan(_Planner(None), object(), "azure-nsg", "gone")
+
+    assert got.preview_available is False
+    assert got.items == []
+
+
+def test_a_size_this_subscription_cannot_start_is_not_offered(monkeypatch):
+    """The menu is a claim about what will work, and it was not one.
+
+    Azure restricts sizes per subscription as well as per region and reports
+    both as SkuNotAvailable, so ALLOWED_VM_SIZES is what this tool permits
+    rather than what any given subscription can launch. Against the real one
+    the form offered fourteen and nine of them could not start - including the
+    three Standard_B1* entries at the top of the list, which is what somebody
+    picks. az/vm.py already knew the answer; the form was not asking it.
+    """
+    from api import registry
+    from az import vm as az_vm
+
+    monkeypatch.setattr(az_vm, "available_sizes",
+                        lambda client, location: ["Standard_F1als_v7"])
+
+    offered = registry.get("azure-vm").options(object())["vm_size"]
+
+    assert [o["value"] for o in offered] == ["Standard_F1als_v7"]
+
+
+def test_an_unanswerable_size_lookup_falls_back_rather_than_emptying_the_menu():
+    """available_sizes never raises and returns [] when it cannot tell.
+
+    An empty menu is a dead form. The allowlist is the honest second answer:
+    it is still every size this tool permits, and the create refuses anything
+    outside it either way.
+    """
+    from api import registry
+    from az import vm as az_vm
+
+    import pytest as _pytest
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(az_vm, "available_sizes", lambda client, location: [])
+        offered = registry.get("azure-vm").options(object())["vm_size"]
+
+    assert [o["value"] for o in offered] == sorted(az_vm.ALLOWED_VM_SIZES)
+
+
+# ------------------------------------------------- the machine form's fields
+
+
+def test_a_machine_form_asking_to_open_ssh_to_the_world_is_reported_critical(client):
+    """The pre-flight said 0 critical about the one thing this type is for.
+
+    ResourceSpec declared no open_ports, no allowed_source and no vm_size, and
+    pydantic drops what a model does not declare - so check_vm_spec built its
+    rule list from an empty `open_ports` every time and found nothing to warn
+    about. A form asking for port 22 open to the entire internet on a machine
+    with a public address came back clean, which is the tool actively saying
+    the dangerous configuration is safe.
+    """
+    body = client.post("/resources/azure-vm/check", json={
+        "name": "probe",
+        "resource_group": "rg",
+        "location": "eastus",
+        "vm_size": "Standard_F1als_v7",
+        "public_key": "ssh-ed25519 AAAA",
+        "open_ports": ["22"],
+        "allowed_source": "*",
+        "assign_public_ip": True,
+    }).json()
+
+    assert body["counts"]["critical"] >= 1
+    assert any("22" in w["message"] for w in body["warnings"])
+
+
+def test_the_same_form_without_a_public_address_is_not_critical(client):
+    """The severity depends on reachability, so the rule has to still do that.
+
+    Guards against 'fixed' meaning 'now always critical'.
+    """
+    body = client.post("/resources/azure-vm/check", json={
+        "name": "probe",
+        "resource_group": "rg",
+        "location": "eastus",
+        "open_ports": ["22"],
+        "allowed_source": "*",
+        "assign_public_ip": False,
+    }).json()
+
+    assert body["counts"]["critical"] == 0
+
+
+def test_the_machine_fields_survive_the_spec_model(client):
+    """Every field the form submits has to reach the adapter that reads it.
+
+    Asserted on the model rather than through a create, because the create
+    talks to Azure. _az_vm_create reads all four of these by name.
+    """
+    spec = models_module().ResourceSpec(
+        name="m", resource_group="rg", vm_size="Standard_F1als_v7",
+        open_ports=["22", "443"], allowed_source="*",
+        encryption_at_host=True,
+    ).as_dict()
+
+    assert spec["vm_size"] == "Standard_F1als_v7"
+    assert spec["open_ports"] == ["22", "443"]
+    assert spec["allowed_source"] == "*"
+    assert spec["encryption_at_host"] is True
+
+
+def test_a_password_cannot_be_asked_for_over_http():
+    """The refusal in az/vm.py is only half of it if the model accepts one.
+
+    check_vm_spec reads allow_password_login with a default of False, so the
+    field staying undeclared is what keeps the HTTP surface unable to request
+    password login at all.
+    """
+    spec = models_module().ResourceSpec(
+        name="m", resource_group="rg", allow_password_login=True,
+    ).as_dict()
+
+    assert "allow_password_login" not in spec
+
+
+def models_module():
+    from api import models
+    return models

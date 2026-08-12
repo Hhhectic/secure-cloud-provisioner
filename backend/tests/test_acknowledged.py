@@ -210,3 +210,85 @@ def test_the_committed_file_parses_and_names_real_rule_ids():
         assert entry.get("reason"), f"{entry['rule_id']} gives no reason"
         assert entry.get("by"), f"{entry['rule_id']} names nobody"
         assert entry.get("on"), f"{entry['rule_id']} has no date"
+
+
+# ------------------------------------- an entry about something else entirely
+
+
+def test_an_entry_about_another_resource_is_not_reported_by_this_scan():
+    """The unmatched check compares against one resource's findings.
+
+    Two entries for one S3 bucket produced two informational findings on every
+    scan of every other resource, in both clouds - an Azure storage account
+    reporting that nothing in it matched an acknowledgement written about a
+    bucket. The message had to hedge with "or it is about a resource this scan
+    did not look at" precisely because it could not tell the two cases apart.
+    Scoping the audit to what was scanned is what lets it stop guessing.
+    """
+    found = acknowledged.audit(
+        [_finding("azureaccount:public_blob_access")],
+        [_entry("bucket:public_policy")],
+        today=TODAY, scanned={"azureaccount"})
+
+    assert found == []
+
+
+def test_the_entrys_own_resource_still_reports_it_as_unmatched():
+    """Scoping must not silence the case the check exists for.
+
+    Scanning the very bucket an acknowledgement names, and not finding the
+    thing it accepts, means the finding was fixed and the entry can go.
+    """
+    found = acknowledged.audit(
+        [_finding("bucket:versioning")],
+        [_entry("bucket:public_policy")],
+        today=TODAY, scanned={"bucket"})
+
+    assert len(found) == 1
+    assert "matches the acknowledgement" in found[0]["message"]
+
+
+def test_a_lapsed_entry_about_another_resource_is_also_left_alone():
+    """Expiry is scoped for the same reason.
+
+    The finding an expired entry stops suppressing is on that resource, so
+    that is where saying so helps. Reported here it is the same noise on every
+    unrelated scan.
+    """
+    assert acknowledged.audit(
+        [_finding("azureaccount:public_blob_access")],
+        [_entry("bucket:public_policy", until="2026-08-08")],
+        today=TODAY, scanned={"azureaccount"}) == []
+
+    lapsed = acknowledged.audit(
+        [_finding("bucket:versioning")],
+        [_entry("bucket:public_policy", until="2026-08-08")],
+        today=TODAY, scanned={"bucket"})
+    assert len(lapsed) == 1 and "ran out" in lapsed[0]["message"]
+
+
+def test_a_security_group_rule_id_still_resolves_to_its_group():
+    """Most rule ids are resource:setting; a firewall rule's has three fields.
+
+    <group>:<rule>:<setting>, so taking the first field is what makes scoping
+    work for both shapes rather than only the common one.
+    """
+    found = acknowledged.audit(
+        [_finding("sg-1:ssh-from-anywhere:open_22")],
+        [_entry("sg-1:ssh-from-anywhere:open_22")],
+        today=TODAY, scanned={"sg-1"})
+
+    assert found == []
+
+
+def test_no_scope_still_audits_everything():
+    """None is the whole-account sweep, where an unmatched entry really is one.
+
+    Kept so the check has somewhere honest to live once something scans wide
+    enough to answer it.
+    """
+    found = acknowledged.audit([_finding("bucket:versioning")],
+                               [_entry("elsewhere:public_policy")],
+                               today=TODAY)
+
+    assert len(found) == 1

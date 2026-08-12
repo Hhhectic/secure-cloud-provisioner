@@ -51,9 +51,14 @@ const STUB_TYPES = [
   // The second cloud, which the page has never been asked about. It reaches
   // these through the registry like anything else, and that is the claim
   // worth testing: nothing in app.js knows the word Azure.
+  //
+  // read_only was true here long after it stopped being true of the tool, so
+  // this file asserted that the page offers no Azure form at all - protecting
+  // behaviour the application had already replaced. All five Azure types
+  // create, scan, fix and delete now.
   { key: "azure-storage", label: "Azure storage account",
-    id_label: "Account name", read_only: true, only_ours_label: null,
-    provider: "azure" },
+    id_label: "Account name", read_only: false,
+    only_ours_label: "only ones this tool made", provider: "azure" },
 ];
 
 const AWS_TYPES = STUB_TYPES.filter((t) => t.provider === "aws");
@@ -252,6 +257,41 @@ check($(document, "types").children.length === AWS_TYPES.length,
 check([...$(document, "types").children]
         .some((b) => b.textContent.includes("audit only")),
       "an audited type is labelled as one");
+
+// ------------------------------------------- not scanned is not clean
+
+/* "scan each" is off by default, so this is what every list shows on first
+ * load. The verdict column printed `worst_level || "clean"`, and worst_level
+ * is null both when nothing was found and when nothing was looked for - so an
+ * unscanned account with two critical findings sat in the table labelled
+ * clean. A tool whose whole purpose is to say what is wrong must not answer
+ * that question before it has asked it. */
+
+console.log("\nA row that was never scanned");
+console.log("----------------------------");
+
+const { document: scanDoc } = await boot({
+  "/resources/security-group": () => ({
+    resource_type: "security-group",
+    resources: [
+      { id: "sg-1", name: "never-scanned", worst_level: null, counts: null },
+      { id: "sg-2", name: "scanned-clean", worst_level: null,
+        counts: { critical: 0, warning: 0, info: 0 } },
+      { id: "sg-3", name: "scanned-bad", worst_level: "critical",
+        counts: { critical: 2, warning: 1, info: 0 } },
+    ],
+  }),
+});
+
+const verdicts = [...scanDoc.querySelectorAll("#list tr.clickable")]
+  .map((tr) => tr.children[2].textContent);
+
+check(verdicts[0] === "not scanned",
+      "a row nobody scanned says so, instead of reporting a verdict");
+check(verdicts[1] === "clean",
+      "a row that was scanned and came back empty is the one that says clean");
+check(verdicts[2] === "critical",
+      "and a row with findings says the worst of them");
 
 // ------------------------------------------------------------ the menus
 
@@ -652,24 +692,47 @@ const azTab = [...$(document, "types").children]
   .find((b) => b.textContent.includes("Azure storage account"));
 
 check(Boolean(azTab), "a tab appears for a type from the second cloud");
-check(azTab.textContent.includes("audit only"),
-      "labelled audit only, because Azure is read-only here");
+check(!azTab.textContent.includes("audit only"),
+      "not labelled audit only, because Azure provisions like anything else");
 
 await azTab.click();
 await new Promise((r) => setTimeout(r, 60));
 
+/* The form is the half that broke silently. app.js held a hardcoded field map
+ * with no Azure entries, so every Azure type fell back to a name-only form and
+ * submitted without the resource group Azure cannot place anything without. A
+ * name-only form looks perfectly reasonable on screen. */
 const azCreate = $(document, "create-body");
-check(azCreate.textContent.includes("audited by this tool, not created by it"),
-      "choosing it explains why there is nothing to fill in");
-check(azCreate.querySelectorAll("input, select").length === 0,
-      "and offers no form, rather than one that would 405");
-check(!$(document, "create-live"),
-      "with no live check either, there being nothing to check");
+const azCaptions = [...azCreate.querySelectorAll(".field label")]
+  .map((l) => l.textContent);
+for (const asked of ["name", "resource group", "secure defaults"]) {
+  check(azCaptions.includes(asked), `the create form asks for ${asked}`);
+}
+
+/* Location used to be in that list, and is deliberately not any more.
+ *
+ * It was a free-text box repeated in all five Azure forms, captioned
+ * "eastus, westeurope, uksouth...", sitting underneath a header control that
+ * said Region and was discarded by every Azure route it reached. One control
+ * says where now, and collectSpec puts it in the spec because the provider
+ * declares place_field. The spec still carries it - asserted under "Where a
+ * created resource goes" below - which is the half that actually matters. */
+check(!azCaptions.includes("location"),
+      "and does not ask for location twice, the header already saying where");
 
 const azRow = document.querySelector("#list tr.clickable");
 if (check(Boolean(azRow), "the account is listed")) {
   await azRow.click();
   await new Promise((r) => setTimeout(r, 60));
+
+  /* The identifier a row carries is the one every per-resource route takes,
+   * and the page passes it through untouched. It does not, and must not, know
+   * that Azure has a second identifier: the registry hands back the name in
+   * `id` precisely so this stays true. It once handed back the full ARM path
+   * instead, and detail, fix and delete all 404'd against a resource the page
+   * had just created. */
+  check(sent.some((r) => r.path === "/resources/azure-storage/demostorage"),
+        "and is read back by the identifier the list gave, unaltered");
 
   const azFinding = $(document, "detail-body").querySelector(".finding");
   check(Boolean(azFinding) && azFinding.classList.contains("critical"),
