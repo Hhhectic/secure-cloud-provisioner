@@ -1,0 +1,349 @@
+<!-- @dsCard group="Components" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Caution banner</title>
+<style>
+/* Deliberately plain. Severity is the only thing colour is spent on, because
+   it is the only thing here where colour carries meaning rather than mood.
+
+   That rule survived the cloud switch, which was the first thing to ask for an
+   exception: AWS orange beside Azure blue would have been the first colour on
+   this page that means nothing about risk, and every red thing below would
+   have had to compete with it. The switch is told apart by position and fill
+   instead, which is what the selected tab has always used.
+
+   Two typefaces, and the split is by what the words are rather than by where
+   they sit. Findings are prose aimed at somebody who does not know the jargon,
+   and monospace prose is measurably slower to read; identifiers, keys and
+   anything a person will compare character by character stay mono, because
+   that is where a lost character matters. */
+
+:root {
+  --ink: #1a1a1a;
+  --paper: #fff;
+  --page: #fbfbfa;
+  --line: #ccc;
+  --line-soft: #e2e2e0;
+  --quiet: #5a5a58;
+  --wash: #f6f6f4;
+
+  /* The only three that mean anything. */
+  --critical: #a00;
+  --warning: #8a6400;
+  --info: #26c;
+
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+
+  --gap: 1rem;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  font: 15px/1.55 var(--sans);
+  margin: 0 auto;
+  padding: 1rem 1.25rem 3rem;
+  max-width: 92rem;
+  background: var(--page);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Identifiers, keys, commands: anything compared character by character. */
+.mono-block, .cite, code, pre, input, textarea, select, .pill { font-family: var(--mono); }
+
+/* ------------------------------------------------------------------ header */
+
+header {
+  border-bottom: 2px solid var(--ink);
+  padding-bottom: .7rem;
+  margin-bottom: .2rem;
+  position: sticky;
+  top: 0;
+  background: var(--page);
+  z-index: 5;
+}
+
+h1 {
+  font-size: 1.05rem;
+  letter-spacing: -.01em;
+  margin: 0;
+  white-space: nowrap;
+}
+
+h2 {
+  font-size: .82rem;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  color: var(--quiet);
+  margin: 0 0 .7rem;
+  border-bottom: 1px solid var(--line-soft);
+  padding-bottom: .4rem;
+}
+
+h3 { font-size: .9rem; margin: 1rem 0 .35rem; }
+
+.bar { display: flex; gap: 1.1rem; align-items: center; flex-wrap: wrap; }
+.bar-end { display: flex; gap: .9rem; align-items: center; margin-left: auto; }
+.row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-top: .6rem; }
+.controls { float: right; font-weight: normal; display: flex; gap: .9rem; align-items: center;
+            text-transform: none; letter-spacing: 0; font-size: .82rem; }
+
+/* --------------------------------------------------------- the cloud switch
+
+   A real sliding control: one knob, moved by transform across as many
+   positions as there are providers. It counts them rather than assuming two,
+   because /resources decides how many there are and a third cloud should not
+   need this file reopened. */
+
+.switch {
+  --positions: 2;
+  --position: 0;
+  position: relative;
+  display: inline-flex;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  padding: 2px;
+}
+
+.switch::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 2px;
+  width: calc((100% - 4px) / var(--positions));
+  transform: translateX(calc(var(--position) * 100%));
+  background: var(--ink);
+  transition: transform .18s ease;
+}
+
+.switch button {
+  position: relative;
+  z-index: 1;
+  border: 0;
+  background: none;
+  min-width: 5.5rem;
+  padding: .3rem .9rem;
+  font-weight: 600;
+  font-size: .85rem;
+  letter-spacing: .02em;
+  color: var(--quiet);
+  transition: color .18s ease;
+}
+
+.switch button:hover:not(.active) { background: none; color: var(--ink); }
+.switch button.active { color: var(--paper); }
+
+@media (prefers-reduced-motion: reduce) {
+  .switch::before, .switch button { transition: none; }
+}
+
+/* -------------------------------------------------------------------- warn */
+
+.warn {
+  background: #fff4d6;
+  border-left: 3px solid #b8860b;
+  padding: .55rem .75rem;
+  margin: .9rem 0;
+  font-size: .88rem;
+  max-width: 62rem;
+}
+.warn:empty { display: none; }
+
+/* -------------------------------------------------------------------- tabs */
+
+nav { display: flex; gap: .3rem; flex-wrap: wrap; margin: .9rem 0 1.1rem; }
+nav button { display: inline-flex; align-items: baseline; gap: .4rem; }
+nav button.active { background: var(--ink); color: var(--paper); }
+
+/* The generic hover below sets a light background and comes later, so it won
+   on background while .active kept the white text: the selected tab turned
+   white-on-near-white for exactly as long as the pointer sat on it, which is
+   whenever somebody is about to click something else. Found by a real browser;
+   jsdom has no cursor and computes no styles. */
+nav button.active:hover { background: var(--ink); color: var(--paper); }
+
+/* "audit only" travels with the tab it qualifies rather than inside its label,
+   so the resource keeps the name the registry gave it. */
+.tag {
+  font-size: .68rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--quiet);
+}
+nav button.active .tag { color: #cfcfcf; }
+
+/* ------------------------------------------------------------------ layout */
+
+main { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); align-items: start; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+section { border: 1px solid var(--line-soft); background: var(--paper); padding: .9rem 1rem 1.1rem; }
+#listing { grid-column: 1 / -1; }
+
+/* ---------------------------------------------------------------- controls */
+
+button {
+  font: inherit;
+  font-size: .87rem;
+  padding: .32rem .7rem;
+  cursor: pointer;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  color: inherit;
+}
+button:hover:not(:disabled) { background: #ededea; }
+button:disabled { opacity: .4; cursor: not-allowed; }
+button.danger { border-color: var(--critical); color: var(--critical); }
+button.danger:hover:not(:disabled) { background: #fee; }
+
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+input, textarea, select {
+  font: inherit;
+  font-size: .87rem;
+  padding: .28rem .35rem;
+  border: 1px solid #999;
+  background: var(--paper);
+  color: inherit;
+}
+textarea { width: 100%; }
+label { display: inline-flex; gap: .35rem; align-items: center; }
+
+/* ------------------------------------------------------------------ tables */
+
+table { border-collapse: collapse; width: 100%; margin-top: .5rem; font-size: .87rem; }
+th, td { border-bottom: 1px solid var(--line-soft); padding: .4rem .5rem; text-align: left; vertical-align: top; }
+th {
+  background: none;
+  border-bottom: 1px solid var(--line);
+  font-size: .72rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--quiet);
+  font-weight: 600;
+}
+tbody tr:last-child td { border-bottom: 0; }
+tr.clickable:hover { background: var(--wash); cursor: pointer; }
+
+.pill { padding: .12rem .45rem; border: 1px solid; font-size: .74rem; }
+.ok { color: #060; border-color: #060; }
+.bad { color: var(--critical); border-color: var(--critical); }
+
+/* ---------------------------------------------------------------- findings */
+
+.finding {
+  border-left: 3px solid #999;
+  padding: .5rem .7rem;
+  margin: .45rem 0;
+  background: #fafafa;
+  max-width: 62rem;
+}
+.finding.critical { border-color: var(--critical); background: #fff5f5; }
+.finding.warning  { border-color: #b8860b; background: #fffdf3; }
+.finding.info     { border-color: var(--info); background: #f5f8ff; }
+.level { font-weight: 700; text-transform: uppercase; font-size: .7rem; letter-spacing: .07em; }
+.critical .level { color: var(--critical); }
+.warning .level  { color: var(--warning); }
+.info .level     { color: var(--info); }
+.cite { color: var(--quiet); font-size: .78rem; }
+
+.finding.acknowledged { opacity: .62; border-left-style: dashed; }
+.ack { font-size: .8rem; color: var(--quiet); margin-top: .3rem; font-style: italic; }
+
+/* Forms. Every control gets a caption above it rather than a placeholder
+   inside it, because a placeholder disappears exactly when it is needed. */
+.field { display: flex; align-items: center; gap: .6rem; margin: .6rem 0; flex-wrap: wrap; }
+.field > label { min-width: 9rem; font-weight: 600; font-size: .87rem; }
+.field .hint { color: var(--quiet); font-size: .8rem; }
+
+/* Boxes grow to their column rather than to the size attribute they were
+   built with. That attribute is 32 characters for every text field, which was
+   narrower than the longest placeholder - so the Azure resource group field
+   asked "Azure needs one; it is created if it is n" and stopped, which reads
+   as a bug in the sentence rather than in the box. Capped, because a text
+   field the width of a monitor invites an answer nobody wants to type. */
+.field > input:not([type="checkbox"]), .field > textarea {
+  flex: 1 1 20rem;
+  max-width: 32rem;
+  min-width: 0;
+}
+
+.rule {
+  display: flex; gap: .9rem; align-items: flex-end; flex-wrap: wrap;
+  border: 1px solid var(--line-soft); padding: .6rem; margin: .45rem 0; background: #fafafa;
+}
+.labelled { display: flex; flex-direction: column; gap: .18rem; }
+.labelled small {
+  color: var(--quiet); font-size: .68rem;
+  text-transform: uppercase; letter-spacing: .06em;
+}
+
+.note {
+  color: #444; font-size: .84rem; line-height: 1.5;
+  margin: -.15rem 0 .75rem; padding-left: .65rem; border-left: 2px solid var(--line-soft);
+  max-width: 52rem;
+}
+
+.existing {
+  border: 1px solid var(--line-soft); padding: .55rem .75rem; margin: .45rem 0;
+  background: #fafafa; display: flex; flex-direction: column; gap: .3rem;
+}
+
+.keygen { border: 1px dashed #999; padding: .7rem; margin: .7rem 0; background: #fcfcfc; }
+.keygen .warn { margin: .5rem 0 0; }
+
+.muted { color: var(--quiet); }
+.mono-block {
+  background: var(--wash); padding: .55rem; overflow-x: auto; white-space: pre-wrap;
+  word-break: break-word; max-height: 22rem; font-size: .82rem;
+  border: 1px solid var(--line-soft);
+}
+.foreign { background: #fff5f5; }
+.hidden { display: none !important; }
+
+/* ------------------------------------------------------------------- modal */
+
+#modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,.55);
+  display: flex; align-items: center; justify-content: center; padding: 1rem;
+  z-index: 20;
+}
+.sheet {
+  background: var(--paper); padding: 1.1rem 1.2rem; max-width: 46rem; width: 100%;
+  max-height: 90vh; overflow-y: auto; border: 2px solid var(--critical);
+  box-shadow: 0 10px 40px rgba(0,0,0,.25);
+}
+
+#toast {
+  position: fixed; bottom: 1rem; right: 1rem; padding: .65rem .95rem;
+  border: 1px solid var(--ink); background: var(--paper); max-width: 34rem;
+  font-size: .87rem; box-shadow: 0 4px 18px rgba(0,0,0,.15); z-index: 30;
+}
+#toast.err { border-color: var(--critical); background: #fee; }
+
+/* The live pre-flight, above the Create button. Deliberately quieter than the
+   output of an explicit check: this appears without being asked for, so it
+   states what it knows and does not compete with the findings inside it. */
+.live:not(:empty) { border-top: 1px dashed var(--line); margin-top: .85rem; padding-top: .65rem; }
+.live-head { font-size: .85rem; color: #444; margin: 0 0 .4rem; }
+.live-clean { font-size: .85rem; color: #060; margin: 0; }
+
+/* Preview chrome only. Not part of the page - delete when adapting. */
+body { padding: 1.5rem; }
+.ds-note { max-width: 62rem; margin: 0 0 1.25rem; padding: .6rem .8rem;
+           border-left: 3px solid #ccc; background: #fff; color: #444;
+           font-size: .84rem; }
+.ds-note b { color: #1a1a1a; }
+</style>
+</head>
+<body>
+<p class="ds-note">Named per cloud on purpose: <b>a real AWS account</b> was false and reassuring on the Azure half, which is the worst thing a warning can be.</p>
+<p class="warn" id="caution">This talks to a real Azure subscription. Creating and deleting here does the same thing it does from the command line.</p>
+</body>
+</html>
