@@ -16,11 +16,14 @@ one and so could never have shown that no such method exists.
 
 import pytest
 
+from azure.core.exceptions import HttpResponseError
+
 from api import registry
 from az import names as az_names
 from az import nsg as az_nsg
 from az import vnet as az_vnet
 from az import common as az_common
+from az.common import AzureRefused
 from az import storage as az_storage_mod
 from az import keyvault as az_keyvault_mod
 from az import vm as az_vm
@@ -889,3 +892,67 @@ class _AnyClient:
 
     def __call__(self, *args, **kwargs):
         return _AnyClient()
+
+
+# ================================= A refused read is not an absent resource
+
+
+class _StatusError(HttpResponseError):
+    """An SDK error carrying a status, which is all the readers match on."""
+
+    def __init__(self, status):
+        super().__init__(message=f"status {status}")
+        self.status_code = status
+
+
+class _RaisingClient:
+    """Every call raises the status it was built with."""
+
+    def __init__(self, status):
+        self._status = status
+
+    def __getattr__(self, name):
+        return self
+
+    def get(self, *args, **kwargs):
+        raise _StatusError(self._status)
+
+    def get_properties(self, *args, **kwargs):
+        raise _StatusError(self._status)
+
+
+_A_RESOURCE_ID = "/subscriptions/s/resourceGroups/g/providers/p/t/name"
+
+_READERS = [
+    ("azure-storage", az_storage_mod.read_account_for_scanning),
+    ("azure-keyvault", az_keyvault_mod.read_vault_for_scanning),
+    ("azure-nsg", az_nsg.read_nsg_for_scanning),
+    ("azure-vnet", az_vnet.read_vnet_for_scanning),
+    ("azure-vm", az_vm.read_vm_for_scanning),
+]
+
+
+@pytest.mark.parametrize("label,reader", _READERS)
+def test_a_read_that_is_refused_is_not_reported_as_absent(label, reader):
+    """Azure answers "you may not look" and "there is none" in the same words.
+
+    Every one of these handled 404 and re-raised everything else, so a
+    resource group the identity holds no role on arrived as a 500 and a
+    traceback about an HTTP response - the fifth instance of the mistake
+    CLAUDE.md already records four times, and the one place the create paths
+    had been fixed and the read paths had not.
+
+    404 is still absence and still returns None; the test below holds that
+    half in place, because a fix that turned every missing resource into a
+    refusal would be worse than the bug.
+    """
+    with pytest.raises(AzureRefused):
+        reader(_RaisingClient(403), _A_RESOURCE_ID)
+
+
+@pytest.mark.parametrize("label,reader", _READERS)
+def test_a_resource_that_is_absent_still_reads_back_as_nothing(label, reader):
+    """The other half of the contract every AWS reader here follows: a reader
+    returns None when the thing is not there, and the routes turn that into a
+    404."""
+    assert reader(_RaisingClient(404), _A_RESOURCE_ID) is None

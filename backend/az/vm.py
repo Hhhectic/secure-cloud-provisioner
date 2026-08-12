@@ -34,10 +34,10 @@ nothing on a machine with only the AWS half installed.
 
 from az import names, nsg as az_nsg, vnet as az_vnet
 from az.common import (AzureNotConfigured, AzureRefused, _import,
-                       credential,
+                       credential, denied,
                        ensure_resource_group, is_managed, managed_tags,
-                       network_client, plain, resource_group_of,
-                       subscription_id)
+                       network_client, not_allowed_to_look, plain,
+                       resource_group_of, subscription_id)
 
 # Small and cheap. Anything absent from this set is refused outright. Widen it
 # deliberately if you genuinely need to, and read the hourly price before you
@@ -272,6 +272,10 @@ def read_vm_for_scanning(client, name):
     try:
         found = client.virtual_machines.get(group, short, expand="instanceView")
     except Exception as e:
+        # Refusal before absence, because Azure says both in the same words
+        # and a handler knowing only 404 re-raises the first as a crash.
+        if denied(e):
+            raise not_allowed_to_look(group, "virtual machines") from e
         if getattr(e, "status_code", None) == 404:
             return None
         raise

@@ -147,6 +147,10 @@ def read_nsg_for_scanning(client, name):
     try:
         found = client.network_security_groups.get(group, short)
     except Exception as e:
+        # Refusal before absence, the same order _name_is_taken already uses
+        # below: "not allowed" is not "not there".
+        if denied(e):
+            raise not_allowed_to_look(group, "network security groups") from e
         # The SDK raises ResourceNotFoundError, which lives behind an import
         # this module deliberately does not make. Matching on the status code
         # keeps the lazy-import property.

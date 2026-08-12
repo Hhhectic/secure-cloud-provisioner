@@ -38,7 +38,7 @@ environment.load()
 from api import audit, models, registry
 from aws.common import AwsNotConfigured
 from aws.s3_buckets import PermissionDenied
-from az.common import AzureNotConfigured
+from az.common import AzureNotConfigured, AzureRefused
 from blueprints import bastion
 from scanner import acknowledged
 from scanner.common import summarize, fixable, worst_level, CRITICAL
@@ -204,6 +204,30 @@ async def _aws_not_configured(request, exc):
             "detail": str(exc),
             "provider": "aws",
         },
+    )
+
+
+@app.exception_handler(AzureRefused)
+async def _azure_refused(request, exc):
+    """Turns "you may not look at that" into a 403 that says so.
+
+    The mirror of the AWS handler above, and the last place the distinction
+    CLAUDE.md records four times over had not been made. Azure answers "this
+    resource group does not exist" and "you have no role on this resource
+    group" with the same 403, so a reader that handled only 404 re-raised the
+    refusal and the route turned it into a 500 with a traceback about an HTTP
+    response - which tells somebody holding Contributor on two groups nothing
+    about the fact that they are looking at a third.
+
+    403 rather than 404: saying "there is nothing there" to somebody who
+    simply cannot see it is the more misleading of the two answers, and the
+    one that sends people to look for a resource they never lost.
+    """
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(
+        status_code=403,
+        content={"detail": str(exc), "provider": "azure"},
     )
 
 

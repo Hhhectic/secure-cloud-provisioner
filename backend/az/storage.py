@@ -21,9 +21,11 @@ from az import names
 from az.common import (
     AzureNotConfigured,
     AzureRefused,
+    denied,
     ensure_resource_group,
     is_managed,
     managed_tags,
+    not_allowed_to_look,
     plain,
     resource_group_of,
     storage_client,
@@ -91,6 +93,13 @@ def read_account_for_scanning(client, name):
     try:
         found = client.storage_accounts.get_properties(group, short)
     except Exception as e:
+        # Checked before 404, and for the reason CLAUDE.md records as the
+        # fourth instance of one mistake: Azure answers "you may not look" and
+        # "there is nothing there" in the same words, and a handler that knows
+        # only 404 re-raises the first as a crash. The create paths learned
+        # this; the readers had not.
+        if denied(e):
+            raise not_allowed_to_look(group, "storage accounts") from e
         if getattr(e, "status_code", None) == 404:
             return None
         raise
