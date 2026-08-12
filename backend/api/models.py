@@ -104,6 +104,28 @@ class ResourceSpec(BaseModel):
     # names, and two fields would be one more pair to keep in step.
     resource_group: Optional[str] = None
 
+    # Azure virtual machine. These were missing entirely, and a field this
+    # model does not declare is dropped in silence - pydantic ignores unknown
+    # input - so `_az_vm_create` and `check_vm_spec` both read them as None no
+    # matter what was submitted. Four of the eight things the machine form asks
+    # for went nowhere.
+    #
+    # The pre-flight was the dangerous half. Ports come to check_vm_spec as the
+    # rules it judges, so a form asking to open 22 to the entire internet with
+    # a public address answered "0 critical" - the tool declaring safe the
+    # exact configuration this resource type exists to warn about. The create
+    # then ignored the ports as well, so the machine was built without the
+    # access somebody asked for and nothing said so either way.
+    #
+    # allow_password_login is deliberately still absent. check_vm_spec reads it
+    # with a default of False and az/vm.py never accepts a password at all, so
+    # leaving it undeclared is what keeps "passwords are refused" true of the
+    # HTTP surface too. Adding it here would make it settable.
+    vm_size: Optional[str] = None
+    open_ports: Optional[list[str]] = None
+    allowed_source: Optional[str] = None
+    encryption_at_host: bool = False
+
     # Alarm. threshold has no default and is not optional in practice: an
     # alarm without one is reported critical by the scanner and refused by the
     # create route, which is a better answer than a number this module

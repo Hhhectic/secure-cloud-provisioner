@@ -1173,3 +1173,85 @@ def test_an_unanswerable_size_lookup_falls_back_rather_than_emptying_the_menu():
         offered = registry.get("azure-vm").options(object())["vm_size"]
 
     assert [o["value"] for o in offered] == sorted(az_vm.ALLOWED_VM_SIZES)
+
+
+# ------------------------------------------------- the machine form's fields
+
+
+def test_a_machine_form_asking_to_open_ssh_to_the_world_is_reported_critical(client):
+    """The pre-flight said 0 critical about the one thing this type is for.
+
+    ResourceSpec declared no open_ports, no allowed_source and no vm_size, and
+    pydantic drops what a model does not declare - so check_vm_spec built its
+    rule list from an empty `open_ports` every time and found nothing to warn
+    about. A form asking for port 22 open to the entire internet on a machine
+    with a public address came back clean, which is the tool actively saying
+    the dangerous configuration is safe.
+    """
+    body = client.post("/resources/azure-vm/check", json={
+        "name": "probe",
+        "resource_group": "rg",
+        "location": "eastus",
+        "vm_size": "Standard_F1als_v7",
+        "public_key": "ssh-ed25519 AAAA",
+        "open_ports": ["22"],
+        "allowed_source": "*",
+        "assign_public_ip": True,
+    }).json()
+
+    assert body["counts"]["critical"] >= 1
+    assert any("22" in w["message"] for w in body["warnings"])
+
+
+def test_the_same_form_without_a_public_address_is_not_critical(client):
+    """The severity depends on reachability, so the rule has to still do that.
+
+    Guards against 'fixed' meaning 'now always critical'.
+    """
+    body = client.post("/resources/azure-vm/check", json={
+        "name": "probe",
+        "resource_group": "rg",
+        "location": "eastus",
+        "open_ports": ["22"],
+        "allowed_source": "*",
+        "assign_public_ip": False,
+    }).json()
+
+    assert body["counts"]["critical"] == 0
+
+
+def test_the_machine_fields_survive_the_spec_model(client):
+    """Every field the form submits has to reach the adapter that reads it.
+
+    Asserted on the model rather than through a create, because the create
+    talks to Azure. _az_vm_create reads all four of these by name.
+    """
+    spec = models_module().ResourceSpec(
+        name="m", resource_group="rg", vm_size="Standard_F1als_v7",
+        open_ports=["22", "443"], allowed_source="*",
+        encryption_at_host=True,
+    ).as_dict()
+
+    assert spec["vm_size"] == "Standard_F1als_v7"
+    assert spec["open_ports"] == ["22", "443"]
+    assert spec["allowed_source"] == "*"
+    assert spec["encryption_at_host"] is True
+
+
+def test_a_password_cannot_be_asked_for_over_http():
+    """The refusal in az/vm.py is only half of it if the model accepts one.
+
+    check_vm_spec reads allow_password_login with a default of False, so the
+    field staying undeclared is what keeps the HTTP surface unable to request
+    password login at all.
+    """
+    spec = models_module().ResourceSpec(
+        name="m", resource_group="rg", allow_password_login=True,
+    ).as_dict()
+
+    assert "allow_password_login" not in spec
+
+
+def models_module():
+    from api import models
+    return models
