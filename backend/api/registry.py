@@ -1395,9 +1395,25 @@ def _az_vm_options(client):
     writes `*` where AWS writes 0.0.0.0/0, and offering the AWS spelling would
     produce a rule Azure accepts and treats as a single address.
     """
+    # Only the sizes this subscription can actually start, not the whole
+    # allowlist. Azure restricts sizes per subscription as well as per region
+    # and reports both as SkuNotAvailable, so a menu built from ALLOWED_VM_SIZES
+    # offered fourteen sizes here of which nine could never launch - and the
+    # three Standard_B1* entries a person reaches for first were all among
+    # them. az/vm.py already had available_sizes and already used it to explain
+    # a refusal; the form was still offering the unfiltered list, so the page
+    # led people into exactly the failure that function exists to prevent.
+    #
+    # Location is the account default because the form's own location field is
+    # free text that may be empty when the menus are built. A size list for the
+    # wrong region is a worse menu than this, but an empty one is worse still,
+    # so an unanswerable lookup falls back to the allowlist rather than
+    # offering nothing.
+    startable = az_vm.available_sizes(client, DEFAULT_AZURE_LOCATION)
+
     return {
         "vm_size": [{"value": size, "label": size}
-                    for size in sorted(az_vm.ALLOWED_VM_SIZES)],
+                    for size in (startable or sorted(az_vm.ALLOWED_VM_SIZES))],
         "open_ports": _port_choices(),
         "allowed_source": [
             {"value": "*", "label": "* — the entire internet"},

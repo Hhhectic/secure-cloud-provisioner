@@ -1134,3 +1134,42 @@ def test_a_planner_that_cannot_read_the_resource_says_there_is_no_preview():
 
     assert got.preview_available is False
     assert got.items == []
+
+
+def test_a_size_this_subscription_cannot_start_is_not_offered(monkeypatch):
+    """The menu is a claim about what will work, and it was not one.
+
+    Azure restricts sizes per subscription as well as per region and reports
+    both as SkuNotAvailable, so ALLOWED_VM_SIZES is what this tool permits
+    rather than what any given subscription can launch. Against the real one
+    the form offered fourteen and nine of them could not start - including the
+    three Standard_B1* entries at the top of the list, which is what somebody
+    picks. az/vm.py already knew the answer; the form was not asking it.
+    """
+    from api import registry
+    from az import vm as az_vm
+
+    monkeypatch.setattr(az_vm, "available_sizes",
+                        lambda client, location: ["Standard_F1als_v7"])
+
+    offered = registry.get("azure-vm").options(object())["vm_size"]
+
+    assert [o["value"] for o in offered] == ["Standard_F1als_v7"]
+
+
+def test_an_unanswerable_size_lookup_falls_back_rather_than_emptying_the_menu():
+    """available_sizes never raises and returns [] when it cannot tell.
+
+    An empty menu is a dead form. The allowlist is the honest second answer:
+    it is still every size this tool permits, and the create refuses anything
+    outside it either way.
+    """
+    from api import registry
+    from az import vm as az_vm
+
+    import pytest as _pytest
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(az_vm, "available_sizes", lambda client, location: [])
+        offered = registry.get("azure-vm").options(object())["vm_size"]
+
+    assert [o["value"] for o in offered] == sorted(az_vm.ALLOWED_VM_SIZES)
