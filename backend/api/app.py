@@ -489,7 +489,22 @@ def create(resource_type: str, spec: models.ResourceSpec, region: str = "us-east
 
     ok, result, problems = known.create(client, spec.as_dict())
     if not ok:
-        raise HTTPException(status_code=400, detail=result)
+        # problems travels with the refusal, and used to be discarded here.
+        #
+        # This project's stated position is that nothing rolls back and that a
+        # partial failure reports exactly what exists. The adapters honour it -
+        # every create returns what it built alongside the error - and this
+        # line threw that half away, so a create that failed after building a
+        # network, a security group and a card answered with one sentence about
+        # the size and no mention of the three resources the caller now owned.
+        #
+        # A dict rather than a string because frontend/app.js already reads
+        # detail.message when detail is not a string, so the page keeps working
+        # and the list is there for anything that wants it.
+        raise HTTPException(
+            status_code=400,
+            detail={"message": result, "problems": problems or []},
+        )
 
     settings, warnings = _describe_and_scan(known, client, result)
 

@@ -452,6 +452,25 @@ def create_vm(client, name, resource_group, location="eastus",
             "anywhere."
         ), problems
 
+    # A pre-flight size check belongs here and is not here, deliberately.
+    #
+    # `available_sizes` is the only thing that knows whether *this
+    # subscription* will start a size, and asking it before building anything
+    # would turn the leak below into a clean refusal. It was tried and taken
+    # out again: `resource_skus.list` takes minutes even filtered to one
+    # location - measured against this subscription, not guessed - so every
+    # machine create would wait on it, and trading a leak for a three-minute
+    # hang is not a trade.
+    #
+    # What is left is the leak, and it is real: a create refused by Azure for
+    # a size restriction has already built a network, a security group and a
+    # card, and leaves them. `problems` carries them, and the routes now pass
+    # that list on rather than discarding it, so the caller is at least told.
+    # Closing it properly needs either a cheap way to ask the question or a
+    # decision to roll back scaffolding this call created, and the second one
+    # argues with "Nothing rolls back" in CLAUDE.md. It is a group decision
+    # rather than a quiet one.
+
     # The resource group is checked before a second client is built, because
     # it is the cheapest thing that can stop this and the one most likely to.
     # Building the network client first meant a caller who named a group they
