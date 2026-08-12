@@ -64,6 +64,77 @@ def test_every_resource_says_whether_it_can_be_changed(client):
         assert "read_only" in entry
 
 
+def test_every_resource_says_which_cloud_it_is_in(client):
+    """The page shows one cloud at a time and has to be told which is which.
+
+    The alternative it would otherwise fall back on is splitting the list on
+    the "azure-" prefix in JavaScript, which is this registry's own knowledge
+    written down a second time somewhere no test can reach it.
+    """
+    body = client.get("/resources").json()
+    declared = {p["key"] for p in body["providers"]}
+
+    for entry in body["resources"]:
+        assert entry["provider"] in declared, entry["key"]
+
+
+def test_the_azure_types_are_the_ones_in_the_azure_provider(client):
+    """Guards the field itself. A type defaulting to aws by accident would put
+    an Azure storage account on the AWS page, where the region control means
+    something it does not mean."""
+    entries = client.get("/resources").json()["resources"]
+    azure = {r["key"] for r in entries if r["provider"] == "azure"}
+    assert azure == {"azure-nsg", "azure-storage", "azure-keyvault",
+                     "azure-vnet", "azure-vm"}
+
+
+def test_each_provider_says_what_it_calls_the_place_things_go(client):
+    """An AWS region and an Azure location are not the same idea.
+
+    A region is a property of the connection: the client is built for one and
+    every call goes there. A location is a property of the resource, which is
+    why az/*.get_client documents that it accepts and ignores one. place_field
+    is how the page knows a location has to travel in the spec, and a null
+    here is what stops an AWS spec carrying a second copy of its own region.
+    """
+    providers = {p["key"]: p for p in client.get("/resources").json()["providers"]}
+
+    assert providers["aws"]["place_label"] == "Region"
+    assert providers["aws"]["place_field"] is None
+
+    assert providers["azure"]["place_label"] == "Location"
+    assert providers["azure"]["place_field"] == "location"
+
+
+def test_every_provider_offers_its_default_place_among_its_choices(client):
+    """Otherwise the control opens on a value it cannot show, and the first
+    thing anyone does with it silently moves their resources somewhere else."""
+    for provider in client.get("/resources").json()["providers"]:
+        offered = {place["value"] for place in provider["places"]}
+        assert provider["default_place"] in offered, provider["key"]
+
+
+def test_each_provider_warns_about_the_account_it_actually_touches(client):
+    """The banner used to be one sentence in index.html promising a real AWS
+    account, which on the Azure half was false and reassuring at once - the
+    worst combination a warning can have."""
+    providers = {p["key"]: p for p in client.get("/resources").json()["providers"]}
+
+    assert "AWS" in providers["aws"]["caution"]
+    assert "Azure" in providers["azure"]["caution"]
+    assert "AWS" not in providers["azure"]["caution"]
+
+
+def test_the_bastion_belongs_to_aws_and_azure_claims_no_blueprint(client):
+    """The page hides the panel rather than offering an architecture built
+    from VPCs, subnets and EC2 instances above a subscription that has none of
+    them. Which cloud has one is answered here, not by reading a key prefix."""
+    providers = {p["key"]: p for p in client.get("/resources").json()["providers"]}
+
+    assert providers["aws"]["blueprints"] == ["bastion"]
+    assert providers["azure"]["blueprints"] == []
+
+
 def test_the_provisioned_types_are_all_writable(client):
     """Guards the default. A resource silently becoming read-only would
     remove its create button with no other symptom."""

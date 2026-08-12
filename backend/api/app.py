@@ -309,14 +309,28 @@ def list_resource_types():
     not the same question as whether a resource can be changed. The page used
     to assume it was, which left the role list showing AWS's own service roles
     with no way to hide them.
+
+    providers travels with them for the same reason both of those do: the page
+    shows one cloud at a time, and the alternative was splitting the list on
+    the "azure-" prefix in JavaScript. That would be this file's own knowledge
+    written down a second time somewhere it cannot be tested, which is the
+    argument the options field has made since it was written.
     """
     return {
         "resources": [
             {"key": r.key, "label": r.label, "id_label": r.id_label,
              "read_only": r.read_only,
-             "only_ours_label": r.only_ours_label}
+             "only_ours_label": r.only_ours_label,
+             "provider": r.provider}
             for r in registry.REGISTRY.values()
-        ]
+        ],
+        "providers": [
+            {"key": p.key, "label": p.label, "place_label": p.place_label,
+             "place_field": p.place_field, "places": p.places,
+             "default_place": p.default_place, "caution": p.caution,
+             "blueprints": list(p.blueprints)}
+            for p in registry.PROVIDERS
+        ],
     }
 
 
