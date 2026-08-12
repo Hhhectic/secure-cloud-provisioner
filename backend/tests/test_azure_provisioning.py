@@ -151,6 +151,27 @@ def _nsg(rules, **overrides):
     ("resource-group", "scp-demo.", False),       # trailing period
     ("container", "my-container", True),
     ("container", "my--container", False),        # doubled hyphen
+
+    # Both of these were wrong, and both were measured against a real
+    # subscription rather than read off a document.
+    #
+    # A vault name may not carry doubled hyphens either, and only the
+    # container half of that rule was written down. Azure answers
+    # check_name_availability for 'scp-edge--probe' with available=False,
+    # reason=Invalid - so the refusal still arrived, just from Azure, after a
+    # round trip, in the same words it uses for a name somebody else already
+    # owns.
+    ("azure-keyvault", "scp--demo", False),
+
+    # And a one-character security group name is legal. The pattern needed a
+    # first character and a last one, so it refused every one-character name
+    # while its own message promised "1 to 80 characters" - an error naming
+    # the rule the name had just satisfied. Verified by creating a group
+    # called "a" against a real subscription, and deleting it.
+    ("azure-nsg", "a", True),
+    ("azure-nsg", "ab", True),
+    ("azure-nsg", "a" * 80, True),
+    ("azure-nsg", "a" * 81, False),
 ])
 def test_a_name_azure_would_refuse_is_refused_locally(kind, name, ok):
     """Locally decidable, so decided locally. Azure answers a malformed
