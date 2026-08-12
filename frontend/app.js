@@ -12,25 +12,43 @@
 
 const API = "..";
 
-const state = { types: [], type: null, region: "us-east-1", options: {},
-                createInputs: null };
+/* The page shows one cloud at a time, and knows the name of neither.
 
-// Regions this tool is plausibly pointed at. Not fetched: DescribeRegions is
-// an extra call and an account's enabled regions rarely surprise anyone.
-const REGIONS = [
-  "us-east-1", "us-east-2", "us-west-1", "us-west-2",
-  "eu-west-1", "eu-west-2", "eu-central-1",
-  "ap-southeast-1", "ap-southeast-2", "ap-northeast-1", "ap-south-1",
-  "ca-central-1", "sa-east-1",
-];
+   providers, and which type belongs to which, are served by /resources. The
+   obvious alternative was splitting the list on the "azure-" prefix here,
+   which would be api/registry.py's own knowledge written down a second time
+   in a file that cannot be tested against it. Everything below asks the
+   current provider what it is called, where it puts things and what to call
+   that place; a third cloud appears as a third position with no change here.
+
+   places[provider] rather than one region, because switching clouds and
+   switching back should not silently move somebody from eu-west-2 to
+   us-east-1. */
+const state = { types: [], providers: [], provider: null, places: {},
+                type: null, options: {}, createInputs: null };
 
 const $ = (id) => document.getElementById(id);
+
+function currentProvider() {
+  return state.providers.find((p) => p.key === state.provider);
+}
+
+/* Where the current cloud is pointed.
+
+   AWS puts this on the connection and Azure puts it on the resource, which is
+   the whole reason place_field exists - see the Provider docstring. It still
+   rides on the query string for both, because every route takes a region
+   parameter and az/*.get_client documents that it accepts and ignores one. */
+function currentPlace() {
+  const provider = currentProvider();
+  return state.places[state.provider] || (provider && provider.default_place) || "";
+}
 
 // ---------------------------------------------------------------- plumbing
 
 async function api(path, options = {}) {
   const sep = path.includes("?") ? "&" : "?";
-  const res = await fetch(`${API}${path}${sep}region=${encodeURIComponent(state.region)}`, {
+  const res = await fetch(`${API}${path}${sep}region=${encodeURIComponent(currentPlace())}`, {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
@@ -129,16 +147,100 @@ async function loadTypes() {
   const body = await api("/resources");
   state.types = body.resources;
 
+  // A server that has not been taught about providers still has resource
+  // types, and every one of them is AWS by the same default the registry
+  // applies. Falling back keeps this page working against one.
+  state.providers = body.providers && body.providers.length
+    ? body.providers
+    : [{ key: "aws", label: "AWS", place_label: "Region", place_field: null,
+         places: [], default_place: "us-east-1", caution: "", blueprints: [] }];
+
+  buildCloudSwitch();
+  selectProvider(state.providers[0].key);
+}
+
+/* One position per registered provider.
+
+   Rendered as a radiogroup rather than as tabs because it is not a third row
+   of the same thing: the tabs below choose what you are looking at, this
+   chooses which account it lives in. Screen readers get told that difference;
+   sighted users get it from the switch being the only sliding control here. */
+function buildCloudSwitch() {
+  const box = $("cloud");
+  box.replaceChildren();
+
+  for (const p of state.providers) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = p.label;
+    b.dataset.provider = p.key;
+    b.setAttribute("role", "radio");
+    b.setAttribute("aria-checked", "false");
+    b.onclick = () => selectProvider(p.key);
+    box.append(b);
+  }
+
+  // The knob slides across as many positions as there are, so this does not
+  // quietly assume two.
+  box.style.setProperty("--positions", state.providers.length);
+}
+
+function selectProvider(key) {
+  state.provider = key;
+  const provider = currentProvider();
+
+  const box = $("cloud");
+  let index = 0;
+  for (const b of box.children) {
+    const active = b.dataset.provider === key;
+    b.classList.toggle("active", active);
+    b.setAttribute("aria-checked", String(active));
+    if (active) index = [...box.children].indexOf(b);
+  }
+  box.style.setProperty("--position", index);
+
+  // What the two clouds call the same idea. An AWS region is a property of
+  // the connection and an Azure location is a property of the resource, so
+  // the word changes and so does where the value ends up.
+  $("place-label").textContent = provider.place_label;
+  const places = $("place");
+  places.replaceChildren();
+  for (const p of provider.places) places.append(new Option(p.label, p.value));
+  places.value = currentPlace();
+  state.places[key] = places.value;
+
+  // "a real AWS account" is false and reassuring on the Azure half, which is
+  // the worst thing a warning can be.
+  $("caution").textContent = provider.caution;
+
+  // The bastion is built from VPCs, subnets and EC2 instances. Which cloud
+  // has a blueprint is the server's answer, not a prefix read off a key.
+  const hasBlueprint = (provider.blueprints || []).length > 0;
+  $("blueprint").classList.toggle("hidden", !hasBlueprint);
+  if (hasBlueprint) buildBlueprintPanel();
+
+  buildTypeTabs();
+}
+
+function typesHere() {
+  return state.types.filter((t) => t.provider === state.provider);
+}
+
+function buildTypeTabs() {
   const nav = $("types");
   nav.replaceChildren();
-  for (const t of state.types) {
+
+  for (const t of typesHere()) {
     const b = document.createElement("button");
-    b.textContent = t.read_only ? `${t.label} (audit only)` : t.label;
+    b.textContent = t.label;
+    if (t.read_only) b.append(text("small", "audit only", "tag"));
     b.onclick = () => selectType(t.key);
     b.dataset.key = t.key;
     nav.append(b);
   }
-  if (state.types.length) selectType(state.types[0].key);
+
+  const first = typesHere()[0];
+  if (first) selectType(first.key);
 }
 
 function currentType() {
@@ -446,13 +548,11 @@ const FIELDS = {
   "azure-storage": [
     ["name", "text", "3-24 lowercase letters and numbers, globally unique"],
     ["resource_group", "text", "Azure needs one; it is created if it is new"],
-    ["location", "text", "eastus, westeurope, uksouth…"],
     ["secure_by_default", "checkbox", true],
   ],
   "azure-keyvault": [
     ["name", "text", "3-24 letters, numbers and hyphens, starting with a letter"],
     ["resource_group", "text", "Azure needs one; it is created if it is new"],
-    ["location", "text", "eastus, westeurope, uksouth…"],
     ["secure_by_default", "checkbox", true,
      "Secure here turns on purge protection, which can never be turned off " +
      "again. The vault and its name are then held for 90 days after any " +
@@ -462,7 +562,6 @@ const FIELDS = {
   "azure-nsg": [
     ["name", "text", "a name for this firewall"],
     ["resource_group", "text", "Azure needs one; it is created if it is new"],
-    ["location", "text", "eastus, westeurope, uksouth…"],
     // No rules editor here yet. The AWS "rules" widget produces AWS-shaped
     // rules - protocol, from_port, to_port, source - and an Azure rule is a
     // different shape with a priority that decides which of several
@@ -476,12 +575,10 @@ const FIELDS = {
   "azure-vnet": [
     ["name", "text", "a name for this network"],
     ["resource_group", "text", "Azure needs one; it is created if it is new"],
-    ["location", "text", "eastus, westeurope, uksouth…"],
   ],
   "azure-vm": [
     ["name", "text", "a name for this machine"],
     ["resource_group", "text", "Azure needs one; it is created if it is new"],
-    ["location", "text", "eastus, westeurope, uksouth…"],
     ["vm_size", "menu", "size — the tool refuses anything larger"],
     ["public_key", "textarea", "ssh-ed25519 AAAA… — the PUBLIC half only",
      "The same bargain the AWS key pair form makes. A password would log in, " +
@@ -761,8 +858,26 @@ function labelled(caption, ...controls) {
   return wrap;
 }
 
+/* The form's fields, plus where this cloud puts things.
+
+   place_field is how a location reaches an Azure spec. It used to be a text
+   box repeated in all five Azure forms, captioned "eastus, westeurope,
+   uksouth…", which asked the person to already know the answer and asked it
+   again on every resource - and sat underneath a header control that said
+   Region and meant nothing here. One control now says where, and the spec
+   gets it from the same place the listing does, so the two cannot disagree.
+
+   AWS sets place_field to null: its region is a property of the connection
+   and is already on the query string. Writing it into the spec as well would
+   put a second copy in front of routes that do not read one. */
 function collectSpec(inputs) {
   const spec = {};
+
+  const provider = currentProvider();
+  if (provider && provider.place_field) {
+    spec[provider.place_field] = currentPlace();
+  }
+
   for (const [name, { kind, el }] of Object.entries(inputs)) {
     if (kind === "checkbox") { spec[name] = el.checked; continue; }
 
@@ -1188,7 +1303,7 @@ function buildBlueprintPanel() {
         method: "POST",
         body: JSON.stringify({
           name: chosen,
-          region: state.region,
+          region: currentPlace(),
           with_instances: withInstances.checked,
           public_keys: {
             "bastion-key": pairs["bastion-key"].publicKey,
@@ -1364,10 +1479,6 @@ async function removeBlueprintKeys(keys, out) {
 
 // -------------------------------------------------------------------- boot
 
-const regionSelect = $("region");
-for (const r of REGIONS) regionSelect.append(new Option(r, r));
-regionSelect.value = state.region;
-
 // Attached once to the container rather than to each field, so it catches rule
 // rows added later and cannot accumulate a second listener every time the form
 // is rebuilt. Which fields exist is read from state at the time it fires.
@@ -1380,14 +1491,17 @@ $("refresh").onclick = loadList;
 $("only-ours").onchange = loadList;
 $("with-scan").onchange = loadList;
 
-// Changing region changes what every menu in the create form can offer, so
-// the form is rebuilt rather than left showing another region's networks.
-regionSelect.onchange = (e) => {
-  state.region = e.target.value;
+// Changing where changes what every menu in the create form can offer, so the
+// form is rebuilt rather than left showing another region's networks. It is
+// remembered per cloud: switching to Azure and back should not quietly move
+// somebody from eu-west-2 to us-east-1.
+$("place").onchange = (e) => {
+  state.places[state.provider] = e.target.value;
   buildCreateForm();
   loadList();
 };
 
 checkHealth();
-buildBlueprintPanel();
+// The panels are built by selectProvider once /resources has said which cloud
+// is showing and whether it has a blueprint at all.
 loadTypes().catch((e) => toast(e.message, true));

@@ -9,19 +9,25 @@
 <body>
 
 <header>
-  <h1>Secure Cloud Provisioner</h1>
   <div class="bar">
-    <label>Region
-      <select id="region"></select>
-    </label>
-    <span id="health" class="pill">checking…</span>
+    <h1>Secure Cloud Provisioner</h1>
+
+    <!-- The cloud switch. Two positions here because two providers are
+         registered, not because there are two clouds in the world: app.js
+         builds this from whatever /resources declares. -->
+    <div id="cloud" class="switch" role="radiogroup" aria-label="Cloud"></div>
+
+    <span class="bar-end">
+      <label class="labelled">
+        <small id="place-label">Region</small>
+        <select id="place"></select>
+      </label>
+      <span id="health" class="pill">checking…</span>
+    </span>
   </div>
 </header>
 
-<p class="warn">
-  This talks to a real AWS account. Creating and deleting here does the same
-  thing it does from the command line.
-</p>
+<p class="warn" id="caution"></p>
 
 <nav id="types"></nav>
 

@@ -36,22 +36,50 @@ const check = (condition, message) => {
 const STUB_TYPES = [
   { key: "security-group", label: "Security group",
     id_label: "Group ID", read_only: false,
-    only_ours_label: "only ones this tool made" },
+    only_ours_label: "only ones this tool made", provider: "aws" },
   // Audited and still filterable, which is the pair that broke the old rule:
   // the page used to disable the box for anything read_only.
   { key: "snapshot", label: "Disk backup",
     id_label: "Snapshot ID", read_only: true,
-    only_ours_label: "only ones this tool made" },
+    only_ours_label: "only ones this tool made", provider: "aws" },
   // Audited with nothing to narrow by.
   { key: "iam", label: "Account access", id_label: "Account ID",
-    read_only: true, only_ours_label: null },
+    read_only: true, only_ours_label: null, provider: "aws" },
   { key: "alarm", label: "Alarm", id_label: "Alarm name",
-    read_only: false, only_ours_label: "only ones this tool made" },
+    read_only: false, only_ours_label: "only ones this tool made",
+    provider: "aws" },
   // The second cloud, which the page has never been asked about. It reaches
   // these through the registry like anything else, and that is the claim
   // worth testing: nothing in app.js knows the word Azure.
   { key: "azure-storage", label: "Azure storage account",
-    id_label: "Account name", read_only: true, only_ours_label: null },
+    id_label: "Account name", read_only: true, only_ours_label: null,
+    provider: "azure" },
+];
+
+const AWS_TYPES = STUB_TYPES.filter((t) => t.provider === "aws");
+const AZURE_TYPES = STUB_TYPES.filter((t) => t.provider === "azure");
+
+/* The two clouds as /resources describes them.
+
+   Deliberately not the real lists. What is being tested is that the page
+   renders whatever it is handed - the labels, the word for where things go,
+   and which field a location travels in - rather than that it agrees with
+   api/registry.py about Azure. A stub repeating the real values could not
+   tell a page that reads them from one that has them written down. */
+const STUB_PROVIDERS = [
+  { key: "aws", label: "AWS", place_label: "Region", place_field: null,
+    places: [{ value: "us-east-1", label: "us-east-1 — N. Virginia" },
+             { value: "eu-west-2", label: "eu-west-2 — London" }],
+    default_place: "us-east-1",
+    caution: "This talks to a real AWS account.",
+    blueprints: ["bastion"] },
+  { key: "azure", label: "Azure", place_label: "Location",
+    place_field: "location",
+    places: [{ value: "eastus", label: "eastus — Virginia" },
+             { value: "uksouth", label: "uksouth — London" }],
+    default_place: "eastus",
+    caution: "This talks to a real Azure subscription.",
+    blueprints: [] },
 ];
 
 
@@ -60,7 +88,8 @@ function fakeApi(overrides = {}) {
 
   const routes = {
     "/health": () => ({ status: "ok" }),
-    "/resources": () => ({ resources: STUB_TYPES }),
+    "/resources": () => ({ resources: STUB_TYPES,
+                           providers: STUB_PROVIDERS }),
     "/resources/security-group/options": () => ({
       options: {
         vpc_id: [{ value: "vpc-1", label: "demo" }],
@@ -179,6 +208,33 @@ async function boot(overrides) {
 
 const $ = (doc, id) => doc.getElementById(id);
 
+/* Fills the named text fields, presses Create, and returns the request body.
+
+   Fields are found by their caption because that is what a person sees; a
+   test driving the form by index would keep passing after the captions
+   stopped matching what the boxes do. */
+async function submitCreate(window, doc, sent, values) {
+  const body = $(doc, "create-body");
+  const rows = [...body.querySelectorAll(".field")];
+
+  for (const [name, value] of Object.entries(values)) {
+    const row = rows.find((r) => r.querySelector("label")?.textContent === name);
+    const input = row && row.querySelector("input");
+    if (input) input.value = value;
+  }
+
+  const before = sent.length;
+  const create = [...body.querySelectorAll("button")]
+    .find((b) => b.textContent === "Create");
+  if (!create) return null;
+
+  create.click();
+  await new Promise((r) => setTimeout(r, 60));
+
+  const post = sent.slice(before).find((r) => r.options.method === "POST");
+  return post ? JSON.parse(post.options.body) : null;
+}
+
 // --------------------------------------------------------------- the page
 
 console.log("\nBooting");
@@ -189,9 +245,10 @@ const { window, document, sent } = await boot();
 check($(document, "health").textContent === "API up",
       "the health pill reflects a reachable API");
 // Counted from the stub rather than written as a number, so adding a type to
-// the stub cannot silently make this assertion about something else.
-check($(document, "types").children.length === STUB_TYPES.length,
-      "a tab appears for every resource type the API advertises");
+// the stub cannot silently make this assertion about something else. One
+// cloud's worth, because the page shows one cloud at a time.
+check($(document, "types").children.length === AWS_TYPES.length,
+      "a tab appears for every resource type in the cloud being shown");
 check([...$(document, "types").children]
         .some((b) => b.textContent.includes("audit only")),
       "an audited type is labelled as one");
@@ -400,8 +457,9 @@ const { document: doc4, sent: sent4 } = await boot({
   "/resources": () => ({
     resources: [
       { key: "alarm", label: "Alarm", id_label: "Alarm name",
-        read_only: false },
+        read_only: false, provider: "aws" },
     ],
+    providers: STUB_PROVIDERS,
   }),
   "/resources/alarm": (options) =>
     options.method === "POST"
@@ -542,6 +600,54 @@ check(detail.textContent.includes("1 acknowledged"),
 console.log("\nAzure, through the same routes");
 console.log("------------------------------");
 
+/* The switch is built from what /resources declares, so these assertions are
+   about a page that counts providers rather than one that knows there are
+   two. The stub's labels and place names are deliberately not the real ones
+   for the same reason: a page reading them and a page with them written down
+   would be indistinguishable if the stub agreed with api/registry.py. */
+const cloudSwitch = $(document, "cloud");
+
+check(cloudSwitch.children.length === STUB_PROVIDERS.length,
+      "the switch has one position per provider the API declares");
+check([...cloudSwitch.children].map((b) => b.textContent).join() ===
+        STUB_PROVIDERS.map((p) => p.label).join(),
+      "labelled with the names the server gave, in its order");
+check(![...$(document, "types").children]
+        .some((b) => b.textContent.includes("Azure storage account")),
+      "a type belonging to the other cloud is not on this one's page");
+
+const azurePosition = [...cloudSwitch.children]
+  .find((b) => b.dataset.provider === "azure");
+
+await azurePosition.click();
+await new Promise((r) => setTimeout(r, 60));
+
+check(azurePosition.getAttribute("aria-checked") === "true",
+      "moving the switch marks the position it moved to, for a screen reader too");
+check($(document, "types").children.length === AZURE_TYPES.length,
+      "and the tabs become that cloud's types, not both clouds' at once");
+
+/* An AWS region is a property of the connection and an Azure location is a
+   property of the resource. The page shows one control and changes the word,
+   which is the only honest way to present two things that are not the same. */
+check($(document, "place-label").textContent === "Location",
+      "the word for where things go follows the cloud");
+check([...$(document, "place").options].map((o) => o.value).join() ===
+        STUB_PROVIDERS[1].places.map((p) => p.value).join(),
+      "and the places on offer are that cloud's, not the other one's");
+check($(document, "place").value === "eastus",
+      "starting at the default the server named");
+
+check($(document, "caution").textContent.includes("Azure subscription"),
+      "the warning at the top names the account actually being touched");
+check(!$(document, "caution").textContent.includes("AWS"),
+      "rather than promising AWS on a page that cannot reach it");
+
+/* The bastion is VPCs, subnets and EC2 instances. Which cloud has a blueprint
+   is the server's answer here as well - the page has no list of its own. */
+check($(document, "blueprint").classList.contains("hidden"),
+      "a blueprint the current cloud does not have is not offered");
+
 const azTab = [...$(document, "types").children]
   .find((b) => b.textContent.includes("Azure storage account"));
 
@@ -637,6 +743,101 @@ check(livePanel.children.length === 0,
       "emptying the name clears the panel rather than leaving a stale answer");
 check(checksSent() === 1,
       "and asks nothing, a half-typed form being mid-thought rather than wrong");
+
+// ------------------------------------------------ where a resource goes
+
+/* The one control that says where, and the two different things it means.
+
+   This used to be a text box captioned "eastus, westeurope, uksouth…"
+   repeated in all five Azure forms, sitting underneath a header control that
+   said Region and was ignored by every Azure route it reached. The value now
+   comes from one place, and place_field decides where it lands: in the spec
+   for a cloud that puts location on the resource, nowhere for a cloud that
+   puts it on the connection.
+
+   Worth testing rather than reading, because the failure is silent. A spec
+   with no location is refused by Azure with a message about the resource
+   group, and a spec carrying a stale one builds the right thing in the wrong
+   country. */
+
+console.log("\nWhere a created resource goes");
+console.log("-----------------------------");
+
+const writableAzure = {
+  key: "azure-storage", label: "Azure storage account",
+  id_label: "Account name", read_only: false,
+  only_ours_label: "only ones this tool made", provider: "azure",
+};
+
+const { window: w5, document: doc5, sent: sent5 } = await boot({
+  "/resources": () => ({
+    resources: [
+      { key: "security-group", label: "Security group", id_label: "Group ID",
+        read_only: false, only_ours_label: "only ones this tool made",
+        provider: "aws" },
+      writableAzure,
+    ],
+    providers: STUB_PROVIDERS,
+  }),
+  "/resources/azure-storage/options": () => ({ options: {} }),
+  "/resources/azure-storage": (options) =>
+    options.method === "POST"
+      ? { resource_type: "azure-storage", resource_id: "demostore",
+          problems: [], settings: {}, warnings: [],
+          counts: { critical: 0, warning: 0, info: 0 } }
+      : { resource_type: "azure-storage", resources: [] },
+});
+
+// AWS first: its region rides on the query string, because that is what the
+// client is built from. A location in the spec as well would be a second copy
+// in front of routes that do not read one.
+const awsPost = await submitCreate(w5, doc5, sent5, { name: "demo-group" });
+check(awsPost && awsPost.location === undefined,
+      "an AWS spec carries no location, its region being on the connection");
+
+const azurePos = [...$(doc5, "cloud").children]
+  .find((b) => b.dataset.provider === "azure");
+await azurePos.click();
+await new Promise((r) => setTimeout(r, 60));
+
+const azPost = await submitCreate(w5, doc5, sent5, { name: "demostore",
+                                                    "resource group": "scp-demo" });
+
+if (check(Boolean(azPost), "the Azure form submits")) {
+  check(azPost.location === "eastus",
+        "and its spec carries the location the header is showing");
+  check(azPost.name === "demostore" && azPost.resource_group === "scp-demo",
+        "alongside what was actually typed");
+}
+
+// Changing where, and having it stick to the resource rather than to nothing.
+const placeSelect = $(doc5, "place");
+placeSelect.value = "uksouth";
+placeSelect.dispatchEvent(new w5.Event("change"));
+await new Promise((r) => setTimeout(r, 60));
+
+const movedPost = await submitCreate(w5, doc5, sent5, { name: "demostore",
+                                                        "resource group": "scp-demo" });
+check(movedPost && movedPost.location === "uksouth",
+      "choosing another location sends that one, not the default");
+
+/* Each cloud remembers where it was pointed. Switching to Azure to look at
+   something and back should not quietly move an AWS resource from London to
+   Virginia - which is what a single shared region would do, silently, at the
+   moment of creating it. */
+const awsPos = [...$(doc5, "cloud").children]
+  .find((b) => b.dataset.provider === "aws");
+await awsPos.click();
+await new Promise((r) => setTimeout(r, 60));
+
+check($(doc5, "place").value === "us-east-1",
+      "the other cloud kept its own place while that one moved");
+
+await azurePos.click();
+await new Promise((r) => setTimeout(r, 60));
+
+check($(doc5, "place").value === "uksouth",
+      "and coming back finds the location that was chosen, not the default");
 
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");
 process.exit(failures ? 1 : 0);

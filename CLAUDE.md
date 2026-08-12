@@ -656,6 +656,35 @@ would be a remote "stop reporting this" API on a service holding credentials
 with no login, and one cross-site POST from being the thing the middleware in
 `api/app.py` exists to stop.
 
+**The page shows one cloud at a time, and knows the name of neither.** Fourteen
+types in one row of tabs was the merge showing through, and the fix could have
+been four characters: split the list on the `azure-` prefix in JavaScript. That
+would be `api/registry.py`'s own knowledge written down a second time somewhere
+no test can reach it — the argument the `options` field has made since it was
+written. So `ResourceType.provider` says which cloud a type is in, `PROVIDERS`
+says what each cloud is called, where it puts things, what to call that place
+and which blueprints it has, and `/resources` serves both. `frontend/app.js`
+counts positions rather than assuming two; a third cloud is a third entry in
+`PROVIDERS` and no JavaScript change at all.
+
+The switch is told apart by position and fill, not by colour. AWS orange beside
+Azure blue would have been the first colour on the page that means nothing
+about risk, and `style.css` has said since it was written that severity is the
+only thing colour is spent on. That rule is why red reads as red.
+
+**One control says where, and it means two different things.** An AWS region is
+a property of the connection — the client is built for one and every call goes
+there. An Azure location is a property of the resource, which is why
+`az/*.get_client` says outright that it accepts and ignores a region. The
+header control now reads *Region* or *Location* to match, and `place_field`
+decides where the value lands: in the spec for Azure, nowhere for AWS, whose
+region is already on the query string. What it replaced was a free-text box
+repeated in all five Azure forms, captioned `eastus, westeurope, uksouth…`,
+sitting underneath a header dropdown that said Region and was discarded by
+every Azure route it reached. Each cloud remembers its own place, because
+switching to Azure to look at something and back should not silently move an
+AWS resource from London to Virginia at the moment of creating it.
+
 **Fixes are re-derived server-side.** `POST /fix` takes a `rule_id` and nothing
 else. The server re-reads the resource, re-runs the scanner, and finds the
 warning itself. Accepting an action from the caller would make the API a remote
@@ -1065,7 +1094,14 @@ Severity means something — if everything is critical, nothing is.
 
   What remains uncovered is whether any of it *looks* right — layout, the
   modal, whether a button is reachable — and that is still only ever found by
-  a person opening the page.
+  a person opening the page, or by `browse.mjs`, which drives the real page in
+  a real browser against a running API and screenshots every tab. It walks
+  both clouds now: photographing only the tabs on screen at load would have
+  covered the AWS half and reported "no console errors" about an Azure half it
+  never rendered, which is worse than not running, because it reads like
+  coverage. Playwright is a devDependency and its browser is not, so this
+  needs `npx playwright install chromium` and, on a machine without them, the
+  system libraries chromium links against.
 - **Benchmarked against Prowler and CloudGoat.** `docs/benchmark.md` has both
   and is the first thing to read before adding a rule; it records what was
   measured rather than what was assumed.
