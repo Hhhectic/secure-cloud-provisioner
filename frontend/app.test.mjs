@@ -196,6 +196,41 @@ check([...$(document, "types").children]
         .some((b) => b.textContent.includes("audit only")),
       "an audited type is labelled as one");
 
+// ------------------------------------------- not scanned is not clean
+
+/* "scan each" is off by default, so this is what every list shows on first
+ * load. The verdict column printed `worst_level || "clean"`, and worst_level
+ * is null both when nothing was found and when nothing was looked for - so an
+ * unscanned account with two critical findings sat in the table labelled
+ * clean. A tool whose whole purpose is to say what is wrong must not answer
+ * that question before it has asked it. */
+
+console.log("\nA row that was never scanned");
+console.log("----------------------------");
+
+const { document: scanDoc } = await boot({
+  "/resources/security-group": () => ({
+    resource_type: "security-group",
+    resources: [
+      { id: "sg-1", name: "never-scanned", worst_level: null, counts: null },
+      { id: "sg-2", name: "scanned-clean", worst_level: null,
+        counts: { critical: 0, warning: 0, info: 0 } },
+      { id: "sg-3", name: "scanned-bad", worst_level: "critical",
+        counts: { critical: 2, warning: 1, info: 0 } },
+    ],
+  }),
+});
+
+const verdicts = [...scanDoc.querySelectorAll("#list tr.clickable")]
+  .map((tr) => tr.children[2].textContent);
+
+check(verdicts[0] === "not scanned",
+      "a row nobody scanned says so, instead of reporting a verdict");
+check(verdicts[1] === "clean",
+      "a row that was scanned and came back empty is the one that says clean");
+check(verdicts[2] === "critical",
+      "and a row with findings says the worst of them");
+
 // ------------------------------------------------------------ the menus
 
 console.log("\nThe create form");
