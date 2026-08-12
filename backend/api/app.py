@@ -562,7 +562,12 @@ def fix(resource_type: str, resource_id: str, request: models.FixRequest,
 
 def _deletion_plan(known, client, resource_type, resource_id):
     """Builds the cascade preview, or says plainly that there is not one."""
-    if known.plan_deletion is None:
+    plan = known.plan_deletion(client, resource_id) if known.plan_deletion else None
+
+    # None covers both "this type has no preview" and "the planner could not
+    # read the resource". Neither may fall through to an inventory, because an
+    # empty one in front of a delete button reads as "nothing else would go".
+    if plan is None:
         return models.DeletionPlanResponse(
             resource_type=resource_type,
             resource_id=resource_id,
@@ -579,8 +584,47 @@ def _deletion_plan(known, client, resource_type, resource_id):
             ),
         )
 
-    items = [models.DeletionPlanItem(**item)
-             for item in known.plan_deletion(client, resource_id)]
+    # Two shapes, both meant. AWS returns a flat list of things a delete would
+    # destroy and lets this function write the sentence from a count. The Azure
+    # types return {"items", "destroys", "message"} instead, because for them a
+    # count of destroyed things is the wrong summary and would be wrong in the
+    # dangerous direction: deleting a security group destroys nothing at all
+    # and un-protects everything behind it, and deleting a machine matters
+    # mostly for the four resources it leaves behind, one of which keeps
+    # charging. "Deleting this would destroy 2 things" is false about both.
+    #
+    # Before this, the dict shape reached `DeletionPlanItem(**item)` through a
+    # loop that iterates a dict as its keys, so azure-nsg, azure-vnet and
+    # azure-vm answered 500 on their deletion plan *and* on the delete itself.
+    if isinstance(plan, dict):
+        items = [
+            models.DeletionPlanItem(
+                kind=item.get("kind") or item.get("type") or "resource",
+                id=str(item.get("id") or ""),
+                label=item.get("label") or str(item.get("id") or ""),
+                # Absent means unknown rather than foreign, and these lists are
+                # not always inventories of things being destroyed - a group's
+                # is what it protects. Claiming a stranger's subnet is ours
+                # would be the safer-looking of the two wrong answers.
+                created_by_this_tool=item.get("created_by_this_tool", True),
+            )
+            for item in plan.get("items") or []
+        ]
+        foreign = [item for item in items if not item.created_by_this_tool]
+        said = plan.get("message") or ""
+        return models.DeletionPlanResponse(
+            resource_type=resource_type,
+            resource_id=resource_id,
+            preview_available=True,
+            items=items,
+            destroys=plan.get("destroys") or {},
+            foreign_count=len(foreign),
+            confirm_with=resource_id,
+            message=(f"{said} " if said else "")
+                    + f"To go ahead, repeat the delete with confirm={resource_id}.",
+        )
+
+    items = [models.DeletionPlanItem(**item) for item in plan]
 
     destroys = {}
     for item in items:

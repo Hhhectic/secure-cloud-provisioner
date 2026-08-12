@@ -1044,3 +1044,93 @@ def test_an_azure_row_is_keyed_by_the_identifier_the_routes_accept(
     assert rows == [{"id": "thing-one", "name": "thing-one"}], (
         f"{key} keyed its row by {rows[0]['id']!r}, which no route accepts"
     )
+
+
+# --------------------------------------------- a deletion plan in either shape
+
+
+class _Planner:
+    """The two attributes _deletion_plan reads off a ResourceType."""
+
+    label = "Azure network security group"
+
+    def __init__(self, plan):
+        self._plan = plan
+
+    def plan_deletion(self, client, resource_id):
+        return self._plan
+
+
+AZURE_PLANNERS = [
+    ("az.nsg", "read_nsg_for_scanning",
+     {"attached_to": ["subnet-a", "nic-b"]}),
+    ("az.vnet", "read_vnet_for_scanning",
+     {"subnets": [{"name": "default"}]}),
+    ("az.vm", "read_vm_for_scanning",
+     {"vm_name": "demo", "public_ip": "203.0.113.9"}),
+]
+
+
+@pytest.mark.parametrize("module,reader,settings", AZURE_PLANNERS)
+def test_an_azure_deletion_plan_reaches_the_route_without_a_500(
+        module, reader, settings, monkeypatch):
+    """The producers and the consumer disagreed about the shape, in production.
+
+    AWS returns a flat list of things a delete destroys. All three Azure
+    planners return {"items", "destroys", "message"}, and the route did
+    DeletionPlanItem(**item) over it - which iterates a dict as its keys and
+    raises TypeError on the first one. GET /deletion-plan and DELETE both
+    answered 500 for azure-nsg, azure-vnet and azure-vm, so those three could
+    not be deleted through the API at all. The offline suite never caught it
+    because it exercised the planners and the route separately; this drives the
+    real planner into the real route, which is the only place they meet.
+    """
+    import importlib
+
+    from api.app import _deletion_plan
+
+    mod = importlib.import_module(module)
+    monkeypatch.setattr(mod, reader, lambda *a, **k: settings)
+
+    known = _Planner(mod.plan_deletion(object(), "demo"))
+    got = _deletion_plan(known, object(), "azure-thing", "demo")
+
+    assert got.preview_available is True
+    assert got.confirm_with == "demo"
+    # Its own sentence survives. The generic one counts items and says they
+    # would be destroyed, which is false of a security group - deleting one
+    # destroys nothing and merely stops filtering whatever was behind it.
+    assert "To go ahead, repeat the delete with confirm=demo." in got.message
+    assert len(got.message) > len("To go ahead, repeat the delete with "
+                                  "confirm=demo.")
+    for item in got.items:
+        assert item.kind and item.id and item.label
+
+
+def test_the_aws_shape_still_writes_its_own_sentence_from_a_count():
+    """The list form is the older contract and must not have shifted."""
+    from api.app import _deletion_plan
+
+    known = _Planner([
+        {"kind": "server", "id": "i-1", "label": "web",
+         "created_by_this_tool": False},
+        {"kind": "subnet", "id": "subnet-1", "label": "public",
+         "created_by_this_tool": True},
+    ])
+    got = _deletion_plan(known, object(), "network", "vpc-1")
+
+    assert got.preview_available is True
+    assert got.destroys == {"server": 1, "subnet": 1}
+    assert got.foreign_count == 1
+    assert "Deleting this would destroy 2 things." in got.message
+    assert "1 running machine would be terminated" in got.message
+
+
+def test_a_planner_that_cannot_read_the_resource_says_there_is_no_preview():
+    """None must not become an empty inventory in front of a delete button."""
+    from api.app import _deletion_plan
+
+    got = _deletion_plan(_Planner(None), object(), "azure-nsg", "gone")
+
+    assert got.preview_available is False
+    assert got.items == []
