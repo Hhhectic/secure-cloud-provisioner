@@ -1255,3 +1255,39 @@ def test_a_password_cannot_be_asked_for_over_http():
 def models_module():
     from api import models
     return models
+
+
+# ------------------------------------------------------- which cloud a type is
+
+
+def test_every_type_declares_which_cloud_it_belongs_to(client):
+    """The page shows one cloud at a time and must not guess from the key.
+
+    Matching on an "azure-" prefix would be the frontend inferring a provider
+    from a naming convention nothing enforces, and it would need editing again
+    for a third cloud - which is the one thing adding a second was meant to
+    prove unnecessary.
+    """
+    entries = {r["key"]: r for r in client.get("/resources").json()["resources"]}
+
+    azure = {"azure-nsg", "azure-storage", "azure-keyvault", "azure-vnet",
+             "azure-vm"}
+    for key, entry in entries.items():
+        assert entry["provider"] in {"aws", "azure"}, key
+        assert entry["provider"] == ("azure" if key in azure else "aws"), key
+
+
+def test_a_short_label_is_offered_for_somewhere_the_cloud_is_already_known(client):
+    """Every Azure label starts with the word Azure, and in a one-cloud column
+    that is a word repeated in every row. The long label stays for the CLI,
+    which lists all fourteen types together and needs it."""
+    entries = {r["key"]: r for r in client.get("/resources").json()["resources"]}
+
+    assert entries["azure-storage"]["label"] == "Azure storage account"
+    assert entries["azure-storage"]["short_label"] == "Storage account"
+
+    # Everything else already was short, and must still answer the question
+    # rather than being absent and making the caller fall back.
+    assert entries["bucket"]["short_label"] == entries["bucket"]["label"]
+    for entry in entries.values():
+        assert entry["short_label"]

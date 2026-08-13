@@ -210,6 +210,28 @@ class ResourceType:
     # The default suits every type that filters by this tool's own tag.
     only_ours_label: Optional[str] = "only ones this tool made"
 
+    # Which cloud this lives in, so a caller can group by it.
+    #
+    # The page needs the split to offer one cloud at a time rather than
+    # fourteen tabs in a row, and the only other way to get it is to match on
+    # the "azure-" key prefix - the page inferring a provider from a naming
+    # convention nothing guarantees. Declared here instead, next to the
+    # adapters that actually talk to that cloud, so a third provider is one
+    # more value rather than another prefix rule in JavaScript.
+    #
+    # Defaulted to aws because eight of the nine AWS types predate the second
+    # cloud and none of them should have to say so.
+    provider: str = "aws"
+
+    # The label again, for somewhere the cloud is already established.
+    #
+    # Every Azure label starts with the word Azure because the CLI lists all
+    # fourteen types together and "Storage account" beside "Storage bucket"
+    # would be a guess. A page showing one cloud at a time has already said
+    # which, so the prefix is a word repeated in every row of a 212px column.
+    # None means the label was already short enough.
+    short_label: Optional[str] = None
+
     # What the resource looks like, as opposed to what is wrong with it.
     #
     # read() returns whatever check() needs, which for two resources is a
@@ -1118,6 +1140,8 @@ def _az_nsg_cleanup(client, options):
 
 AZURE_NSG = ResourceType(
     key="azure-nsg",
+    provider="azure",
+    short_label="Network security group",
     label="Azure network security group",
     id_label="Group name",
     get_client=az_nsg.get_client,
@@ -1188,6 +1212,8 @@ def _az_storage_cleanup(client, options):
 
 AZURE_STORAGE = ResourceType(
     key="azure-storage",
+    provider="azure",
+    short_label="Storage account",
     label="Azure storage account",
     id_label="Account name",
     get_client=az_storage.get_client,
@@ -1253,6 +1279,8 @@ def _az_keyvault_cleanup(client, options):
 
 AZURE_KEYVAULT = ResourceType(
     key="azure-keyvault",
+    provider="azure",
+    short_label="Key vault",
     label="Azure key vault",
     id_label="Vault name",
     get_client=az_keyvault.get_client,
@@ -1314,6 +1342,8 @@ def _az_vnet_cleanup(client, options):
 
 AZURE_VNET = ResourceType(
     key="azure-vnet",
+    provider="azure",
+    short_label="Virtual network",
     label="Azure virtual network",
     id_label="Network name",
     get_client=az_vnet.get_client,
@@ -1428,6 +1458,8 @@ def _az_vm_options(client):
 
 AZURE_VM = ResourceType(
     key="azure-vm",
+    provider="azure",
+    short_label="Virtual machine",
     label="Azure virtual machine",
     id_label="Machine name",
     get_client=az_vm.get_client,
