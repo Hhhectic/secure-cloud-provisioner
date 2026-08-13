@@ -12,8 +12,13 @@
 
 const API = "..";
 
-const state = { types: [], type: null, region: "us-east-1", options: {},
-                createInputs: null };
+const state = { types: [], type: null, cloud: "aws", region: "us-east-1",
+                options: {}, createInputs: null };
+
+// The blueprint's sidebar key. Deliberately not a resource type: it composes
+// six of them and the registry has no entry for it, so nothing must ever ask
+// the server for /resources/blueprint.
+const BLUEPRINT = "blueprint";
 
 // Regions this tool is plausibly pointed at. Not fetched: DescribeRegions is
 // an extra call and an account's enabled regions rarely surprise anyone.
@@ -123,22 +128,152 @@ async function checkHealth() {
   }
 }
 
+/* Which cloud the page is pointed at.
+
+   Whether a cloud is reachable is not a property of the page but of what the
+   server answers, so this only ever reports what the last list call said. An
+   Azure without credentials answers 503 with a sentence naming the four
+   variables, and that sentence is better than anything invented here. */
+function setCloud(cloud) {
+  state.cloud = cloud;
+  document.body.classList.toggle("cloud-azure", cloud === "azure");
+  if (cloud === "aws") {
+    checkHealth();
+  } else {
+    // Left saying "checking…" until the first list call answers, rather than
+    // asserting reachability the page has no evidence for yet.
+    $("health").textContent = "checking…";
+    $("health").className = "pill";
+  }
+  renderScope();
+  renderTypes();
+}
+
+/* What the header pill says about the cloud in front of you.
+
+   For AWS that is /health, which answers for the process. Azure has no
+   equivalent and should not get one: the process being up says nothing about
+   whether a subscription is configured, and the only honest evidence is
+   whether a real read just worked. A 503 there is the specific case worth
+   naming, because it means the credentials are missing rather than the
+   subscription being empty - and those two look identical in a list. */
+function reportCloudReach(ok, error) {
+  if (state.cloud !== "azure") return;
+  const pill = $("health");
+  if (ok) {
+    pill.textContent = "subscription reachable";
+    pill.className = "pill ok";
+  } else if (error && error.status === 503) {
+    pill.textContent = "not configured";
+    pill.className = "pill bad";
+  } else {
+    pill.textContent = "subscription unreachable";
+    pill.className = "pill bad";
+  }
+}
+
+/* Which cloud a type belongs to, defaulted rather than required.
+
+   The API sends this for every type and a test pins that it does. The default
+   is here because the failure without one is silent and total: a type whose
+   provider does not match is skipped, so a server that stopped sending the
+   field would render an empty sidebar and no error - the page would look like
+   an account with nothing in it. */
+function providerOf(t) { return t.provider || "aws"; }
+
+function cloudsPresent() {
+  const seen = [];
+  for (const t of state.types) {
+    const p = providerOf(t);
+    if (!seen.includes(p)) seen.push(p);
+  }
+  return seen;
+}
+
+/* The strip under the header: what "where" means for this cloud.
+
+   An AWS region and an Azure location are not the same idea wearing two
+   names. A region is chosen once and every call inherits it; an Azure
+   resource carries its own location and its resource group, and asking for
+   one up here would be a control that decides nothing. The region selector
+   used to sit above the Azure tabs saying us-east-1 at a subscription that
+   has never heard of it. */
+function renderScope() {
+  const box = $("scope-box");
+  const note = $("scope-note");
+  box.replaceChildren();
+
+  if (state.cloud === "aws") {
+    const select = document.createElement("select");
+    select.id = "region";
+    for (const r of REGIONS) select.append(new Option(r, r));
+    select.value = state.region;
+    // Changing region changes what every menu in the create form can offer,
+    // so the form is rebuilt rather than left showing another region's
+    // networks.
+    select.onchange = () => {
+      state.region = select.value;
+      buildCreateForm();
+      loadList();
+    };
+    box.append(document.createTextNode("Region "), select);
+    note.textContent =
+      "This talks to a real AWS account. Creating and deleting here does " +
+      "the same thing it does from the command line.";
+    return;
+  }
+
+  note.textContent =
+    "This talks to a real Azure subscription. A location belongs to each " +
+    "resource rather than to the connection, so there is no region to " +
+    "choose here — creating asks for a resource group and a location.";
+}
+
 // ------------------------------------------------------------------- types
 
 async function loadTypes() {
   const body = await api("/resources");
   state.types = body.resources;
 
+  const clouds = cloudsPresent();
+  $("cloud-toggle").classList.toggle("hidden", clouds.length < 2);
+  setCloud(clouds.includes(state.cloud) ? state.cloud : (clouds[0] || "aws"));
+}
+
+/* One cloud's types, plus the blueprint where there is one.
+
+   The blueprint is not a resource type and the registry does not know about
+   it, so it is added here as a key nothing on the server will ever be asked
+   for. It used to be a panel rendered under every tab, including the five
+   Azure ones, where it advertised an AWS architecture at a subscription that
+   cannot build it. */
+function renderTypes() {
   const nav = $("types");
   nav.replaceChildren();
+
   for (const t of state.types) {
+    if (providerOf(t) !== state.cloud) continue;
     const b = document.createElement("button");
-    b.textContent = t.read_only ? `${t.label} (audit only)` : t.label;
-    b.onclick = () => selectType(t.key);
     b.dataset.key = t.key;
+    b.append(text("span", t.short_label || t.label));
+    if (t.read_only) b.append(text("span", "audit", "tag"));
+    b.onclick = () => selectType(t.key);
     nav.append(b);
   }
-  if (state.types.length) selectType(state.types[0].key);
+
+  if (state.cloud === "aws") {
+    const b = document.createElement("button");
+    b.dataset.key = BLUEPRINT;
+    b.className = "set-apart";
+    b.append(text("span", "Bastion architecture"), text("span", "six pieces", "tag"));
+    b.onclick = () => selectType(BLUEPRINT);
+    nav.append(b);
+  }
+
+  const first = nav.firstElementChild;
+  const stillThere = [...nav.children].some((b) => b.dataset.key === state.type);
+  if (!stillThere && first) selectType(first.dataset.key);
+  else if (state.type) selectType(state.type);
 }
 
 function currentType() {
@@ -149,6 +284,18 @@ function selectType(key) {
   state.type = key;
   for (const b of $("types").children) {
     b.classList.toggle("active", b.dataset.key === key);
+  }
+
+  // The blueprint is six resources at once rather than one of anything, so it
+  // replaces the three panels instead of appearing under them.
+  const isBlueprint = key === BLUEPRINT;
+  $("blueprint").classList.toggle("hidden", !isBlueprint);
+  for (const id of ["listing", "detail", "create"]) {
+    $(id).classList.toggle("hidden", isBlueprint);
+  }
+  if (isBlueprint) {
+    buildBlueprintPanel();
+    return;
   }
 
   // How this list can be narrowed, and what to call it, come from the server
@@ -164,6 +311,9 @@ function selectType(key) {
   $("only-ours-label").textContent =
     filterLabel || "nothing to narrow this list by";
 
+  const known = currentType();
+  $("audit-badge").classList.toggle("hidden", !known.read_only);
+  $("detail-id").textContent = "";
   $("detail-body").replaceChildren(text("p", "Pick something from the list.", "muted"));
   buildCreateForm();
   loadList();
@@ -173,7 +323,7 @@ function selectType(key) {
 
 async function loadList() {
   const known = currentType();
-  $("listing-title").textContent = known.label;
+  $("listing-title").textContent = known.short_label || known.label;
 
   const list = $("list");
   list.replaceChildren(text("p", "Loading…", "muted"));
@@ -186,7 +336,9 @@ async function loadList() {
     body = await api(
       `/resources/${state.type}?only_ours=${onlyOurs}&with_scan=${withScan}`
     );
+    reportCloudReach(true);
   } catch (e) {
+    reportCloudReach(false, e);
     list.replaceChildren(text("p", e.message, "bad"));
     return;
   }
@@ -246,7 +398,10 @@ function renderCleanup(known) {
   if (known.read_only) return;
 
   const b = document.createElement("button");
-  b.textContent = `Clean up every ${known.label.toLowerCase()} this tool made`;
+  // short_label, because the toggle has already said which cloud this is
+  // and "every azure network security group" repeats it in a sentence.
+  const what = (known.short_label || known.label).toLowerCase();
+  b.textContent = `Clean up every ${what} this tool made`;
   b.className = "danger";
   b.onclick = () => startCleanup(known);
 
@@ -272,7 +427,9 @@ async function showDetail(id) {
   }
 
   body.replaceChildren();
-  body.append(text("h3", `${known.id_label}: ${id}`));
+  // The id moves up into the card's own heading rather than repeating as the
+  // first line of its contents.
+  $("detail-id").textContent = `${known.id_label}: ${id}`;
 
   const counts = data.counts;
   // The acknowledged tally sits beside the severities, never subtracted from
@@ -505,6 +662,11 @@ async function buildCreateForm() {
   const known = currentType();
   const box = $("create-body");
   box.replaceChildren();
+
+  // The panel says which type it would build without being opened, so a
+  // folded one is still legible.
+  $("create-sub").textContent = known.short_label || known.label;
+  $("create-hint").textContent = known.read_only ? "nothing to create" : "";
 
   // Nothing to keep watching once the form is gone, and leaving the previous
   // type's fields here would have the live check reading boxes that are no
@@ -1372,10 +1534,6 @@ async function removeBlueprintKeys(keys, out) {
 
 // -------------------------------------------------------------------- boot
 
-const regionSelect = $("region");
-for (const r of REGIONS) regionSelect.append(new Option(r, r));
-regionSelect.value = state.region;
-
 // Attached once to the container rather than to each field, so it catches rule
 // rows added later and cannot accumulate a second listener every time the form
 // is rebuilt. Which fields exist is read from state at the time it fires.
@@ -1388,14 +1546,18 @@ $("refresh").onclick = loadList;
 $("only-ours").onchange = loadList;
 $("with-scan").onchange = loadList;
 
-// Changing region changes what every menu in the create form can offer, so
-// the form is rebuilt rather than left showing another region's networks.
-regionSelect.onchange = (e) => {
-  state.region = e.target.value;
-  buildCreateForm();
-  loadList();
+$("cloud-toggle").onclick = () =>
+  setCloud(state.cloud === "aws" ? "azure" : "aws");
+
+// The create panel folds. Its state is remembered across type changes,
+// because somebody who closed it did so to see the findings above it and
+// clicking a second resource is not a request to open it again.
+const fold = $("create-fold");
+fold.onclick = () => {
+  const open = fold.getAttribute("aria-expanded") !== "true";
+  fold.setAttribute("aria-expanded", String(open));
+  $("create-body").classList.toggle("hidden", !open);
 };
 
 checkHealth();
-buildBlueprintPanel();
 loadTypes().catch((e) => toast(e.message, true));

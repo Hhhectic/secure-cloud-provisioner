@@ -3,57 +3,89 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Secure Cloud Provisioner</title>
+  <title>Sanctum — provision &amp; audit</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
 <header>
-  <h1>Secure Cloud Provisioner</h1>
-  <div class="bar">
-    <label>Region
-      <select id="region"></select>
-    </label>
-    <span id="health" class="pill">checking…</span>
+  <div class="head-inner">
+    <div class="brand">
+      <h1 class="wordmark">Sanctum</h1>
+      <div class="tagline">provision &amp; audit</div>
+    </div>
+    <div class="head-right">
+      <span id="health" class="pill">checking…</span>
+      <!-- Two clouds, one at a time. Fourteen resource types in a single row
+           wrapped onto two lines and mixed the two accounts together, which
+           makes "which cloud am I about to delete in" a question answered by
+           reading a tab label. -->
+      <button id="cloud-toggle" class="toggle" title="Switch cloud">
+        <span class="knob"></span>
+        <span class="opt" data-cloud="aws"><span class="dot"></span>AWS</span>
+        <span class="opt" data-cloud="azure"><span class="dot"></span>Azure</span>
+      </button>
+    </div>
   </div>
 </header>
 
-<p class="warn">
-  This talks to a real AWS account. Creating and deleting here does the same
-  thing it does from the command line.
-</p>
+<div class="drift" aria-hidden="true"><i></i><i></i><i></i></div>
 
-<nav id="types"></nav>
+<div class="context">
+  <label id="scope-box"></label>
+  <p id="scope-note"></p>
+</div>
 
 <main>
-  <section id="listing">
-    <h2>
-      <span id="listing-title">Resources</span>
-      <span class="controls">
-        <label><input type="checkbox" id="only-ours" checked>
-          <span id="only-ours-label">only ones this tool made</span></label>
-        <label><input type="checkbox" id="with-scan"> scan each (slow)</label>
-        <button id="refresh">Refresh</button>
-      </span>
-    </h2>
-    <div id="list"></div>
-    <div id="cleanup-box"></div>
-  </section>
+  <aside id="sidebar">
+    <div class="side-head">Resources</div>
+    <nav id="types"></nav>
+    <div id="side-foot"></div>
+  </aside>
 
-  <section id="detail">
-    <h2>Detail</h2>
-    <div id="detail-body" class="muted">Pick something from the list.</div>
-  </section>
+  <div class="stack">
+    <section id="listing">
+      <div class="card-head">
+        <h2 id="listing-title">Resources</h2>
+        <span class="controls">
+          <span id="audit-badge" class="audit-badge hidden">audit only</span>
+          <label><input type="checkbox" id="only-ours" checked>
+            <span id="only-ours-label">only ones this tool made</span></label>
+          <label><input type="checkbox" id="with-scan"> <span>scan each (slow)</span></label>
+          <button id="refresh" class="quiet">Refresh</button>
+        </span>
+      </div>
+      <div id="list"></div>
+      <div id="cleanup-box"></div>
+    </section>
 
-  <section id="create">
-    <h2>Create</h2>
-    <div id="create-body"></div>
-  </section>
+    <section id="detail">
+      <div class="card-head">
+        <h2>Detail</h2>
+        <span id="detail-id" class="muted"></span>
+      </div>
+      <div id="detail-body" class="muted">Pick something from the list.</div>
+    </section>
 
-  <section id="blueprint">
-    <h2>Blueprint: bastion architecture</h2>
-    <div id="blueprint-body"></div>
-  </section>
+    <section id="create">
+      <button id="create-fold" class="fold" aria-expanded="true">
+        <span class="fold-left">
+          <span style="font:600 15px/1.3 var(--sans)">Create</span>
+          <span id="create-sub" class="sub"></span>
+        </span>
+        <span class="fold-right">
+          <span id="create-hint" class="sub"></span>
+          <span class="chev"></span>
+        </span>
+      </button>
+      <div id="create-body" class="fold-body"></div>
+    </section>
+
+    <section id="blueprint" class="hidden">
+      <h2>Blueprint: bastion architecture</h2>
+      <div id="blueprint-body"></div>
+    </section>
+  </div>
 </main>
 
 <div id="modal" class="hidden">

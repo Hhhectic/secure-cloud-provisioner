@@ -33,19 +33,28 @@ const check = (condition, message) => {
 // The types the stub advertises. Named so the tab-count assertion can be
 // derived from it instead of hardcoding a number that goes stale the moment
 // somebody adds one.
+// provider and short_label are on every entry because the real API puts them
+// on every entry. The page shows one cloud at a time and skips anything whose
+// provider does not match, so a stub omitting the field would render an empty
+// sidebar - and the tests underneath would all fail for that reason rather
+// than for theirs.
 const STUB_TYPES = [
   { key: "security-group", label: "Security group",
+    short_label: "Security group", provider: "aws",
     id_label: "Group ID", read_only: false,
     only_ours_label: "only ones this tool made" },
   // Audited and still filterable, which is the pair that broke the old rule:
   // the page used to disable the box for anything read_only.
   { key: "snapshot", label: "Disk backup",
+    short_label: "Disk backup", provider: "aws",
     id_label: "Snapshot ID", read_only: true,
     only_ours_label: "only ones this tool made" },
   // Audited with nothing to narrow by.
-  { key: "iam", label: "Account access", id_label: "Account ID",
+  { key: "iam", label: "Account access", short_label: "Account access",
+    provider: "aws", id_label: "Account ID",
     read_only: true, only_ours_label: null },
-  { key: "alarm", label: "Alarm", id_label: "Alarm name",
+  { key: "alarm", label: "Alarm", short_label: "Alarm", provider: "aws",
+    id_label: "Alarm name",
     read_only: false, only_ours_label: "only ones this tool made" },
   // The second cloud, which the page has never been asked about. It reaches
   // these through the registry like anything else, and that is the claim
@@ -56,6 +65,7 @@ const STUB_TYPES = [
   // behaviour the application had already replaced. All five Azure types
   // create, scan, fix and delete now.
   { key: "azure-storage", label: "Azure storage account",
+    short_label: "Storage account", provider: "azure",
     id_label: "Account name", read_only: false,
     only_ours_label: "only ones this tool made" },
 ];
@@ -194,13 +204,24 @@ const { window, document, sent } = await boot();
 
 check($(document, "health").textContent === "API up",
       "the health pill reflects a reachable API");
-// Counted from the stub rather than written as a number, so adding a type to
-// the stub cannot silently make this assertion about something else.
-check($(document, "types").children.length === STUB_TYPES.length,
-      "a tab appears for every resource type the API advertises");
+/* The sidebar holds one cloud at a time plus the blueprint, not all fourteen
+ * types at once. Counted from the stub rather than written as a number, so
+ * adding a type to the stub cannot silently make this assertion about
+ * something else. */
+const awsTypes = STUB_TYPES.filter((t) => t.provider === "aws");
+const azureTypes = STUB_TYPES.filter((t) => t.provider === "azure");
+
+check($(document, "types").children.length === awsTypes.length + 1,
+      "the sidebar lists this cloud's types, and the blueprint after them");
+check([...$(document, "types").children].every(
+        (b) => b.dataset.key === "blueprint"
+          || awsTypes.some((t) => t.key === b.dataset.key)),
+      "and nothing belonging to the other cloud");
 check([...$(document, "types").children]
-        .some((b) => b.textContent.includes("audit only")),
+        .some((b) => b.textContent.includes("audit")),
       "an audited type is labelled as one");
+check($(document, "types").lastElementChild.dataset.key === "blueprint",
+      "the blueprint sits last, being six resources rather than one type");
 
 // ------------------------------------------- not scanned is not clean
 
@@ -583,11 +604,27 @@ check(detail.textContent.includes("1 acknowledged"),
 console.log("\nAzure, through the same routes");
 console.log("------------------------------");
 
-const azTab = [...$(document, "types").children]
-  .find((b) => b.textContent.includes("Azure storage account"));
+/* The second cloud is behind the toggle, so getting to it is part of the
+ * path being tested. Before the toggle existed all fourteen types sat in one
+ * wrapping row and the page offered an AWS region selector and an AWS
+ * blueprint above every Azure one. */
+check(!document.querySelector('#types button[data-key="azure-storage"]'),
+      "the other cloud's types are not in the sidebar to begin with");
 
-check(Boolean(azTab), "a tab appears for a type from the second cloud");
-check(!azTab.textContent.includes("audit only"),
+$(document, "cloud-toggle").click();
+await new Promise((r) => setTimeout(r, 80));
+
+const azTab = document.querySelector('#types button[data-key="azure-storage"]');
+check(Boolean(azTab), "switching cloud puts them there");
+check(document.body.classList.contains("cloud-azure"),
+      "and repaints, so which account is in front of you is not a label to read");
+check(!document.querySelector('#types button[data-key="security-group"]'),
+      "with the first cloud's types gone rather than merely reordered");
+check(!document.querySelector('#types button[data-key="blueprint"]'),
+      "and no bastion blueprint, which is an AWS architecture");
+check(azTab.textContent.includes("Storage account"),
+      "labelled without repeating the cloud the toggle already names");
+check(!azTab.textContent.includes("audit"),
       "not labelled audit only, because Azure provisions like anything else");
 
 await azTab.click();

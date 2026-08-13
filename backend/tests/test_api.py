@@ -915,12 +915,19 @@ def test_the_metric_labels_stay_short_enough_to_read(client):
 
 
 def test_the_page_is_served_from_the_same_process_as_the_api(client):
-    """One thing to run, and no CORS between the page and its own backend."""
+    """One thing to run, and no CORS between the page and its own backend.
+
+    The wordmark is Sanctum rather than the repository's own name. That is the
+    page's title only - the CLI, the README and this package are all still
+    Secure Cloud Provisioner - so this asserts the page was served rather than
+    asserting a product name, and the two scripts below are the substance of
+    the check either way.
+    """
     page = client.get("/ui/")
     assert page.status_code == 200
-    assert "Secure Cloud Provisioner" in page.text
+    assert "Sanctum" in page.text
 
-    for asset in ("/ui/app.js", "/ui/style.css"):
+    for asset in ("/ui/app.js", "/ui/style.css", "/ui/keygen.js"):
         assert client.get(asset).status_code == 200, asset
 
 
