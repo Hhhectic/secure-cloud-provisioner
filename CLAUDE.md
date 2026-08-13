@@ -141,11 +141,26 @@ Since then, on this branch: the merge with `group/main`, Azure storage and key
 vault provisioning, the first live Azure run, and then network security group,
 virtual network and virtual machine provisioning, and then telling a resource
 group you may not see apart from one that is not there, take it to **794 from
-`backend/`**, 7 skipped. The live *AWS* smoke test has not been re-run. The
-Azure half of it has, against a real subscription: `python
-scripts/smoke_test.py --azure-only --with-azure-resources
---azure-resource-group scp-demo` is **47 passed, 0 failed**, and that includes
-building and destroying a real virtual machine.
+`backend/`**, 7 skipped.
+
+Since *that*, on this branch: the cloud switch and the provider seam, the merge
+with `aws-provisioner-and-web-interface` (which was seven commits ahead of
+`main` and carried the Azure form and sizing fixes), two name-rule
+corrections, telling a refused read from an absent one in all five readers,
+and carrying `problems` on a refused create. **843 from `backend/`, 0
+skipped** — the seven that used to skip were the two Node suites, which now
+have a Node to run in, and they are 100 assertions of their own.
+
+The full live smoke test has been re-run on this branch and is **218 passed, 0
+failed** against account 679140927523 and subscription
+`74baf379-b419-4e16-a50b-98bc450901c9` — every AWS section, the workload
+readings, the whole bastion blueprint, and all five Azure types, including a
+machine built, scanned and destroyed. Both halves in one run:
+
+```bash
+python scripts/smoke_test.py --with-instances --with-blueprint \
+    --with-workload --with-azure-resources --azure-resource-group scp-demo
+```
 
 **The root suite does not collect, and it arrived that way.** `ebdb579` renamed
 `run_azure_security_scan` to `scan_azure_payload` in `azure_scanner_engine.py`
@@ -874,6 +889,53 @@ written to match the code cannot disagree with it.**
   still fails the way the SDK does — because if a future Python makes `str()`
   return the value again, the three tests underneath it would all start passing
   for a new reason.
+
+- **A read that is refused is not a resource that is absent, and all five
+  readers said it was.** This is the fifth instance of the mistake recorded
+  above and the one that had been missed everywhere: every create path was
+  fixed for it, and `read_account_for_scanning`, `read_vault_for_scanning`,
+  `read_nsg_for_scanning`, `read_vnet_for_scanning` and
+  `read_vm_for_scanning` all still carried the same handler — return None on
+  404, re-raise everything else. So reading anything in a resource group this
+  identity holds no role on arrived as a 500 and a traceback about an HTTP
+  response. The subscription makes it easy to reach rather than theoretical:
+  the service principal is Contributor on two named groups, so every other
+  group in the subscription answers 403 to a read. They check `denied()`
+  first now and raise `AzureRefused`, which a new handler in `api/app.py`
+  turns into a 403 naming the group — 403 rather than 404 because telling
+  somebody "there is nothing there" about a resource they cannot see is the
+  more misleading of the two answers.
+
+- **A refused machine leaves three resources behind, and said nothing about
+  them.** `Standard_B1s` is on the allowlist and this subscription is not
+  offered it, so `create_vm` builds a virtual network, a security group and a
+  card, is then refused by Azure for the size, and returns a clear sentence
+  about which sizes would work. Every adapter returns `problems` carrying
+  what it built; the create route discarded that half on failure, so the one
+  place a caller could have read it was the one place it was thrown away —
+  and this project's stated position that partial failures report exactly
+  what exists held everywhere except there. The refusal carries the list now.
+
+  The leak itself is open, and the obvious fix was written and taken out
+  again. Asking `available_sizes` *before* building prevents it completely —
+  verified, the create made nothing — but `resource_skus.list` takes over
+  200 seconds even filtered to one location, measured against this
+  subscription, so every machine create would wait on it. Trading a leak for
+  a three-minute hang is not a trade. Closing it needs either a cheap way to
+  ask the question or a decision to roll back scaffolding this call created,
+  and the second argues with *Nothing rolls back*. That is a group decision.
+  The same 200 seconds is why a failed machine create currently takes minutes
+  to answer at all: the error path calls it to write a better message.
+
+- **Two name rules disagreed with Azure, and both were found at the edges
+  rather than the middle.** A key vault name may not carry doubled hyphens —
+  only the container half of that rule was written down, and
+  `check_name_availability` answers `scp-edge--probe` with
+  `available=False, reason=Invalid`. And a one-character security group name
+  is legal: the pattern needed a first character and a last one, so it
+  refused every one-character name while its own message promised "1 to 80
+  characters", an error naming the rule the name had just satisfied. Verified
+  by creating a group called `a` and deleting it.
 
 Two smaller things measured rather than assumed:
 
