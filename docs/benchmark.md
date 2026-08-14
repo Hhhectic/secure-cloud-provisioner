@@ -514,11 +514,49 @@ Defender (3), Network Watcher and bastion host (2) and Application Insights
 (1) are the rest. None is a gap in the rules that exist; they are services
 nobody has written rules for.
 
-## What this measurement does not say
+## The other four types, with resources built for the purpose
 
-The subscription holds two storage accounts and nothing else. Prowler reported
-no findings on key vaults, virtual networks, security groups or machines
-because there were none to report on — the four types this project spent the
-most effort on are the four this benchmark did not exercise. Re-running it
-while `azure-lifecycle.mjs` has a machine up would be a materially better test
-and has not been done.
+The first run scanned two storage accounts and nothing else, which left the
+four types this project spent most effort on unexercised. So a vault, a
+security group, a virtual network and a machine were built deliberately weak,
+Prowler was run again — 79 findings, 61 fail — and everything was destroyed.
+
+The pattern held. Every check the two tools share agrees, and there is still
+no contradiction in either direction.
+
+| Prowler | this tool | both say |
+|---|---|---|
+| `network_ssh_internet_access_restricted` (both groups) | `open_22`, critical | problem |
+| `network_subnet_nsg_associated` | `subnet_without_firewall` | problem |
+| `network_vnet_ddos_protection_enabled` | `no_ddos_protection` | problem |
+| `keyvault_recoverable` | `no_purge_protection` | problem |
+| `network_http/rdp/udp_internet_access_restricted` | silence | fine |
+| `vm_linux_enforce_ssh_authentication` | silence | fine |
+| `vm_ensure_using_managed_disks` | silence | fine |
+
+`keyvault_rbac_enabled` and `access_policies_empty` are the same fact seen from
+opposite ends — Prowler reports that role-based authorization is off, this
+reports that the policy list nobody replaced it with is empty.
+
+**Two findings are this tool's alone.** A security group attached to nothing
+(`unused`) has no Prowler equivalent, and neither does a machine carrying a
+public address (`has_public_address`) — Prowler reports the open port on the
+group rather than the exposure on the machine. That is the same fact reached
+from the other side, and it is the one place this tool's model is arguably the
+more useful: `read_vm_for_scanning` reads the groups on the card *and* the
+subnet and judges the machine, which is what somebody looking at a machine
+wants to know.
+
+**What Prowler has that this does not, on these four types.** Key vaults:
+logging, private endpoints. Machines: backup, JIT access, trusted launch,
+approved images, disk encryption with customer-managed keys, and a size
+policy. All real; none of them is the thing that gets a machine reached from
+the internet, which is what this tool reports first and loudest.
+
+## What this measurement still does not say
+
+One subscription, one region, one service principal, and resources this
+project built. A storage account somebody made in the portal years ago is
+still the case least covered — the two that exist here were a teammate's, and
+they are the only thing in this benchmark that nothing in this repository
+created.
