@@ -560,3 +560,43 @@ project built. A storage account somebody made in the portal years ago is
 still the case least covered — the two that exist here were a teammate's, and
 they are the only thing in this benchmark that nothing in this repository
 created.
+
+
+## What was taken from that benchmark, and what was left
+
+Two of Prowler's eleven storage checks are implemented here now. The other
+nine were declined, and the reasons are worth keeping so nobody re-files them.
+
+**Container soft delete and blob soft delete, as two findings.** Azure keeps
+them as separate settings and so does this: an account with blob retention on
+still loses everything if somebody deletes the container, and the container
+setting is the less well known of the two. Both are warnings, not criticals -
+severity here means how reachable something is, and a thing that cannot be got
+back is a different axis. This is the same reasoning the key vault rules
+already use.
+
+**Key age, which is not quite Prowler's check.** `storage_key_rotation_90_days`
+reports whether a key *expiration policy* is configured; this reports how long
+the keys have actually gone unchanged, read from `key_creation_time`. The
+second is a fact about the account and the first is a reminder somebody set,
+and the fact is the more useful of the two - the AWS half made the same choice
+about root MFA, preferring `GetAccountSummary` over a report that could be four
+hours stale. Ninety days is Prowler's threshold and is kept, stated as the
+convention it is.
+
+**Declined: private endpoints and defaulting to Entra.** Both would be second
+findings about something already reported. `reachable_from_anywhere` says the
+account is open to any network, and `shared_key_allowed` says the account key
+is still accepted - the stronger statement in each pair. Adding Prowler's
+version alongside would put two entries in front of a reader for one decision,
+which is how a findings list stops being read.
+
+**Declined: geo-redundancy and blob versioning.** Durability rather than
+exposure. The README says this tool flags configuration that is unsafe, and an
+account without geo-redundancy is not reachable by anyone who should not reach
+it. Adding them would widen the claim rather than fill a gap in it.
+
+**Declined for now: customer-managed keys, infrastructure encryption, trusted
+Azure services, SMB channel algorithms.** Each is a real hardening step. None
+is the thing that gets an account read by a stranger, and this tool reports
+that first and loudest on purpose.

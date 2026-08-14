@@ -38,6 +38,12 @@ from scanner.common import (
     print_warnings,
 )
 
+# When an unrotated account key stops being ordinary and starts being worth
+# saying out loud. Prowler uses ninety and so does most Azure guidance; it is
+# a convention, not a measurement, and the finding says so rather than
+# implying something changes on the ninety-first day.
+KEY_ROTATION_DAYS = 90
+
 
 def _target(account_name, setting):
     return {
@@ -183,6 +189,70 @@ def check_storage_account(settings):
             "gives each person their own access, revocable on its own.",
             _target(name, "shared_key_allowed"),
         ))
+
+    # ---- How old the key is, which is a different question from whether it
+    # ---- works --------------------------------------------------------------
+    #
+    # The rule above says the account key is still accepted. This says nobody
+    # has changed it. They are worth reporting separately because the remedy
+    # differs: one is a switch, the other is a rotation somebody has to
+    # schedule and then actually do.
+    #
+    # Ninety days is Prowler's threshold and the one most Azure guidance
+    # repeats. It is a convention rather than a measurement, and it is stated
+    # as one - a key at 91 days is not dangerous in a way it was not at 89.
+    # What the number is for is making "nobody has ever rotated this" visible
+    # before it is measured in years.
+    if "key_age_days" not in unreadable:
+        age = settings.get("key_age_days")
+        if age is not None and age > KEY_ROTATION_DAYS:
+            warnings.append(_warning(
+                WARNING,
+                f"The account keys for '{name}' were created {age} days ago "
+                f"and have not been changed since. A key that never rotates "
+                "is a password that never expires: everyone who has ever held "
+                "it still holds it, including people who have left and laptops "
+                "that were replaced. Rotating both keys invalidates every copy "
+                "that escaped, which is the only way to take one back.",
+                _target(name, "stale_account_key"),
+            ))
+
+    # ---- Whether a deleted blob can be got back ------------------------------
+    #
+    # The only rule here that is not about exposure, and it is here for the
+    # reason the key vault rules are: some settings decide whether a mistake
+    # can be undone. An accidental delete, a script with a wrong prefix and a
+    # ransomware run all look the same to storage, and soft delete is what
+    # separates "restore it" from "it is gone".
+    #
+    # A warning rather than critical because nothing is reachable that should
+    # not be. Severity here means exposure, and this is not that.
+    # Containers first, because it is the larger loss and the less obvious of
+    # the two: deleting a container takes everything inside it, and the blob
+    # retention setting people do know about does not cover that at all.
+    if "container_soft_delete" not in unreadable:
+        if settings.get("container_soft_delete") is False:
+            warnings.append(_warning(
+                WARNING,
+                f"Deleting a container in '{name}' destroys it and everything "
+                "in it immediately, with no way back. The setting that keeps "
+                "deleted *blobs* recoverable does not cover containers - they "
+                "are separate, and this one is off. One mistyped name in a "
+                "cleanup script is the whole container.",
+                _target(name, "no_container_soft_delete"),
+            ))
+
+    if "blob_soft_delete" not in unreadable:
+        if settings.get("blob_soft_delete") is False:
+            warnings.append(_warning(
+                WARNING,
+                f"Deleting a blob in '{name}' destroys it immediately, with "
+                "no way back. Soft delete keeps deleted blobs for a set "
+                "number of days so an accident, a bad script or somebody "
+                "else's ransomware can be undone. It is off, which is Azure's "
+                "default rather than a decision somebody made.",
+                _target(name, "no_blob_soft_delete"),
+            ))
 
     # ---- Reachable from anywhere ---------------------------------------------
     access = str(settings.get("public_network_access") or "").lower()

@@ -29,6 +29,7 @@ from az import keyvault as az_keyvault_mod
 from az import vm as az_vm
 from scanner import azure_nsg_effective as effective
 from scanner.azure_nsg_rules import check_nsg
+from scanner.azure_storage_rules import check_storage_account
 from scanner.azure_vnet_rules import check_vnet, check_vnet_spec
 from scanner.azure_vm_rules import check_vm, check_vm_spec
 from scanner.common import CRITICAL, WARNING, INFO, fixable, summarize
@@ -956,3 +957,105 @@ def test_a_resource_that_is_absent_still_reads_back_as_nothing(label, reader):
     returns None when the thing is not there, and the routes turn that into a
     404."""
     assert reader(_RaisingClient(404), _A_RESOURCE_ID) is None
+
+
+# ============================ Storage checks that came from the Prowler run
+#
+# Prowler was pointed at the subscription and covered eleven storage checks
+# this did not. Two of them earned a place here; docs/benchmark.md says why the
+# rest did not. Neither of these is about exposure, which is the reason both
+# are warnings: severity here means how reachable something is, and a thing
+# that cannot be got back is a different axis.
+
+
+def _account(**overrides):
+    """A storage account as the reader hands one to the scanner."""
+    base = {
+        "account_name": "scpdemo", "resource_group": GROUP, "location": "eastus",
+        "allow_blob_public_access": False, "supports_https_traffic_only": True,
+        "minimum_tls_version": "TLS1_2", "public_network_access": "Disabled",
+        "allow_shared_key_access": False, "key_age_days": 3,
+        "blob_soft_delete": True, "container_soft_delete": True,
+        "containers": [], "unreadable": {},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_a_key_nobody_has_rotated_is_reported():
+    warnings = check_storage_account(_account(key_age_days=400))
+    assert "stale_account_key" in _settings_of(warnings)
+
+
+def test_a_freshly_rotated_key_is_not():
+    assert "stale_account_key" not in _settings_of(
+        check_storage_account(_account(key_age_days=3)))
+
+
+def test_the_rotation_threshold_is_a_convention_and_is_not_off_by_one():
+    """Ninety days is Prowler's number and most Azure guidance repeats it. It
+    is a convention rather than a measurement, which is exactly why the
+    boundary should be pinned: a rule nobody has fixed the edge of drifts."""
+    from scanner.azure_storage_rules import KEY_ROTATION_DAYS
+
+    at = _settings_of(check_storage_account(_account(key_age_days=KEY_ROTATION_DAYS)))
+    over = _settings_of(check_storage_account(
+        _account(key_age_days=KEY_ROTATION_DAYS + 1)))
+
+    assert "stale_account_key" not in at
+    assert "stale_account_key" in over
+
+
+def test_a_key_age_azure_did_not_report_is_a_question_not_a_pass():
+    """An account old enough to predate the field returns nothing here, and
+    nothing is not zero. Reporting it as freshly rotated would be the one
+    answer that is both wrong and reassuring."""
+    settings = _account(key_age_days=None,
+                        unreadable={"key_age_days": "Azure did not report it"})
+    found = _settings_of(check_storage_account(settings))
+
+    assert "stale_account_key" not in found
+    assert "unreadable_key_age_days" in found
+
+
+def test_containers_that_cannot_be_recovered_are_reported():
+    assert "no_container_soft_delete" in _settings_of(
+        check_storage_account(_account(container_soft_delete=False)))
+
+
+def test_blobs_that_cannot_be_recovered_are_reported_separately():
+    """Two settings, not one. Azure keeps blob and container retention apart,
+    and an account with blob soft delete on still loses everything if somebody
+    deletes the container."""
+    both = _settings_of(check_storage_account(
+        _account(blob_soft_delete=False, container_soft_delete=False)))
+    assert {"no_blob_soft_delete", "no_container_soft_delete"} <= both
+
+    blob_only = _settings_of(check_storage_account(
+        _account(blob_soft_delete=True, container_soft_delete=False)))
+    assert "no_blob_soft_delete" not in blob_only
+    assert "no_container_soft_delete" in blob_only
+
+
+def test_neither_recovery_finding_is_critical():
+    """Severity means exposure here. Nothing is reachable that should not be;
+    something cannot be undone, which is a different axis and a quieter one."""
+    warnings = check_storage_account(
+        _account(blob_soft_delete=False, container_soft_delete=False,
+                 key_age_days=400))
+    assert all(w["level"] != CRITICAL for w in warnings)
+
+
+def test_a_soft_delete_setting_that_could_not_be_read_says_so():
+    """The blob service is a second call and a second permission. A failure
+    there must not read as "no soft delete", which is what a bare False would
+    say."""
+    settings = _account(
+        blob_soft_delete=None, container_soft_delete=None,
+        unreadable={"blob_soft_delete": "the login could not read it",
+                    "container_soft_delete": "the login could not read it"})
+    found = _settings_of(check_storage_account(settings))
+
+    assert "no_blob_soft_delete" not in found
+    assert "no_container_soft_delete" not in found
+    assert "unreadable_blob_soft_delete" in found
