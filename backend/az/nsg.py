@@ -17,7 +17,7 @@ from az import names
 from az.common import (AzureNotConfigured, AzureRefused, denied,
                        ensure_resource_group, is_managed, managed_tags,
                        network_client, not_allowed_to_look, plain,
-                       resource_group_of)
+                       resource_group_of, why_azure_refused)
 
 
 def get_client(region="us-east-1"):
@@ -429,7 +429,10 @@ def delete_nsg(client, name, force=False):
             f"No network security group named '{short}' in this subscription."
         )
 
-    client.network_security_groups.begin_delete(group, short).result()
+    try:
+        client.network_security_groups.begin_delete(group, short).result()
+    except Exception as e:            # HttpResponseError, imported lazily
+        return False, why_azure_refused(e, f"delete '{short}'")
     return True, f"Deleted network security group '{short}'."
 
 

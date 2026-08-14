@@ -868,3 +868,69 @@ class _AnyClient:
 
     def __call__(self, *args, **kwargs):
         return _AnyClient()
+
+
+# ------------------------------------- an Azure refusal is an answer, not a 500
+
+
+class _AzureRefuses:
+    """An operations object whose delete is declined by Azure.
+
+    Modelled on the real thing: HttpResponseError carries the human sentence
+    on .message and a machine code on .error.code, and its str() is the whole
+    HTTP response rather than either of those.
+    """
+
+    class _Error:
+        code = "InUseSubnetCannotBeDeleted"
+
+    def __init__(self):
+        self.error = self._Error()
+        self.message = ("Subnet default is in use by /subscriptions/x/"
+                        "networkInterfaces/TEST-VM-NIC and cannot be deleted.")
+
+    def _raise(self, *a, **k):
+        error = Exception("(InUseSubnetCannotBeDeleted) Subnet default is in use")
+        error.error = self.error
+        error.message = self.message
+        raise error
+
+    def begin_delete(self, *a, **k):
+        self._raise()
+
+    def delete(self, *a, **k):
+        self._raise()
+
+
+@pytest.mark.parametrize("module,attr,op", [
+    ("az.vnet", "delete_vnet", "virtual_networks"),
+    ("az.nsg", "delete_nsg", "network_security_groups"),
+    ("az.vm", "delete_vm", "virtual_machines"),
+])
+def test_an_azure_refusal_on_delete_is_reported_not_raised(module, attr, op,
+                                                           monkeypatch):
+    """It became a 500, and the page showed "HTTP 500" and nothing else.
+
+    Azure had said exactly which network card was holding the subnet. None of
+    the five destructive calls in az/ caught HttpResponseError, so every
+    refusal Azure can give during a delete - a subnet in use, a lock, a vault
+    in its retention period - arrived as a traceback. delete_vnet's own
+    docstring promised Azure's message was "left in place rather than worked
+    around", and it was: unhandled, which is the one way of leaving it in
+    place that stops anybody reading it.
+    """
+    import importlib
+
+    mod = importlib.import_module(module)
+    monkeypatch.setattr(mod, "_locate", lambda client, name: ("rg", name))
+
+    class _Client:
+        pass
+    client = _Client()
+    setattr(client, op, _AzureRefuses())
+
+    ok, message = getattr(mod, attr)(client, "test-vm-vnet", force=True)
+
+    assert ok is False
+    assert "InUseSubnetCannotBeDeleted" in message
+    assert "TEST-VM-NIC" in message, "Azure's own sentence has to survive"

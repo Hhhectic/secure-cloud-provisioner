@@ -20,6 +20,7 @@ from az import names
 from az.common import (
     AzureNotConfigured,
     AzureRefused,
+    why_azure_refused,
     ensure_resource_group,
     is_managed,
     keyvault_client,
@@ -342,7 +343,10 @@ def delete_vault(client, name, force=False):
     if not group:
         return False, f"No key vault named '{short}' in this subscription."
 
-    client.vaults.delete(group, short)
+    try:
+        client.vaults.delete(group, short)
+    except Exception as e:            # HttpResponseError, imported lazily
+        return False, why_azure_refused(e, f"delete '{short}'")
 
     return True, (
         f"Deleted key vault '{short}'. Soft delete is mandatory on Azure key "

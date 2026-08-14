@@ -37,7 +37,7 @@ from az.common import (AzureNotConfigured, AzureRefused, _import,
                        credential,
                        ensure_resource_group, is_managed, managed_tags,
                        network_client, plain, resource_group_of,
-                       subscription_id)
+                       subscription_id, why_azure_refused)
 
 # Small and cheap. Anything absent from this set is refused outright. Widen it
 # deliberately if you genuinely need to, and read the hourly price before you
@@ -720,7 +720,10 @@ def delete_vm(client, name, force=False):
     if not group:
         return False, f"No virtual machine named '{short}' in this subscription."
 
-    client.virtual_machines.begin_delete(group, short).result()
+    try:
+        client.virtual_machines.begin_delete(group, short).result()
+    except Exception as e:            # HttpResponseError, imported lazily
+        return False, why_azure_refused(e, f"delete '{short}'")
 
     return True, (
         f"Deleted virtual machine '{short}' and its operating system disk. Its "
