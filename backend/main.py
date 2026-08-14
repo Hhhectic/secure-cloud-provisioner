@@ -7,9 +7,12 @@ match here, the FastAPI layer can dispatch on resource type and reuse one set of
 endpoints instead of growing a parallel set per resource.
 """
 
+import json
+import os
 import random
 import string
 import time
+from datetime import date
 from pathlib import Path
 
 # Before anything reads a credential. See environment.py: nothing in backend/
@@ -47,6 +50,7 @@ from aws import vpcs
 from api import registry
 from az.common import AzureNotConfigured
 from blueprints import bastion
+from scanner import acknowledged
 from scanner.rules import check_firewall_rules
 from scanner.s3_rules import check_bucket_settings
 from scanner.common import (print_warnings, fixable, summarize, worst_level,
@@ -1493,6 +1497,143 @@ def azure_menu(resource, client):
 # ------------------------------------------------------------------------- Entry
 
 
+def _git_name():
+    """Who git thinks you are, for the `by` field.
+
+    Better provenance than a typed name, and much better than one this file
+    invents: the same identity that will be on the commit is the one recorded
+    in the entry. Falls back to the OS user, then to asking.
+    """
+    import subprocess
+
+    try:
+        found = subprocess.run(["git", "config", "user.name"],
+                               capture_output=True, text=True, timeout=5)
+        if found.returncode == 0 and found.stdout.strip():
+            return found.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return os.environ.get("USER") or os.environ.get("USERNAME") or ""
+
+
+def _append_acknowledgement(entry):
+    """Writes one entry into acknowledged.json, preserving what is there.
+
+    This lives in the CLI and not in `api/`, and that placement is the whole
+    security argument. The HTTP API has no login and a cross-site POST to a
+    "stop reporting this" endpoint would be drive-by suppression of a critical
+    finding - which is what the middleware in api/app.py exists to prevent, and
+    what test_no_part_of_the_api_writes_acknowledgements pins. A person at a
+    terminal is a different proposition: they are already authenticated by
+    having the shell, the file is theirs, and the change still has to be
+    committed to take effect for anybody else.
+
+    Read, modify, write rather than append, because the file is JSON with a
+    comment block at the top that has to survive.
+    """
+    where = acknowledged.path()
+    if where.exists():
+        document = json.loads(where.read_text())
+    else:
+        document = {"acknowledgements": []}
+
+    if isinstance(document, list):
+        document = {"acknowledgements": document}
+    document.setdefault("acknowledgements", []).append(entry)
+
+    where.write_text(json.dumps(document, indent=2) + "\n")
+    return where
+
+
+def acknowledge_menu():
+    """Records that somebody has looked at a finding and decided to live with it.
+
+    Asks rather than guesses, and writes the answer down. The alternative -
+    a rule that infers intent from configuration - is a guess dressed as a
+    fact, and attackers turn on website hosting too.
+    """
+    print("\n--- Acknowledge a finding ---")
+    print("This does not hide anything. The finding keeps its severity and")
+    print("its place in every scan; it is marked as accepted, by whom, and")
+    print("why. Entries expire, and a stale one is itself reported.")
+
+    keys = list(registry.REGISTRY)
+    for index, key in enumerate(keys, start=1):
+        print(f"{index}. {registry.REGISTRY[key].label}")
+    chosen = input(f"\nWhich resource type (1-{len(keys)})? ").strip()
+    if not chosen.isdigit() or not 1 <= int(chosen) <= len(keys):
+        print("Not a valid selection.")
+        return
+
+    known = registry.REGISTRY[keys[int(chosen) - 1]]
+    resource_id = input(f"{known.id_label}: ").strip()
+    if not resource_id:
+        print("Nothing to scan.")
+        return
+
+    client = known.get_client(REGION)
+    settings = known.read(client, resource_id)
+    if settings is None:
+        print(f"No {known.label.lower()} with that id.")
+        return
+
+    warnings = [w for w in known.check(settings) if w.get("rule_id")]
+    if not warnings:
+        print("Nothing to acknowledge: this scan found no findings with an id.")
+        return
+
+    print()
+    for index, w in enumerate(warnings, start=1):
+        mark = " (already acknowledged)" if w.get("acknowledged") else ""
+        print(f"{index}. [{w['level']}] {w['rule_id']}{mark}")
+        print(f"   {w['message'][:110]}")
+
+    picked = input(f"\nWhich finding (1-{len(warnings)})? ").strip()
+    if not picked.isdigit() or not 1 <= int(picked) <= len(warnings):
+        print("Not a valid selection.")
+        return
+    finding = warnings[int(picked) - 1]
+
+    print("\nWhy is this intended? Somebody else has to be able to check it.")
+    reason = input("Reason: ").strip()
+    if len(reason) < 15:
+        print("Refused: a reason this short is not one. Nothing was written.")
+        return
+
+    suggested = _git_name()
+    by = input(f"Your name [{suggested}]: ").strip() or suggested
+    if not by:
+        print("Refused: an acknowledgement with no author is anonymous.")
+        return
+
+    today = date.today()
+    default_until = date.fromordinal(today.toordinal() + acknowledged.DEFAULT_DAYS)
+    until = input(f"Expires [{default_until.isoformat()}]: ").strip() \
+        or default_until.isoformat()
+    try:
+        if date.fromisoformat(until) <= today:
+            print("Refused: that date has already passed.")
+            return
+    except ValueError:
+        print("Refused: not a date in YYYY-MM-DD form.")
+        return
+
+    entry = {"rule_id": finding["rule_id"], "reason": reason, "by": by,
+             "on": today.isoformat(), "until": until}
+
+    print("\nThis is what will be written:")
+    print(json.dumps(entry, indent=2))
+    if input("\nWrite it? (yes/no): ").strip().lower() not in ("yes", "y"):
+        print("Nothing was written.")
+        return
+
+    where = _append_acknowledgement(entry)
+    print(f"\nWritten to {where}.")
+    print("It applies to your next scan immediately. Commit it so it applies")
+    print("to everybody else's - an acknowledgement is a decision with an")
+    print("author, and the commit is where that is recorded.")
+
+
 def main():
     print("=== Secure Cloud Provisioner ===")
     print("1. Security Groups (network)")
@@ -1509,7 +1650,8 @@ def main():
     print("12. Azure network security groups (the Azure firewall)")
     print("13. Azure virtual networks")
     print("14. Azure servers (compute) - these cost money")
-    resource = input("\nSelect resource type (1-14): ").strip()
+    print("15. Acknowledge a finding - records intent, hides nothing")
+    resource = input("\nSelect resource type (1-15): ").strip()
 
     try:
         if resource == "1":
@@ -1545,6 +1687,8 @@ def main():
         elif resource == "14":
             azure_vm_menu(registry.AZURE_VM,
                           registry.AZURE_VM.get_client(REGION))
+        elif resource == "15":
+            acknowledge_menu()
         else:
             print("Not a valid selection.")
     except AzureNotConfigured as e:
