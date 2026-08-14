@@ -621,3 +621,35 @@ def test_scanning_an_alarm_over_http_reports_what_it_is(api):
 
 def test_scanning_an_alarm_that_is_not_there_is_a_404(api):
     assert api.get("/resources/alarm/nothing-here").status_code == 404
+
+
+def test_a_billing_spec_is_pre_flighted_with_the_default_the_create_applies():
+    """The warnings shown before creation must be the ones shown after it.
+
+    create_alarm gives a billing alarm treat_missing_data="notBreaching" when
+    the spec leaves it out, because spending figures arrive in slow bursts and
+    treating the gaps as breaches leaves the alarm stuck. check_alarm_spec
+    assumed AWS's raw default of "missing" instead - which is precisely what
+    the rule warns about - so the form predicted a problem the create then did
+    not produce. Broken in the safe direction, and still broken: a pre-flight
+    that cries wolf is one people learn to skip.
+    """
+    from scanner.alarm_rules import check_alarm_spec
+
+    found = check_alarm_spec({"name": "spend", "namespace": "AWS/Billing",
+                              "threshold": 5, "notify": True})
+
+    assert not any(w["rule_id"].endswith(":treat_missing_data") for w in found), \
+        [w["rule_id"] for w in found]
+
+
+def test_a_billing_spec_that_asks_for_missing_is_still_warned_about():
+    """Defaulting must not become ignoring. Somebody who chooses the setting
+    the rule exists to warn about is told, exactly as before."""
+    from scanner.alarm_rules import check_alarm_spec
+
+    found = check_alarm_spec({"name": "spend", "namespace": "AWS/Billing",
+                              "threshold": 5, "notify": True,
+                              "treat_missing_data": "missing"})
+
+    assert any(w["rule_id"].endswith(":treat_missing_data") for w in found)
