@@ -925,16 +925,28 @@ written to match the code cannot disagree with it.**
   *Nothing rolls back / partial failures report exactly what exists* held
   everywhere except there. The refusal carries the list now.
 
-  The leak is open, and the obvious fix was written and taken out again.
-  Asking `available_sizes` before building prevents it — verified, the create
-  made nothing — but `resource_skus.list` takes over 200 seconds even filtered
-  to one location, measured here rather than guessed, so every machine create
-  would wait on it. Trading a leak for a three-minute hang is not a trade.
-  Closing it needs either a cheap way to ask or a decision to roll back
-  scaffolding this call created, and the second argues with *Nothing rolls
-  back*. That is a group decision. The same 200 seconds is why a failed
-  machine create takes minutes to answer at all: the error path calls it to
-  write a better message.
+  **The leak is closed, and the entry that used to sit here was wrong in a way
+  worth keeping.** Asking `available_sizes` before building anything prevents
+  it completely, and that check was written, removed, and put back. It was
+  removed on a number recorded here as fact — *"`resource_skus.list` takes over
+  200 seconds even filtered to one location, measured here rather than
+  guessed"* — which made the check look like a three-minute hang on every
+  machine create.
+
+  Re-measured on a quiet subscription it is **five to eight seconds** for 1,490
+  SKUs, three consecutive runs, and the live refusal answers in 7.6. The slow
+  reading was taken immediately after a burst of creates and deletes and was
+  almost certainly Azure throttling with SDK backoff. Six seconds on a create
+  that already takes a minute, to stop three resources being stranded, is a
+  trade worth making — and recording a throttled number as the call's cost is
+  what kept a real bug open. **A measurement taken once, under load, and
+  written down as a property of the system is worse than no measurement**, and
+  this file asserted it twice.
+
+  What survives from that entry: `problems` still travels with a refused
+  create, because a create can still fail after building scaffolding for
+  reasons other than the size, and *Nothing rolls back* still means the tool
+  reports what exists rather than destroying it.
 
 - **Two name rules disagreed with Azure, both found at the edges rather than
   the middle.** A key vault name may not carry doubled hyphens — only the
@@ -1208,8 +1220,8 @@ Severity means something — if everything is critical, nothing is.
 
 ## Not done
 
-- **The page shows one cloud at a time, and the firewall form still makes an
-  empty group.** A toggle in the header switches between AWS and Azure and the
+- **The page shows one cloud at a time, and builds firewalls with rules in
+  them.** A toggle in the header switches between AWS and Azure and the
   page repaints, so which account is in front of you is not a tab label to
   read. What that fixed was not cosmetic: "This talks to a real AWS account"
   and the AWS region selector used to sit above the five Azure tabs, at a
@@ -1217,12 +1229,12 @@ Severity means something — if everything is critical, nothing is.
   rendered as a panel under every one of them. Each now lives in its own
   branch, and the blueprint is a sidebar entry rather than a panel.
 
-  The one exception left is `azure-nsg`, whose form still creates an *empty*
-  group: the existing `rules` widget produces AWS-shaped rules and an Azure
-  rule is a different shape carrying a priority, so submitting one as the other
-  would be exactly the drift recorded under *One switch, not a field per
-  setting*. Rules come from the API or the CLI until a widget exists that knows
-  about priority.
+  `azure-nsg` used to be the exception, creating an empty group because the
+  AWS `rules` widget emits AWS-shaped rules. It has its own widget now —
+  `azureRuleRow` — carrying the three fields an AWS rule has no equivalent
+  for: a name, a direction, and an access that can be **Deny**. No priority
+  field, because `_priorities_for` numbers them from the row order and the
+  arrows are what change it.
 
   Two smaller gaps against the design. The Azure table shows the name in both
   its columns, because an Azure row's id *is* its name now; the mockup replaces
@@ -1400,8 +1412,10 @@ matches `ssh-keygen -lf` run on the public half derived from the downloaded
 private one. The failure that rules out is the quiet one: machines that exist
 and nobody can log into.
 
-Not done: the page cannot yet submit firewall *rules*, only an empty group.
-Everything else in *Not done* above is a refinement.
+Not done: nothing that stops a demo. The page builds every Azure type
+including a firewall with ordered rules. Everything in *Not done* above is a
+refinement, and the largest is that monitor and defender have no rules at all
+— which Prowler covers and this does not.
 
 ## Next
 
@@ -1417,9 +1431,28 @@ Everything else in *Not done* above is a refinement.
    This item has been "run Azure against a real subscription" and then
    "register the compute provider" and both are finished — all five types
    create, scan, fix, delete and clean up against
-   `74baf379-b419-4e16-a50b-98bc450901c9`, machines included. What remains on
-   the Azure side is small: a rules widget so the page can submit a firewall
-   with rules rather than an empty group.
+   `74baf379-b419-4e16-a50b-98bc450901c9`, machines included.
+
+   **The rules widget is done too, and its stated blocker was never the real
+   one.** This entry said rules would wait "until a widget exists that knows
+   about priority". Nothing in the page needs to know about priority:
+   `az/nsg._priorities_for` assigns one per rule from the order of the list,
+   ten apart, and refuses a set that is half hand-numbered. So the widget
+   offers arrows rather than a number, because moving a row is what changes
+   precedence. What actually made the AWS widget unusable is smaller — an
+   Azure rule carries a name, a direction, and an access that can be **Deny**,
+   and a security group rule carries none of those because every rule in one
+   is an allow. Verified live: two rules, a Deny in front of an Allow, land as
+   priority 100 and 110 in the order typed.
+
+   That left one gap of its own, and it is the reason `test_api.py` now posts
+   the form's exact body. The first version sent `rules` with a `source`
+   field, which is the AWS spelling; `ResourceSpec` ignores fields a resource
+   does not use, so the route accepted it, the adapter read an empty
+   `azure_rules`, and **Azure built a group with none of the rules in it and
+   reported success**. The jsdom suite agreed, because a stub answers whatever
+   it is sent — `_StubVaultClient`'s lesson arrived at from the other
+   direction.
 
    **The benchmark gap is closed, and it was never what this entry said it
    was.** Prowler is not an AWS tool — it covers Azure, Google Cloud,
@@ -1452,15 +1485,21 @@ Everything else in *Not done* above is a refinement.
    name for 90 days — so test vaults with the weak option, which is what the
    smoke test does deliberately, and let the offline spec test cover the secure
    path.
-3. **A rules widget that knows about priority.** This item used to say "Azure
-   NSG provisioning, or a decision not to", and described it as the one thing
-   root `main.py` could do that `backend/` could not. That has been false since
-   `scanner/azure_nsg_effective.py` landed: `az/nsg.py` creates, fixes and
-   deletes, and the fix has been applied to a real group through the page. What
-   is actually left is one form. The page can only build an *empty* security
-   group, because the `rules` widget emits AWS-shaped rules and an Azure rule
-   carries a priority deciding which of several overlapping rules wins.
-   Rules reach Azure through the API and the CLI meanwhile.
+3. **Rules for monitor and defender, or a decision not to.** The rules widget
+   that used to sit here is done — see *The Azure half is done* above. What
+   Prowler found instead is a whole area with no rules: thirteen `monitor`
+   checks, all of them asking whether the subscription raises an alert when
+   somebody creates or deletes a security-relevant thing, plus diagnostic
+   settings. That is the Azure counterpart of `scanner/alarm_rules.py`, and
+   the reasoning transfers exactly — an alarm fails by being quiet.
+
+   It needs a decision first, not code. Every Azure rule here reads one
+   resource and judges it; these read the *subscription* and judge its
+   configuration, so there is no resource id to hang a finding on and
+   `ResourceType` has no shape for it. The three `defender` checks are a
+   separate question and probably a no: they ask whether paid Microsoft
+   products are licensed, and "you have not bought Defender" is not a
+   configuration mistake.
 4. Detach `AmazonEC2FullAccess` and friends from `EC2_Dude`, so the documented
    least-privilege policy is the one actually in force and the smoke test
    proves it. Already done for EC2 and S3; SNS, CloudWatch and SSM remain and
