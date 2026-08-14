@@ -280,9 +280,11 @@ section {
   border-radius: 6px;
   padding: 26px 28px;
 }
+/* The stagger follows the order they appear in, so it reads top to bottom
+   rather than lighting up out of sequence. */
 #listing { animation-delay: .09s; padding-bottom: 12px; }
-#detail { animation-delay: .14s; }
-#create { animation-delay: .19s; }
+#create { animation-delay: .14s; }
+#detail { animation-delay: .19s; }
 #blueprint { animation-delay: .09s; }
 
 h1 { font: 600 26px/1.1 var(--sans); margin: 0; }
