@@ -1419,9 +1419,30 @@ Everything else in *Not done* above is a refinement.
    create, scan, fix, delete and clean up against
    `74baf379-b419-4e16-a50b-98bc450901c9`, machines included. What remains on
    the Azure side is small: a rules widget so the page can submit a firewall
-   with rules rather than an empty group, and no external benchmark has ever
-   been pointed at the Azure rules the way Prowler and CloudGoat were pointed
-   at the AWS ones. The second is the more valuable and the more honest gap.
+   with rules rather than an empty group.
+
+   **The benchmark gap is closed, and it was never what this entry said it
+   was.** Prowler is not an AWS tool — it covers Azure, Google Cloud,
+   Kubernetes and M365, and `prowler azure --sp-env-auth` is one word different
+   from the command already documented above, reading the same four `.env`
+   variables. It has now been run against the subscription and
+   `docs/benchmark.md` has the result: five checks overlap and **all five
+   agree**, including three where both tools say nothing is wrong; eleven
+   further storage checks are Prowler's alone, of which about four are
+   security-relevant and the rest are durability or defence in depth; and four
+   services — monitor, defender, network watcher, appinsights — have no rules
+   here at all. Monitor is the largest block and is the Azure counterpart of
+   the AWS alarm scanner.
+
+   What the run does not cover is the four types this project spent most
+   effort on. The subscription held two storage accounts and nothing else, so
+   vaults, networks, security groups and machines were never scanned by it.
+   Re-running while `azure-lifecycle.mjs` has resources up would be a
+   materially better test.
+
+   CloudGoat genuinely is AWS-only. Its Azure counterpart is AzureGoat
+   (ine-labs/AzureGoat), Terraform-deployed and covering storage, functions,
+   CosmosDB and identity escalation. Nobody has run it.
 
    Two things still worth knowing before touching a subscription. Being Global
    Administrator in Entra grants no role on a subscription; that is a separate

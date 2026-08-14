@@ -436,3 +436,89 @@ produced by the suffix method, so the ones not re-measured since may be
 understated in the same way.
 
 [cg]: https://github.com/RhinoSecurityLabs/cloudgoat
+
+
+# Benchmarked against Prowler, on Azure
+
+The first external benchmark of the Azure rules. Until this run, everything
+known about their quality came from tests written by the people who wrote the
+rules — the gap CLAUDE.md had been calling the more honest of the two.
+
+It was also cheaper to close than the note implied. Prowler is not an AWS tool
+that happens to have been pointed at AWS: it covers Azure, Google Cloud,
+Kubernetes and M365, and `prowler azure` is one word different from the command
+this repository already documented. Nobody had run it.
+
+```bash
+uv python install 3.12
+uv venv --python 3.12 /tmp/prowler && VIRTUAL_ENV=/tmp/prowler uv pip install prowler
+prowler azure --sp-env-auth --subscription-id <id>
+```
+
+`--sp-env-auth` reads `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and
+`AZURE_CLIENT_SECRET`, which are the four variables already in `.env` minus the
+subscription. No extra credential, and the run is read-only.
+
+Prowler 5.37.1, subscription `74baf379…`, 55 findings: 45 fail, 10 pass, across
+storage (36), monitor (13), defender (3), network (2) and appinsights (1). The
+two storage accounts scanned are a teammate's, made in the portal — which makes
+them the better test, because nothing in this project created them.
+
+## Where the two agree, which is everywhere they overlap
+
+Five checks exist on both sides, and the verdict matches on all five. Three are
+agreements that nothing is wrong, which are the easier ones to get wrong
+silently.
+
+| Prowler | this tool | both say |
+|---|---|---|
+| `storage_account_key_access_disabled` | `shared_key_allowed` | problem |
+| `storage_account_public_network_access_disabled`, `storage_default_network_access_rule_is_denied` | `reachable_from_anywhere` | problem |
+| `storage_blob_public_access_level_is_disabled` | `public_blob_access` | fine |
+| `storage_ensure_minimum_tls_version_12` | `insecure_tls_version` | fine |
+| `storage_secure_transfer_required_is_enabled` | `no_https_only` | fine |
+
+No disagreement, in either direction. The Azure rules are narrower than
+Prowler's, not wrong.
+
+## What Prowler covers that this does not
+
+Eleven storage checks, and they are not all the same kind of thing. Worth
+separating before anyone files eleven tickets:
+
+**Security-relevant and plausible additions.** Soft delete on blobs, key
+rotation older than 90 days, private endpoints, and defaulting to Entra
+authorization rather than the account key. The last is the other half of a
+finding this tool already has — it reports that the key *works*, and Prowler
+also reports that Entra is not the default.
+
+**Durability rather than exposure.** Blob versioning and geo-redundancy. Real,
+and arguably outside what this tool says it does: the README scope is
+configuration that is *unsafe*, and an account with no geo-redundancy is not
+reachable by anyone it should not be. Adding them would widen the claim.
+
+**Defence in depth, debatable.** Customer-managed keys, infrastructure
+encryption, trusted Azure services, and SMB channel encryption algorithms.
+Each is a real hardening step and none of them is the thing that gets an
+account read by a stranger.
+
+## Four services this tool does not scan at all
+
+Monitor is the largest single block Prowler reports (13 checks), and it is
+activity-log alerting: alerts on creating or updating a network security
+group, a public IP rule, a policy assignment, a security solution. That is the
+Azure counterpart of the alarm scanner on the AWS side, which exists and has
+never had an Azure equivalent.
+
+Defender (3), Network Watcher and bastion host (2) and Application Insights
+(1) are the rest. None is a gap in the rules that exist; they are services
+nobody has written rules for.
+
+## What this measurement does not say
+
+The subscription holds two storage accounts and nothing else. Prowler reported
+no findings on key vaults, virtual networks, security groups or machines
+because there were none to report on — the four types this project spent the
+most effort on are the four this benchmark did not exercise. Re-running it
+while `azure-lifecycle.mjs` has a machine up would be a materially better test
+and has not been done.
