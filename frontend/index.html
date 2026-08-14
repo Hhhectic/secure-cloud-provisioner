@@ -59,14 +59,12 @@
       <div id="cleanup-box"></div>
     </section>
 
-    <section id="detail">
-      <div class="card-head">
-        <h2>Detail</h2>
-        <span id="detail-id" class="muted"></span>
-      </div>
-      <div id="detail-body" class="muted">Pick something from the list.</div>
-    </section>
-
+    <!-- Create sits above Detail on purpose. Detail is the tallest thing on
+         the page by a distance - every finding at full length, then the
+         resource's whole settings block - so with it in between, reaching the
+         form meant scrolling past all of that. Create is also the panel you
+         come to the page intending to use, where Detail is a response to
+         having clicked a row. -->
     <section id="create">
       <button id="create-fold" class="fold" aria-expanded="true">
         <span class="fold-left">
@@ -79,6 +77,14 @@
         </span>
       </button>
       <div id="create-body" class="fold-body"></div>
+    </section>
+
+    <section id="detail">
+      <div class="card-head">
+        <h2>Detail</h2>
+        <span id="detail-id" class="muted"></span>
+      </div>
+      <div id="detail-body" class="muted">Pick something from the list.</div>
     </section>
 
     <section id="blueprint" class="hidden">

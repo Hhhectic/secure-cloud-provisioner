@@ -261,7 +261,22 @@ def check_alarm_spec(spec):
         "threshold": spec.get("threshold"),
         "period": spec.get("period"),
         "evaluation_periods": spec.get("evaluation_periods", 1),
-        "treat_missing_data": spec.get("treat_missing_data", "missing"),
+        # The same defaults aws/alarms.py:create_alarm applies when the spec
+        # leaves these out, rather than AWS's raw ones.
+        #
+        # This is the contract _bucket_check_spec states: the warnings shown
+        # before creation are the warnings shown after it. It was broken here
+        # in the safe direction, which is still broken - a billing alarm with
+        # no treat_missing_data was pre-flighted as "missing", which is exactly
+        # what the rule below warns about, and then created as "notBreaching",
+        # which is not. The form warned that the alarm would spend its life
+        # unable to judge, and then built one that could. A pre-flight that
+        # predicts a problem the create does not produce is a pre-flight
+        # people learn to skip.
+        "treat_missing_data": spec.get("treat_missing_data")
+            or ("notBreaching"
+                if (spec.get("namespace") or "") == BILLING_NAMESPACE
+                else "missing"),
         # A form that names somewhere to send the message counts as having a
         # destination; whether anyone is listening cannot be known yet.
         "alarm_actions": ["pending"] if spec.get("notify") else [],

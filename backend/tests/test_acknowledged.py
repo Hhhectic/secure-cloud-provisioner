@@ -292,3 +292,94 @@ def test_no_scope_still_audits_everything():
                                today=TODAY)
 
     assert len(found) == 1
+
+
+def _cli():
+    """backend/main.py, loaded by path rather than by name.
+
+    `import main` is ambiguous in this repository and resolves to the *wrong*
+    one under pytest: there is a main.py at the root - the older Azure app -
+    and it wins. Same shape of trap as backend/az/ not being called
+    backend/azure/, and worth the four lines to be unambiguous about which
+    program is under test.
+    """
+    import importlib.util
+
+    where = Path(__file__).resolve().parent.parent / "main.py"
+    spec = importlib.util.spec_from_file_location("scp_cli", where)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+# ----------------------------------------------- writing one, from the CLI only
+
+
+def test_the_cli_writes_an_entry_the_reader_then_honours(tmp_path, monkeypatch):
+    """The round trip. Written by hand until now, which meant leaving the tool.
+
+    The writer lives in main.py rather than anywhere api/ can reach, and that
+    placement is the security argument rather than an accident of layout: a
+    person at a terminal is already authenticated by having the shell, where
+    the HTTP API has no login at all.
+    """
+    main = _cli()
+
+    where = tmp_path / "acknowledged.json"
+    monkeypatch.setenv("SCP_ACKNOWLEDGED", str(where))
+
+    entry = {"rule_id": "bucket:public_policy", "reason": "a personal CV site",
+             "by": "richard", "on": "2026-08-14", "until": "2027-02-14"}
+    main._append_acknowledgement(entry)
+
+    entries, problem = acknowledged.load()
+    assert problem is None
+    assert entries == [entry]
+
+    # And the reader treats it as live rather than merely present.
+    found = [_finding("bucket:public_policy")]
+    acknowledged.apply(found, entries, today=date(2026, 8, 15))
+    assert found[0]["acknowledged"]["by"] == "richard"
+
+
+def test_writing_a_second_entry_keeps_the_first_and_the_comment(tmp_path, monkeypatch):
+    """Read-modify-write, not append: the file carries a comment block
+    explaining itself and an append would either destroy it or produce
+    something that is not JSON."""
+    main = _cli()
+
+    where = tmp_path / "acknowledged.json"
+    where.write_text(json.dumps({
+        "_comment": ["why this file exists"],
+        "acknowledgements": [{"rule_id": "first:setting", "by": "someone",
+                              "on": "2026-01-01"}],
+    }, indent=2))
+    monkeypatch.setenv("SCP_ACKNOWLEDGED", str(where))
+
+    main._append_acknowledgement({"rule_id": "second:setting", "by": "else",
+                                  "on": "2026-08-14"})
+
+    document = json.loads(where.read_text())
+    assert document["_comment"] == ["why this file exists"]
+    assert [e["rule_id"] for e in document["acknowledgements"]] == [
+        "first:setting", "second:setting"]
+
+
+def test_the_writer_is_not_reachable_from_the_api(tmp_path):
+    """The other half of test_no_part_of_the_api_writes_acknowledgements.
+
+    That one reads api/*.py. This one says the writer is somewhere api/ does
+    not import: main.py is the CLI entrypoint and nothing under api/ imports
+    it, so no HTTP route can reach the function however it is called.
+    """
+    api = Path(__file__).resolve().parent.parent / "api"
+    source = "\n".join(f.read_text() for f in api.glob("*.py"))
+
+    assert "import main" not in source
+    assert "from main" not in source
+    assert "_append_acknowledgement" not in source
+
+    # And scanner/acknowledged.py, which api/ *does* import, still only reads.
+    reader = (Path(__file__).resolve().parent.parent
+              / "scanner" / "acknowledged.py").read_text()
+    for writes in (".write_text", ".write(", "json.dump("):
+        assert writes not in reader, writes

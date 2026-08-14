@@ -1381,3 +1381,63 @@ def test_an_aws_shaped_rule_is_not_accepted_as_an_azure_one(client):
     with pytest.raises(Exception):
         models.AzureSecurityRule(name="x", source="*",
                                  destination_port_range="22")
+# ------------------------------------------- the region a pre-flight judges by
+
+
+def test_a_billing_alarm_in_the_wrong_region_is_refused_from_the_page(client):
+    """The guardrail was reachable only by a caller who knew to bypass the form.
+
+    Region arrives as a query parameter, not in the body, so `spec["region"]`
+    was always None and billing_wrong_region could not fire at all. A billing
+    alarm built in us-west-2 pre-flighted as 0 critical and was created - and
+    AWS publishes spending figures only to us-east-1, so it then sat in
+    INSUFFICIENT_DATA forever, which is the state the rule's own text calls
+    "easy to read as nothing is wrong".
+    """
+    spec = {"name": "spend", "namespace": "AWS/Billing",
+            "metric_name": "EstimatedCharges", "threshold": 5, "notify": True}
+
+    right = client.post("/resources/alarm/check?region=us-east-1", json=spec).json()
+    assert right["counts"]["critical"] == 0
+
+    wrong = client.post("/resources/alarm/check?region=us-west-2", json=spec).json()
+    assert wrong["counts"]["critical"] == 1
+    assert "us-west-2" in wrong["warnings"][0]["message"]
+
+    # And the create refuses rather than building something that cannot work.
+    refused = client.post("/resources/alarm?region=us-west-2", json=spec)
+    assert refused.status_code == 400
+
+
+def test_a_region_stated_in_the_body_still_wins(client):
+    """setdefault, not assignment: a caller who said so meant it."""
+    body = client.post("/resources/alarm/check?region=us-east-1", json={
+        "name": "spend", "namespace": "AWS/Billing",
+        "metric_name": "EstimatedCharges", "threshold": 5, "notify": True,
+        "region": "eu-west-1",
+    }).json()
+
+    assert body["counts"]["critical"] == 1
+    assert "eu-west-1" in body["warnings"][0]["message"]
+
+
+def test_an_azure_spec_does_not_get_an_aws_region_injected(client):
+    """`region` on an Azure spec carries the location.
+
+    _az_vm_create reads `spec.get("region") or spec.get("location")`, so
+    injecting the AWS query parameter here would try to build a storage
+    account in "us-east-1" - a place Azure has never heard of - for anybody
+    who left the location blank.
+    """
+    from api import registry as registry_module
+    from api.app import _spec_for_checking
+    from api import models as models_module
+
+    spec = models_module.ResourceSpec(name="acct", resource_group="rg")
+
+    azure = _spec_for_checking(registry_module.get("azure-storage"), spec,
+                               "us-east-1")
+    assert "region" not in azure or azure["region"] != "us-east-1"
+
+    aws = _spec_for_checking(registry_module.get("alarm"), spec, "us-east-1")
+    assert aws["region"] == "us-east-1"

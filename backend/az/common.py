@@ -91,6 +91,39 @@ def not_allowed_to_look(resource_group, what=None):
     )
 
 
+def why_azure_refused(error, doing):
+    """Azure's own refusal, as a sentence a caller can act on.
+
+    Every destructive call in this package could be refused by Azure for a
+    reason that is genuinely useful - a subnet still holding a network card, a
+    resource group that is locked, a vault inside its retention period - and
+    not one of them caught it. The exception travelled up through the route
+    and became a 500, so the page showed "HTTP 500" while Azure had said
+    exactly which network card was in the way.
+
+    The delete this was found on even had a docstring promising the opposite:
+    that Azure's refusal was "left in place rather than worked around" because
+    "its message names what is still attached". It was left in place in the
+    sense of being unhandled, which is the one way of leaving it in place that
+    stops anybody reading it.
+
+    Same lesson as `denied` one screen up, in the other direction: a read that
+    only handles 404 turns a missing role into a crash, and a write that
+    handles nothing turns every refusal into one.
+    """
+    code = getattr(error, "error", None)
+    code = getattr(code, "code", None) or getattr(error, "reason", None) or ""
+
+    # The SDK's str() is the whole HTTP response - status line, headers and
+    # body. The human sentence is in there but so is everything else.
+    detail = str(getattr(error, "message", None) or error).strip()
+    detail = detail.split("\n")[0].strip()
+
+    return (f"Azure refused to {doing}"
+            + (f" ({code})" if code else "") + ". "
+            + (detail or "No reason was given.")).strip()
+
+
 INSTALL_HINT = (
     "The Azure half needs its own dependencies, which the AWS half does not "
     "install. Run `pip install -r requirements.txt` from the repository root."

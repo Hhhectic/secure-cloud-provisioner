@@ -280,9 +280,11 @@ section {
   border-radius: 6px;
   padding: 26px 28px;
 }
+/* The stagger follows the order they appear in, so it reads top to bottom
+   rather than lighting up out of sequence. */
 #listing { animation-delay: .09s; padding-bottom: 12px; }
-#detail { animation-delay: .14s; }
-#create { animation-delay: .19s; }
+#create { animation-delay: .14s; }
+#detail { animation-delay: .19s; }
 #blueprint { animation-delay: .09s; }
 
 h1 { font: 600 26px/1.1 var(--sans); margin: 0; }
@@ -458,6 +460,19 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
 .finding p { margin: 11px 0 0; max-width: 60ch; text-wrap: pretty; }
 .finding.acknowledged { opacity: .62; }
 .cite { font: 11.5px var(--mono); color: #7a7c76; }
+
+/* Folded away by default. The rule id is needed by anyone writing an
+   acknowledgement and is noise to everyone else, so it is one click rather
+   than a line in every finding. */
+.ack-help { margin-top: 12px; }
+.ack-help > summary {
+  font: 11px var(--mono); color: var(--muted-2); cursor: pointer;
+  letter-spacing: .02em; width: fit-content;
+}
+.ack-help > summary:hover { color: var(--ink); }
+.ack-help > div { padding: 10px 0 0; }
+.ack-help p { margin: 0 0 10px; font-size: 12px; max-width: 60ch; }
+.ack-help .mono-block { margin-bottom: 10px; max-height: none; }
 .ack { font-size: 12.5px; font-style: italic; color: var(--muted); max-width: 60ch; }
 
 .warn {

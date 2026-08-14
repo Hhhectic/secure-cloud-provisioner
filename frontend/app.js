@@ -515,7 +515,79 @@ function renderFinding(w, resourceId) {
       "Change this before creating it, or accept it knowingly.", "muted"));
   }
 
+  // The identifier, and a ready-made entry for acknowledged.json.
+  //
+  // The page could show acknowledgements and could not help you write one:
+  // the rule_id existed only in the API response, so using the feature meant
+  // leaving the page for curl. This closes that without giving the API a
+  // write path - the snippet is produced here and goes on the clipboard, and
+  // the file is still edited and committed by a person. See
+  // scanner/acknowledged.py for why that stays true.
+  //
+  // Gated on resourceId for the same reason the fix button above is: a
+  // pre-flight finding describes something that does not exist, and offering
+  // to acknowledge it would write an entry naming a resource that may never
+  // be created - which the audit would then report as matching nothing.
+  if (resourceId && w.rule_id && !w.acknowledged) {
+    box.append(acknowledgeHelp(w));
+  }
+
   return box;
+}
+
+/* Everything needed to acknowledge one finding, without acknowledging it.
+
+   `by` is left as a placeholder rather than guessed at: the browser does not
+   know who is sitting in front of it, and a name this file invented would be
+   worse provenance than a blank somebody has to fill in. The CLI does know,
+   and fills it from git. */
+function acknowledgeHelp(w) {
+  const wrap = document.createElement("details");
+  wrap.className = "ack-help";
+
+  const today = new Date().toISOString().slice(0, 10);
+  const entry = {
+    rule_id: w.rule_id,
+    reason: "why this is intended, in a sentence somebody else can check",
+    by: "your name",
+    on: today,
+  };
+  const snippet = JSON.stringify(entry, null, 2);
+
+  wrap.append(text("summary", w.rule_id));
+
+  const body = document.createElement("div");
+  body.append(text("p",
+    "Paste this into the acknowledgements list in backend/acknowledged.json " +
+    "and commit it. The finding keeps its severity and its place here; it is " +
+    "dimmed and says who accepted it. Nothing is hidden.", "muted"));
+
+  const pre = text("pre", snippet, "mono-block");
+  body.append(pre);
+
+  const copy = document.createElement("button");
+  copy.className = "quiet";
+  copy.textContent = "Copy";
+  copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(snippet);
+      toast("Entry copied. Paste it into backend/acknowledged.json.");
+    } catch {
+      // A page served over plain HTTP on a machine without clipboard
+      // permission cannot write to it, and failing silently would look like
+      // the button doing nothing.
+      const range = document.createRange();
+      range.selectNodeContents(pre);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      toast("Clipboard unavailable — the entry is selected, copy it.", true);
+    }
+  };
+  body.append(copy);
+
+  wrap.append(body);
+  return wrap;
 }
 
 // ------------------------------------------------------------------ create
@@ -778,13 +850,20 @@ async function buildCreateForm() {
   const row = document.createElement("div");
   row.className = "row";
 
+  // Runs the same check the panel above already runs, into the same panel,
+  // rather than a second copy of the answer below the buttons. It used to
+  // write its own: pressing it printed the identical findings twice on one
+  // screen, and worse, that second copy was never cleared - so editing the
+  // form left a stale verdict sitting underneath the live one. A form with
+  // two critical findings showed "0 critical" from an earlier press, lower
+  // down the page, where it reads as the conclusion.
   const check = document.createElement("button");
   check.textContent = "Check first (creates nothing)";
-  check.onclick = () => submitSpec(inputs, true);
+  check.onclick = () => runLiveCheck(true);
 
   const make = document.createElement("button");
   make.textContent = "Create";
-  make.onclick = () => submitSpec(inputs, false);
+  make.onclick = () => submitSpec(inputs);
 
   row.append(check, make);
   box.append(row);
@@ -1104,24 +1183,38 @@ let liveTimer = null;
 let liveSeq = 0;
 
 function scheduleLiveCheck() {
+  // A refusal is about the spec that was sent. The moment the form changes it
+  // is describing something else, and it sits below the live panel where a
+  // stale "0 critical" reads as the final word.
+  const out = $("create-out");
+  if (out && out.dataset.spec) {
+    out.replaceChildren();
+    delete out.dataset.spec;
+  }
+
   clearTimeout(liveTimer);
   liveTimer = setTimeout(runLiveCheck, LIVE_CHECK_DELAY_MS);
 }
 
-async function runLiveCheck() {
+async function runLiveCheck(explicit = false) {
   const box = $("create-live");
   const inputs = state.createInputs;
   if (!box || !inputs) return;
 
+  clearTimeout(liveTimer);
   const spec = collectSpec(inputs);
 
-  // Not an error worth showing. Somebody who has typed two characters of a
-  // name is mid-thought, and a red box telling them the name is missing is
-  // the tool nagging rather than helping.
+  // Not an error worth showing, unless it was asked for. Somebody who has
+  // typed two characters of a name is mid-thought, and a red box telling them
+  // the name is missing is the tool nagging rather than helping - but somebody
+  // who pressed the button and got nothing back is owed the reason.
   if (!spec.name) {
     box.replaceChildren();
+    if (explicit) box.append(text("p", "A name is required.", "bad"));
     return;
   }
+
+  if (explicit) box.replaceChildren(text("p", "Checking…", "muted"));
 
   // Two guards against showing an answer to a question nobody asked any more.
   // Responses can arrive out of order, so a slower earlier one must not
@@ -1171,9 +1264,9 @@ async function runLiveCheck() {
   }
 }
 
-async function submitSpec(inputs, dryRun, acceptRisk = false) {
+async function submitSpec(inputs, acceptRisk = false) {
   const out = $("create-out");
-  out.replaceChildren(text("p", dryRun ? "Checking…" : "Creating…", "muted"));
+  out.replaceChildren(text("p", "Creating…", "muted"));
 
   const spec = collectSpec(inputs);
   if (!spec.name) {
@@ -1181,9 +1274,8 @@ async function submitSpec(inputs, dryRun, acceptRisk = false) {
     return;
   }
 
-  const path = dryRun
-    ? `/resources/${state.type}/check`
-    : `/resources/${state.type}` + (acceptRisk ? "?accept_risk=true" : "");
+  const path = `/resources/${state.type}`
+    + (acceptRisk ? "?accept_risk=true" : "");
 
   let body;
   try {
@@ -1200,8 +1292,14 @@ async function submitSpec(inputs, dryRun, acceptRisk = false) {
       for (const w of e.detail.warnings) out.append(renderFinding(w, null));
 
       const anyway = text("button", "Create it anyway", "danger");
-      anyway.onclick = () => submitSpec(inputs, false, true);
+      anyway.onclick = () => submitSpec(inputs, true);
       out.append(anyway);
+
+      // This refusal describes the spec as it was submitted. Editing the form
+      // makes it a statement about something that is no longer on screen, so
+      // it is dropped on the next change rather than left contradicting the
+      // live panel above.
+      out.dataset.spec = "1";
       return;
     }
     out.replaceChildren(text("p", e.message, "bad"));
@@ -1209,14 +1307,11 @@ async function submitSpec(inputs, dryRun, acceptRisk = false) {
   }
 
   out.replaceChildren();
+  delete out.dataset.spec;
 
-  if (!dryRun) {
-    out.append(text("p", `Created ${body.resource_id}`));
-    for (const p of body.problems || []) out.append(text("p", p, "muted"));
-    loadList();
-  } else {
-    out.append(text("p", "Nothing was created. This is what it would report:"));
-  }
+  out.append(text("p", `Created ${body.resource_id}`));
+  for (const p of body.problems || []) out.append(text("p", p, "muted"));
+  loadList();
 
   const counts = body.counts;
   out.append(text("p",

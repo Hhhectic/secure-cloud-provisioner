@@ -29,6 +29,7 @@ from az.common import (
     plain,
     resource_group_of,
     storage_client,
+    why_azure_refused,
 )
 
 
@@ -387,7 +388,10 @@ def delete_account(client, name, force=False):
     if not group:
         return False, f"No storage account named '{short}' in this subscription."
 
-    client.storage_accounts.delete(group, short)
+    try:
+        client.storage_accounts.delete(group, short)
+    except Exception as e:            # HttpResponseError, imported lazily
+        return False, why_azure_refused(e, f"delete '{short}'")
     return True, f"Deleted storage account '{short}' and everything in it."
 
 
