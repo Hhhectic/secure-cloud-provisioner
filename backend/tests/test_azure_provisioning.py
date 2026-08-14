@@ -602,11 +602,32 @@ def test_a_machine_delete_says_what_it_leaves_behind():
     assert "-nic" in message
 
 
+class _StubCapability:
+    def __init__(self, name, value):
+        self.name = name
+        self.value = value
+
+
 class _StubSku:
-    def __init__(self, name, restrictions=(), resource_type="virtualMachines"):
+    """A SKU as resource_skus.list returns one.
+
+    capabilities is here because the real SDK sends it, and a stub that omits
+    a field the code reads cannot show the code reading it wrongly. It did
+    exactly that once: offered_sizes reached for sku.capabilities directly,
+    the stub had none, and the AttributeError was swallowed by the blanket
+    except into "this subscription is offered nothing" - a silently empty
+    menu rather than a failure.
+
+    Azure sends every capability value as a string, including the numbers.
+    """
+
+    def __init__(self, name, restrictions=(), resource_type="virtualMachines",
+                 vcpus="1", memory_gb="2"):
         self.name = name
         self.resource_type = resource_type
         self.restrictions = list(restrictions)
+        self.capabilities = [_StubCapability("vCPUs", vcpus),
+                             _StubCapability("MemoryGB", memory_gb)]
 
 
 class _StubSkuOps:

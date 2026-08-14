@@ -1180,16 +1180,23 @@ def test_a_size_this_subscription_cannot_start_is_not_offered(monkeypatch):
     from api import registry
     from az import vm as az_vm
 
-    monkeypatch.setattr(az_vm, "available_sizes",
-                        lambda client, location: ["Standard_F1als_v7"])
+    monkeypatch.setattr(
+        az_vm, "offered_sizes",
+        lambda client, location: [{"name": "Standard_F1als_v7",
+                                   "vcpus": 1, "memory_gb": 2}])
 
     offered = registry.get("azure-vm").options(object())["vm_size"]
 
     assert [o["value"] for o in offered] == ["Standard_F1als_v7"]
 
+    # And the label says what the machine is, not only what Azure calls it.
+    # "Standard_F1als_v7" and "Standard_F1as_v7" differ by one letter and by
+    # twice the memory; nobody chooses correctly between those from the name.
+    assert offered[0]["label"] == "Standard_F1als_v7 — 1 core, 2 GB memory"
+
 
 def test_an_unanswerable_size_lookup_falls_back_rather_than_emptying_the_menu():
-    """available_sizes never raises and returns [] when it cannot tell.
+    """offered_sizes never raises and returns [] when it cannot tell.
 
     An empty menu is a dead form. The allowlist is the honest second answer:
     it is still every size this tool permits, and the create refuses anything

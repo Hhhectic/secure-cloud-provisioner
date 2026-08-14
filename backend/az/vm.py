@@ -87,8 +87,9 @@ ALLOWED_VM_SIZES = {
 DEFAULT_VM_SIZE = "Standard_B1s"
 
 
-def available_sizes(client, location):
-    """Which allowlisted sizes this subscription can actually start here.
+def offered_sizes(client, location):
+    """Which allowlisted sizes this subscription can start here, and what
+    each one is.
 
     Azure restricts sizes per subscription as well as per region, and reports
     the two the same way. `resource_skus.list` is the only place the answer
@@ -96,12 +97,19 @@ def available_sizes(client, location):
     region that has it, and still be refused for this subscription with
     `SkuNotAvailable`, which is what happened on the first live run.
 
-    Returns a sorted list, empty if nothing in the allowlist is offered. Never
-    raises: this is called to improve a refusal, and a refusal that fails while
+    Returns [{"name", "vcpus", "memory_gb"}], sorted by name and empty if
+    nothing in the allowlist is offered. Never raises: this is called both to
+    build a menu and to improve a refusal, and a refusal that fails while
     explaining itself is worse than the plain one.
+
+    The capabilities come back on the same call that answers the availability
+    question, so carrying them costs nothing. They are worth carrying because
+    the names do not say what they are: `Standard_F1as_v7` and
+    `Standard_F1als_v7` differ by one letter and by twice the memory, and
+    nobody picks correctly between those from the name alone.
     """
     try:
-        offered = set()
+        found = {}
         for sku in client.resource_skus.list(
                 filter=f"location eq '{location}'"):
             if sku.resource_type != "virtualMachines":
@@ -112,10 +120,40 @@ def available_sizes(client, location):
             # here, whatever the reason code says.
             if sku.restrictions:
                 continue
-            offered.add(sku.name)
-        return sorted(offered)
+            # getattr, because "never raises" here swallows an AttributeError
+            # into "no sizes offered" - which is exactly what happened when
+            # this first read sku.capabilities directly and the test stub had
+            # no such field. A blanket except turns a typo into a silent
+            # empty menu.
+            caps = {c.name: c.value
+                    for c in (getattr(sku, "capabilities", None) or [])}
+            found[sku.name] = {
+                "name": sku.name,
+                "vcpus": _as_number(caps.get("vCPUs")),
+                "memory_gb": _as_number(caps.get("MemoryGB")),
+            }
+        return [found[k] for k in sorted(found)]
     except Exception:
         return []
+
+
+def _as_number(value):
+    """A capability as a number, or None. Azure sends them all as strings."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return int(number) if number == int(number) else number
+
+
+def available_sizes(client, location):
+    """The names alone, for callers that only need the list.
+
+    Kept as its own function rather than folded into `offered_sizes` because
+    three callers want exactly this and rewriting them to index a dict would
+    be churn for nothing.
+    """
+    return [size["name"] for size in offered_sizes(client, location)]
 
 
 def first_available_size(client, location, preferred=None):
@@ -452,24 +490,39 @@ def create_vm(client, name, resource_group, location="eastus",
             "anywhere."
         ), problems
 
-    # A pre-flight size check belongs here and is not here, deliberately.
+    # Asked before anything is built, which is the whole point of asking.
     #
-    # `available_sizes` is the only thing that knows whether *this
-    # subscription* will start a size, and asking it before building anything
-    # would turn the leak below into a clean refusal. It was tried and taken
-    # out again: `resource_skus.list` takes minutes even filtered to one
-    # location - measured against this subscription, not guessed - so every
-    # machine create would wait on it, and trading a leak for a three-minute
-    # hang is not a trade.
+    # ALLOWED_VM_SIZES is this tool's list; what *this subscription* will
+    # actually start is a different question, and only `resource_skus` answers
+    # it. Without this check a size Azure declines - which is every burstable
+    # size on this subscription - gets as far as building a virtual network, a
+    # security group and a network card before failing, and those are left
+    # behind. With `assign_public_ip` it strands a static address that bills.
     #
-    # What is left is the leak, and it is real: a create refused by Azure for
-    # a size restriction has already built a network, a security group and a
-    # card, and leaves them. `problems` carries them, and the routes now pass
-    # that list on rather than discarding it, so the caller is at least told.
-    # Closing it properly needs either a cheap way to ask the question or a
-    # decision to roll back scaffolding this call created, and the second one
-    # argues with "Nothing rolls back" in CLAUDE.md. It is a group decision
-    # rather than a quiet one.
+    # This check was written, reverted, and put back. The revert was made on a
+    # measurement that turned out to be wrong: `resource_skus.list` was timed
+    # at over three minutes and recorded as such, which would have made every
+    # machine create wait on it. Re-measured on a quiet subscription it is
+    # five to eight seconds for 1,490 SKUs - the slow reading was taken
+    # straight after a burst of creates and deletes and was almost certainly
+    # Azure throttling with SDK backoff. Six seconds on a create that already
+    # takes a minute, to stop three resources being stranded, is a trade worth
+    # making.
+    #
+    # An empty answer is still not a refusal. `offered_sizes` never raises and
+    # returns nothing when it cannot ask, and a subscription this tool cannot
+    # interrogate should still be allowed to try - Azure's own verdict is the
+    # backstop, as it was before.
+    offered = available_sizes(client, location)
+    if offered and vm_size not in offered:
+        return False, (
+            f"Azure will not start {vm_size} in {location} for this "
+            f"subscription. It is on this tool's allowlist, but Azure declines "
+            f"to offer some machine families to some subscriptions regardless "
+            f"of quota or capacity, and reports that in the language of "
+            f"capacity. Sizes it will start here: {', '.join(offered)}. "
+            f"Nothing was created."
+        ), problems
 
     # The resource group is checked before a second client is built, because
     # it is the cheapest thing that can stop this and the one most likely to.

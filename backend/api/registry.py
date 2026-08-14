@@ -1479,6 +1479,30 @@ def _az_vm_cleanup(client, options):
         client, force=options.get("force", False))
 
 
+def _size_choices(offered, allowlist):
+    """A machine size menu that says what each size is.
+
+    `offered` carries vCPU and memory from resource_skus; the fallback is the
+    bare allowlist, used when that call could not be made. A size with no
+    numbers is labelled with its name alone rather than with a guess - the
+    menu being less helpful is better than it being wrong about how big a
+    machine is.
+    """
+    if not offered:
+        return [{"value": name, "label": name} for name in sorted(allowlist)]
+
+    choices = []
+    for size in offered:
+        vcpus, memory = size.get("vcpus"), size.get("memory_gb")
+        if vcpus and memory:
+            core = "core" if vcpus == 1 else "cores"
+            label = f"{size['name']} — {vcpus} {core}, {memory} GB memory"
+        else:
+            label = size["name"]
+        choices.append({"value": size["name"], "label": label})
+    return choices
+
+
 def _az_vm_options(client):
     """What a machine form may offer.
 
@@ -1507,11 +1531,21 @@ def _az_vm_options(client):
     # wrong region is a worse menu than this, but an empty one is worse still,
     # so an unanswerable lookup falls back to the allowlist rather than
     # offering nothing.
-    startable = az_vm.available_sizes(client, DEFAULT_AZURE_LOCATION)
+    startable = az_vm.offered_sizes(client, DEFAULT_AZURE_LOCATION)
 
     return {
-        "vm_size": [{"value": size, "label": size}
-                    for size in (startable or sorted(az_vm.ALLOWED_VM_SIZES))],
+        # Labelled with what the machine is, not only what Azure calls it.
+        #
+        # The name is jargon of the purest kind - family, generation, memory
+        # ratio and feature letters, all of which have to be already known to
+        # be read - and this project's own style note says findings are aimed
+        # at somebody who does not know the jargon. The port menu two lines
+        # down says "22 - SSH, the remote login door for Linux servers"; the
+        # size menu was saying "Standard_F1als_v7" twice.
+        #
+        # The numbers arrive on the same call that decides which sizes are
+        # offered at all, so this costs nothing extra.
+        "vm_size": _size_choices(startable, az_vm.ALLOWED_VM_SIZES),
         "open_ports": _port_choices(),
         "allowed_source": [
             {"value": "*", "label": "* — the entire internet"},
