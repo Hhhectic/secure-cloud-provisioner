@@ -628,15 +628,18 @@ const FIELDS = {
     ["name", "text", "a name for this firewall"],
     ["resource_group", "text", "Azure needs one; it is created if it is new"],
     ["location", "text", "eastus, westeurope, uksouth…"],
-    // No rules editor here yet. The AWS "rules" widget produces AWS-shaped
-    // rules - protocol, from_port, to_port, source - and an Azure rule is a
-    // different shape with a priority that decides which of several
-    // overlapping rules wins. Submitting one as the other would be the exact
-    // drift CLAUDE.md records about the TLS dropdown on group/main. So the
-    // page creates an empty group, which Azure's own final rule leaves
-    // denying everything inbound, and create_nsg says so in its problems.
-    // Rules come from the API or the CLI until a widget exists that knows
-    // about priority.
+    // Its own widget, not the AWS one. This entry used to say rules had to
+    // come from the API or the CLI "until a widget exists that knows about
+    // priority", and that had gone stale in a way worth recording: nothing
+    // here needs to know about priority, because az/nsg._priorities_for
+    // decides it from the order of this list. What actually made the AWS
+    // widget unusable is smaller and sharper - an Azure rule carries a name,
+    // a direction, and an access that can be Deny, and a security group rule
+    // carries none of those because every rule in one is an allow. A form
+    // submitting Azure rules in the AWS shape would have sent every rule as
+    // Allow and built a different firewall from the one on screen.
+    ["rules", "azure-rules",
+     "in order — the first rule that matches a packet decides"],
   ],
   "azure-vnet": [
     ["name", "text", "a name for this network"],
@@ -702,15 +705,16 @@ async function buildCreateForm() {
     const caption = text("label", LABELS[name] || name.replace(/_/g, " "));
     wrap.append(caption);
 
-    if (kind === "rules") {
+    if (kind === "rules" || kind === "azure-rules") {
+      const makeRow = kind === "azure-rules" ? azureRuleRow : ruleRow;
       const rules = document.createElement("div");
       const add = document.createElement("button");
       add.type = "button";
       add.textContent = "add rule";
-      add.onclick = () => rules.append(ruleRow());
+      add.onclick = () => rules.append(makeRow());
       wrap.append(add);
       box.append(wrap, rules);
-      rules.append(ruleRow());
+      rules.append(makeRow());
       inputs[name] = { kind, el: rules };
       continue;
     }
@@ -856,6 +860,107 @@ function ruleRow() {
   return row;
 }
 
+/* One row of an Azure firewall rule.
+
+   Separate from ruleRow() rather than a flag on it, because the two are not
+   the same shape and pretending otherwise is how a form drifts from the rules
+   that judge it. An AWS rule is protocol, ports and a source, and every rule
+   in a security group is an allow. An Azure rule additionally has a name, a
+   direction, and an access - and access can be Deny, which is what closes a
+   port that a rule below would open.
+
+   No priority field, deliberately. az/nsg._priorities_for assigns one per
+   rule from the order of this list, ten apart so a rule can be inserted in
+   front later. Offering the number would let somebody submit two rules with
+   the same one, which Azure rejects, or an order whose effect is not the
+   order the list reads as, which Azure accepts and nobody notices. The
+   arrows below move a row, and moving a row is what changes precedence. */
+function azureRuleRow(index) {
+  const row = document.createElement("div");
+  row.className = "rule";
+
+  const name = Object.assign(document.createElement("input"),
+                             { size: 16, placeholder: "allow-ssh" });
+
+  const direction = choice(state.options.rule_direction || [],
+                           { allowOther: false, blank: null });
+  direction.set("Inbound");
+
+  const access = choice(state.options.rule_access || [],
+                        { allowOther: false, blank: null });
+  access.set("Allow");
+
+  const protocol = choice(state.options.rule_protocol || [],
+                          { allowOther: false, blank: null });
+  protocol.set("Tcp");
+
+  const port = choice(state.options.rule_port || [],
+                      { blank: "— port —", other: "Other port or range…" });
+  const source = choice(state.options.rule_source || [],
+                        { blank: "— who can reach it —", other: "Other address…" });
+
+  // Precedence is the list order, so it has to be changeable without
+  // retyping the row. Buttons rather than drag: this page has no drag
+  // anywhere else, and a control that only works with a mouse is worse than
+  // one that works with a keyboard too.
+  const up = document.createElement("button");
+  up.type = "button";
+  up.textContent = "↑";
+  up.title = "Higher precedence — this rule is considered earlier";
+  up.onclick = () => {
+    const prev = row.previousElementSibling;
+    if (prev) row.parentNode.insertBefore(row, prev);
+  };
+
+  const down = document.createElement("button");
+  down.type = "button";
+  down.textContent = "↓";
+  down.title = "Lower precedence — this rule is considered later";
+  down.onclick = () => {
+    const next = row.nextElementSibling;
+    if (next) row.parentNode.insertBefore(next, row);
+  };
+
+  const rm = document.createElement("button");
+  rm.type = "button";
+  rm.textContent = "remove";
+  rm.onclick = () => row.remove();
+
+  row.append(
+    labelled("name", name),
+    labelled("direction", direction),
+    labelled("allow or deny", access),
+    labelled("protocol", protocol),
+    labelled("port", port),
+    labelled("source", source),
+    up, down, rm,
+  );
+
+  row.value = () => {
+    const chosen = port.querySelector("select").value;
+    const typed = port.querySelector("input");
+    const ports = chosen === "__other__" ? (typed.value.trim() || null)
+                                         : (chosen || null);
+    return {
+      name: name.value.trim(),
+      direction: direction.value() || "Inbound",
+      access: access.value() || "Allow",
+      protocol: protocol.value() || "Tcp",
+      // Azure takes a single port or a range as one string ("22", "80-443"),
+      // which is why this is not the from/to pair the AWS row produces.
+      destination_port_range: ports,
+      // The API's own field name, from models.AzureSecurityRule. Called
+      // `source` here first, which the stub in app.test.mjs accepted and the
+      // real route silently dropped - the group was built with no rules at
+      // all and reported success. A stub written to match the page cannot
+      // disagree with it; only Azure could, and did.
+      source_address_prefix: source.value(),
+    };
+  };
+
+  return row;
+}
+
 /* Generating a key pair without leaving the page.
 
    The private half goes straight from WebCrypto into a download and is never
@@ -936,15 +1041,33 @@ function collectSpec(inputs) {
   for (const [name, { kind, el }] of Object.entries(inputs)) {
     if (kind === "checkbox") { spec[name] = el.checked; continue; }
 
-    if (kind === "rules") {
+    if (kind === "rules" || kind === "azure-rules") {
       const rules = [];
       for (const row of el.children) {
         const rule = row.value();
-        // A rule with nobody it applies to is an empty row, not a rule.
-        if (!rule.source) continue;
+        // A rule with nobody it applies to is an empty row, not a rule. The
+        // two clouds spell that field differently, which is the whole reason
+        // they are separate models.
+        if (!(kind === "azure-rules" ? rule.source_address_prefix
+                                     : rule.source)) continue;
+        // An Azure rule additionally needs a name and a port. A row missing
+        // either is half-typed rather than a rule somebody meant, and sending
+        // it produces a refusal about a field they can see is empty.
+        if (kind === "azure-rules" &&
+            (!rule.name || !rule.destination_port_range)) continue;
         rules.push(rule);
       }
-      if (rules.length) spec.rules = rules;
+      // Order is precedence: az/nsg assigns priorities from this sequence, so
+      // the array is submitted exactly as the rows sit on screen.
+      //
+      // azure_rules, not rules. api/models.py keeps two lists on purpose -
+      // an Azure rule names a direction and an access and writes ports as a
+      // string, and forcing one model to carry both would leave half the
+      // fields null whichever cloud was in use. The adapter reads
+      // spec["azure_rules"] and ignores the AWS one.
+      if (rules.length) {
+        spec[kind === "azure-rules" ? "azure_rules" : "rules"] = rules;
+      }
       continue;
     }
 

@@ -728,5 +728,145 @@ check(livePanel.children.length === 0,
 check(checksSent() === 1,
       "and asks nothing, a half-typed form being mid-thought rather than wrong");
 
+// ------------------------------------------------ the Azure firewall widget
+
+/* An Azure rule is not an AWS rule, and this is where that stops being a
+ * comment and becomes an assertion.
+ *
+ * The page could not submit firewall rules at all until now: the AWS widget
+ * produces protocol, from_port, to_port and source, and every rule in a
+ * security group is an allow. An Azure rule carries a name, a direction and
+ * an access that can be Deny. Sending the AWS shape would have submitted
+ * every rule as Allow - a firewall that is not the one on screen, which is
+ * the failure this whole project exists to prevent.
+ *
+ * Priority is deliberately absent and deliberately tested for: the order of
+ * the rows is the precedence, and az/nsg assigns the numbers from it. */
+
+console.log("\nThe Azure firewall rules widget");
+console.log("-------------------------------");
+
+const AZ_NSG_OPTIONS = {
+  rule_direction: [{ value: "Inbound", label: "Inbound — traffic coming in" },
+                   { value: "Outbound", label: "Outbound — traffic going out" }],
+  rule_access: [{ value: "Allow", label: "Allow — let it through" },
+                { value: "Deny", label: "Deny — block it" }],
+  rule_protocol: [{ value: "Tcp", label: "TCP" }, { value: "*", label: "All protocols" }],
+  rule_port: [{ value: "22", label: "22 — SSH" }, { value: "443", label: "443 — HTTPS" }],
+  rule_source: [{ value: "*", label: "* — the entire internet" },
+                { value: "VirtualNetwork", label: "VirtualNetwork — only this network" }],
+};
+
+const { window: w6, document: doc6, sent: sent6 } = await boot({
+  "/resources": () => ({
+    resources: [{ key: "azure-nsg", label: "Azure network security group",
+                  short_label: "Network security group", provider: "azure",
+                  id_label: "Group name", read_only: false,
+                  only_ours_label: "only ones this tool made" }],
+  }),
+  "/resources/azure-nsg/options": () => ({ options: AZ_NSG_OPTIONS }),
+  "/resources/azure-nsg": (options) =>
+    options.method === "POST"
+      ? { resource_type: "azure-nsg", resource_id: "demo-nsg", problems: [],
+          settings: {}, warnings: [], counts: { critical: 0, warning: 0, info: 0 } }
+      : { resource_type: "azure-nsg", resources: [] },
+});
+
+const nsgBody = $(doc6, "create-body");
+const nsgRow = nsgBody.querySelector(".rule");
+
+if (check(Boolean(nsgRow), "the firewall form offers a rule row at all")) {
+  const captions = [...nsgRow.querySelectorAll("small")].map((s) => s.textContent);
+  check(captions.includes("allow or deny"),
+        "with an allow-or-deny control, which no AWS rule has");
+  check(captions.includes("direction"), "and a direction");
+  check(captions.includes("name"), "and a name, which Azure requires per rule");
+  check(!captions.some((c) => /priorit/i.test(c)),
+        "and no priority field, the row order being the precedence");
+
+  const denyOption = [...nsgRow.querySelectorAll("option")]
+    .find((o) => o.value === "Deny");
+  check(Boolean(denyOption), "Deny is offered, not just Allow");
+}
+
+// Two rules, the second one a Deny, to prove order and access both survive.
+const addRule = [...nsgBody.querySelectorAll("button")]
+  .find((b) => b.textContent === "add rule");
+addRule.click();
+await new Promise((r) => setTimeout(r, 50));
+
+const rows = [...nsgBody.querySelectorAll(".rule")];
+check(rows.length === 2, "a second rule row can be added");
+
+/* Fills one rule row, locating each control by the caption above it.
+ *
+ * Not by searching every select for one holding the value: the protocol menu
+ * and the source menu both offer "*", so that finds the protocol control and
+ * sets it to "all protocols" while leaving the source empty - which
+ * collectSpec then drops as an untouched row. The first version of this
+ * helper did exactly that and the failure looked like the widget losing
+ * rules. */
+function fillRule(row, { name, access, port, source }) {
+  const control = (caption) => [...row.querySelectorAll(".labelled")]
+    .find((l) => l.querySelector("small")?.textContent === caption);
+
+  control("name").querySelector("input").value = name;
+  for (const [caption, value] of [["allow or deny", access],
+                                  ["port", port],
+                                  ["source", source]]) {
+    setSelect(control(caption).querySelector("select"), value);
+  }
+}
+
+fillRule(rows[0], { name: "allow-web", access: "Allow", port: "443", source: "*" });
+fillRule(rows[1], { name: "deny-ssh", access: "Deny", port: "22", source: "*" });
+
+const nameField = [...nsgBody.querySelectorAll(".field")]
+  .find((f) => f.querySelector("label")?.textContent === "name");
+nameField.querySelector("input").value = "demo-nsg";
+const groupField = [...nsgBody.querySelectorAll(".field")]
+  .find((f) => f.querySelector("label")?.textContent === "resource group");
+groupField.querySelector("input").value = "scp-demo";
+
+const beforeNsg = sent6.length;
+[...nsgBody.querySelectorAll("button")]
+  .find((b) => b.textContent === "Create").click();
+await new Promise((r) => setTimeout(r, 80));
+
+const nsgPost = sent6.slice(beforeNsg).find((r) => r.options.method === "POST");
+if (check(Boolean(nsgPost), "pressing Create sends the firewall")) {
+  const body = JSON.parse(nsgPost.options.body);
+
+  /* azure_rules, and every field name below, are api/models.py's spelling
+     rather than one invented here.
+
+     The first version of this test asserted `rules` and `source`, which the
+     stub accepted happily and the real route dropped on the floor: the group
+     was built with no rules at all and the page reported success. Only Azure
+     could disagree with a stub written to match the page, and it did. These
+     names are now the API's, and test_api.py posts the same body to prove the
+     two halves still agree. */
+  check(Array.isArray(body.azure_rules) && body.azure_rules.length === 2,
+        "both rules are carried under azure_rules, the field the route reads");
+  check(!("rules" in body),
+        "and not under the AWS field, which carries a different shape");
+
+  const [first, second] = body.azure_rules || [{}, {}];
+  check(first.name === "allow-web" && second.name === "deny-ssh",
+        "in the order the rows sit on screen, which is the precedence");
+  check(second.access === "Deny",
+        "and a Deny row is submitted as Deny, not silently as Allow");
+  check(first.direction === "Inbound",
+        "direction is carried, defaulting to inbound");
+  check(second.destination_port_range === "22",
+        "the port is one Azure-shaped string, not an AWS from/to pair");
+  check(second.source_address_prefix === "*",
+        "and the source uses Azure's field name, which is what dropped them");
+  check(!("from_port" in second) && !("to_port" in second),
+        "and carries none of the AWS rule's fields");
+  check(!body.azure_rules.some((r) => "priority" in r),
+        "no rule names a priority, leaving az/nsg to number them in order");
+}
+
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");
 process.exit(failures ? 1 : 0);

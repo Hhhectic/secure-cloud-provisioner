@@ -1152,6 +1152,59 @@ def _az_nsg_cleanup(client, options):
         client, force=options.get("force", False))
 
 
+def _az_nsg_options(client):
+    """What a firewall form may offer, per field of one rule.
+
+    The ports and the sources are the AWS lists, for the reason
+    `_az_vm_options` gives: a port is the same port on either cloud and the
+    scanner describes it in the same words. Only "everyone" differs - Azure
+    writes `*` where AWS writes 0.0.0.0/0, and offering the AWS spelling
+    produces a rule Azure accepts and treats as one address, which is the
+    quietest possible way to build a firewall that does not do what it says.
+
+    There is no priority here on purpose. `az/nsg._priorities_for` assigns one
+    per rule from the list order, ten apart, and refuses a set where some
+    rules name a priority and some do not. A field for it would let somebody
+    submit two rules with the same priority - which Azure rejects - or an
+    order whose effect is not the order the list reads as, which Azure accepts
+    and nobody notices. The list is the precedence, and that is the only
+    arrangement where what was typed and what Azure does are the same thing.
+    """
+    return {
+        "rule_direction": [
+            {"value": "Inbound", "label": "Inbound — traffic coming in"},
+            {"value": "Outbound", "label": "Outbound — traffic going out"},
+        ],
+        # The field with no AWS counterpart, and the reason the AWS rules
+        # widget cannot be reused as it stands. A security group has no deny;
+        # every rule in one is an allow. An Azure rule set is read in order
+        # until something matches, so a Deny above an Allow is what closes a
+        # port the Allow below would open - and a form that submitted
+        # everything as Allow would silently build a different firewall.
+        "rule_access": [
+            {"value": "Allow", "label": "Allow — let it through"},
+            {"value": "Deny", "label": "Deny — block it"},
+        ],
+        "rule_protocol": [
+            {"value": "Tcp", "label": "TCP"},
+            {"value": "Udp", "label": "UDP"},
+            {"value": "Icmp", "label": "ICMP (ping)"},
+            {"value": "*", "label": "All protocols"},
+        ],
+        "rule_port": _port_choices(),
+        "rule_source": [
+            {"value": "*", "label": "* — the entire internet"},
+            {"value": "VirtualNetwork",
+             "label": "VirtualNetwork — only this network"},
+            {"value": "AzureLoadBalancer",
+             "label": "AzureLoadBalancer — Azure's own load balancer"},
+            {"value": "10.0.0.0/8", "label": "10.0.0.0/8 — private networks only"},
+            {"value": "192.168.0.0/16",
+             "label": "192.168.0.0/16 — private networks only"},
+        ],
+    }
+
+
 AZURE_NSG = ResourceType(
     key="azure-nsg",
     provider="azure",
@@ -1168,6 +1221,7 @@ AZURE_NSG = ResourceType(
     fix=_az_nsg_fix,
     delete=_az_nsg_delete,
     cleanup=_az_nsg_cleanup,
+    options=_az_nsg_options,
     # This type creates resources now, so the tag means something and the box
     # is worth offering. It did not until create_nsg arrived.
     only_ours_label="only ones this tool made",

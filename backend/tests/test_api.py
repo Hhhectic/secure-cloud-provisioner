@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 from moto import mock_aws
 
+from api import models
 from api.app import app
 from aws import security_groups as sg
 
@@ -1321,3 +1322,55 @@ def test_a_short_label_is_offered_for_somewhere_the_cloud_is_already_known(clien
     assert entries["bucket"]["short_label"] == entries["bucket"]["label"]
     for entry in entries.values():
         assert entry["short_label"]
+
+
+def test_the_body_the_firewall_form_sends_is_a_body_this_route_accepts(client):
+    """The exact shape frontend/app.js builds for an Azure security group.
+
+    Written because the two halves silently disagreed once. The widget sent
+    `rules` with a `source` field, which is the AWS spelling; the model keeps
+    Azure rules under `azure_rules` with `source_address_prefix`, and
+    ResourceSpec ignores fields a resource does not use. So the route accepted
+    the request, `_az_nsg_create` read an empty `azure_rules`, and Azure built
+    a group with none of the rules in it and reported success. The page said
+    it worked. Only a real subscription disagreed.
+
+    A jsdom stub cannot catch that - it answers whatever it is sent. This
+    can, because it validates against the model the route actually uses.
+    """
+    body = {
+        "name": "scp-form-shaped",
+        "resource_group": "scp-demo",
+        "location": "eastus",
+        "azure_rules": [
+            {"name": "deny-ssh", "direction": "Inbound", "access": "Deny",
+             "protocol": "Tcp", "destination_port_range": "22",
+             "source_address_prefix": "*"},
+            {"name": "allow-https", "direction": "Inbound", "access": "Allow",
+             "protocol": "Tcp", "destination_port_range": "443",
+             "source_address_prefix": "*"},
+        ],
+    }
+
+    spec = models.ResourceSpec(**body)
+    assert spec.azure_rules is not None, "the model dropped the rules"
+    assert len(spec.azure_rules) == 2
+
+    # Order is precedence and must survive the round trip, because az/nsg
+    # numbers the priorities from it.
+    assert [r.name for r in spec.azure_rules] == ["deny-ssh", "allow-https"]
+    assert spec.azure_rules[0].access == "Deny"
+
+    # And the adapter reads the same key. A create that reached Azure with an
+    # empty list is exactly the failure above.
+    passed = spec.as_dict().get("azure_rules")
+    assert passed and len(passed) == 2, "the adapter would receive no rules"
+
+
+def test_an_aws_shaped_rule_is_not_accepted_as_an_azure_one(client):
+    """The mistake itself, pinned. `source` is the AWS field; an Azure rule
+    needs `source_address_prefix`, and a model that quietly accepted the AWS
+    spelling would put the drift back."""
+    with pytest.raises(Exception):
+        models.AzureSecurityRule(name="x", source="*",
+                                 destination_port_range="22")
