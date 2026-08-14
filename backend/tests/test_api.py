@@ -72,10 +72,9 @@ def test_every_resource_says_which_cloud_it_is_in(client):
     written down a second time somewhere no test can reach it.
     """
     body = client.get("/resources").json()
-    declared = {p["key"] for p in body["providers"]}
 
     for entry in body["resources"]:
-        assert entry["provider"] in declared, entry["key"]
+        assert entry["provider"] in {"aws", "azure"}, entry["key"]
 
 
 def test_the_azure_types_are_the_ones_in_the_azure_provider(client):
@@ -86,53 +85,6 @@ def test_the_azure_types_are_the_ones_in_the_azure_provider(client):
     azure = {r["key"] for r in entries if r["provider"] == "azure"}
     assert azure == {"azure-nsg", "azure-storage", "azure-keyvault",
                      "azure-vnet", "azure-vm"}
-
-
-def test_each_provider_says_what_it_calls_the_place_things_go(client):
-    """An AWS region and an Azure location are not the same idea.
-
-    A region is a property of the connection: the client is built for one and
-    every call goes there. A location is a property of the resource, which is
-    why az/*.get_client documents that it accepts and ignores one. place_field
-    is how the page knows a location has to travel in the spec, and a null
-    here is what stops an AWS spec carrying a second copy of its own region.
-    """
-    providers = {p["key"]: p for p in client.get("/resources").json()["providers"]}
-
-    assert providers["aws"]["place_label"] == "Region"
-    assert providers["aws"]["place_field"] is None
-
-    assert providers["azure"]["place_label"] == "Location"
-    assert providers["azure"]["place_field"] == "location"
-
-
-def test_every_provider_offers_its_default_place_among_its_choices(client):
-    """Otherwise the control opens on a value it cannot show, and the first
-    thing anyone does with it silently moves their resources somewhere else."""
-    for provider in client.get("/resources").json()["providers"]:
-        offered = {place["value"] for place in provider["places"]}
-        assert provider["default_place"] in offered, provider["key"]
-
-
-def test_each_provider_warns_about_the_account_it_actually_touches(client):
-    """The banner used to be one sentence in index.html promising a real AWS
-    account, which on the Azure half was false and reassuring at once - the
-    worst combination a warning can have."""
-    providers = {p["key"]: p for p in client.get("/resources").json()["providers"]}
-
-    assert "AWS" in providers["aws"]["caution"]
-    assert "Azure" in providers["azure"]["caution"]
-    assert "AWS" not in providers["azure"]["caution"]
-
-
-def test_the_bastion_belongs_to_aws_and_azure_claims_no_blueprint(client):
-    """The page hides the panel rather than offering an architecture built
-    from VPCs, subnets and EC2 instances above a subscription that has none of
-    them. Which cloud has one is answered here, not by reading a key prefix."""
-    providers = {p["key"]: p for p in client.get("/resources").json()["providers"]}
-
-    assert providers["aws"]["blueprints"] == ["bastion"]
-    assert providers["azure"]["blueprints"] == []
 
 
 def test_the_provisioned_types_are_all_writable(client):
@@ -986,12 +938,19 @@ def test_the_metric_labels_stay_short_enough_to_read(client):
 
 
 def test_the_page_is_served_from_the_same_process_as_the_api(client):
-    """One thing to run, and no CORS between the page and its own backend."""
+    """One thing to run, and no CORS between the page and its own backend.
+
+    The wordmark is Sanctum rather than the repository's own name. That is the
+    page's title only - the CLI, the README and this package are all still
+    Secure Cloud Provisioner - so this asserts the page was served rather than
+    asserting a product name, and the two scripts below are the substance of
+    the check either way.
+    """
     page = client.get("/ui/")
     assert page.status_code == 200
-    assert "Secure Cloud Provisioner" in page.text
+    assert "Sanctum" in page.text
 
-    for asset in ("/ui/app.js", "/ui/style.css"):
+    for asset in ("/ui/app.js", "/ui/style.css", "/ui/keygen.js"):
         assert client.get(asset).status_code == 200, asset
 
 
@@ -1326,3 +1285,39 @@ def test_a_password_cannot_be_asked_for_over_http():
 def models_module():
     from api import models
     return models
+
+
+# ------------------------------------------------------- which cloud a type is
+
+
+def test_every_type_declares_which_cloud_it_belongs_to(client):
+    """The page shows one cloud at a time and must not guess from the key.
+
+    Matching on an "azure-" prefix would be the frontend inferring a provider
+    from a naming convention nothing enforces, and it would need editing again
+    for a third cloud - which is the one thing adding a second was meant to
+    prove unnecessary.
+    """
+    entries = {r["key"]: r for r in client.get("/resources").json()["resources"]}
+
+    azure = {"azure-nsg", "azure-storage", "azure-keyvault", "azure-vnet",
+             "azure-vm"}
+    for key, entry in entries.items():
+        assert entry["provider"] in {"aws", "azure"}, key
+        assert entry["provider"] == ("azure" if key in azure else "aws"), key
+
+
+def test_a_short_label_is_offered_for_somewhere_the_cloud_is_already_known(client):
+    """Every Azure label starts with the word Azure, and in a one-cloud column
+    that is a word repeated in every row. The long label stays for the CLI,
+    which lists all fourteen types together and needs it."""
+    entries = {r["key"]: r for r in client.get("/resources").json()["resources"]}
+
+    assert entries["azure-storage"]["label"] == "Azure storage account"
+    assert entries["azure-storage"]["short_label"] == "Storage account"
+
+    # Everything else already was short, and must still answer the question
+    # rather than being absent and making the caller fall back.
+    assert entries["bucket"]["short_label"] == entries["bucket"]["label"]
+    for entry in entries.values():
+        assert entry["short_label"]

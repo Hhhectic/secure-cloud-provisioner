@@ -59,8 +59,9 @@ more — and as of the Azure provisioning work it can no longer do anything
 everything else: `azure-nsg`, `azure-storage`, `azure-keyvault`, `azure-vnet`
 and `azure-vm` are `ResourceType` entries in `api/registry.py`, their rules
 live in `scanner/azure_*_rules.py` and return the same warning shape as every
-AWS rule, and the page at `/ui` grows tabs for them without being told they
-exist.
+AWS rule, and the page at `/ui` grows entries for them without being told they
+exist — it reads the registry's own list, and the only thing it is told about
+Azure is which cloud each type belongs to, because it shows one at a time.
 
 That settled a claim this project had been making without evidence.
 `scanner/common.py` has said since the first commit that its warning shape is
@@ -88,7 +89,13 @@ and no change to `scanner/common.py`.
   `create_nsg`, `apply_fix`, and the two types built on top of them —
   `az/vnet.py` and `az/vm.py`. `azure-nsg`, `azure-storage`, `azure-keyvault`,
   `azure-vnet` and `azure-vm` are all `ResourceType` entries with create,
-  delete and cleanup, and none of it needed a route change.
+  delete and cleanup.
+
+  "And none of it needed a route change" used to end that sentence, and it was
+  not true: three of the five answered 500 on their deletion plan and on their
+  delete, because the planners return a shape the route never accepted. The
+  registry claim survives — no route *knows* about Azure — but it was being
+  made about a path nothing had run. See *What driving the page found*.
 - **`az/` has now run against a real subscription.** This bullet used to say
   the opposite and it was the largest gap in this file. Storage accounts, key
   vaults, security groups and virtual networks create, scan, fix, delete and
@@ -140,27 +147,25 @@ account 679140927523, including instances and the whole bastion blueprint.
 Since then, on this branch: the merge with `group/main`, Azure storage and key
 vault provisioning, the first live Azure run, and then network security group,
 virtual network and virtual machine provisioning, and then telling a resource
-group you may not see apart from one that is not there, take it to **794 from
-`backend/`**, 7 skipped.
+group you may not see apart from one that is not there, took it to 794 from
+`backend/`. Then five bugs found by driving the page in a real browser — see
+*What driving the page found* — and the redesign, take it to **824 from
+`backend/`**, 0 skipped, plus the two Node suites in `frontend/`.
 
-Since *that*, on this branch: the cloud switch and the provider seam, the merge
-with `aws-provisioner-and-web-interface` (which was seven commits ahead of
-`main` and carried the Azure form and sizing fixes), two name-rule
-corrections, telling a refused read from an absent one in all five readers,
-and carrying `problems` on a refused create. **843 from `backend/`, 0
-skipped** — the seven that used to skip were the two Node suites, which now
-have a Node to run in, and they are 100 assertions of their own.
+**Both smoke tests have now been re-run and both are green.** The live AWS one
+is **116 passed, 0 failed** against account 679140927523 with no flags; the
+Azure one, `--azure-only --with-azure-resources --azure-resource-group
+scp-demo`, is **47 passed, 0 failed** including building and destroying a real
+virtual machine. The 154 figure above was a run with `--with-instances` and
+`--with-blueprint`, which the no-flag run does not include.
 
-The full live smoke test has been re-run on this branch and is **218 passed, 0
-failed** against account 679140927523 and subscription
-`74baf379-b419-4e16-a50b-98bc450901c9` — every AWS section, the workload
-readings, the whole bastion blueprint, and all five Azure types, including a
-machine built, scanned and destroyed. Both halves in one run:
-
-```bash
-python scripts/smoke_test.py --with-instances --with-blueprint \
-    --with-workload --with-azure-resources --azure-resource-group scp-demo
-```
+**Every provisionable type has now been driven through the browser**, against
+both real clouds, which had never been done for anything before this. All nine
+AWS types and all five Azure ones create, scan, fix and delete from the page;
+the bastion blueprint builds and tears down from it, with and without its two
+machines. What that found is the section below, and it is the reason the
+Node suites are not the whole story: `app.test.mjs` answers a stub, and a stub
+written to match the code cannot disagree with it.
 
 **The root suite does not collect, and it arrived that way.** `ebdb579` renamed
 `run_azure_security_scan` to `scan_azure_payload` in `azure_scanner_engine.py`
@@ -257,6 +262,18 @@ so a checkout without either still gets a green suite — CI installs both and
 asserts they are not skipping, because a skip and a pass look the same in a
 tick.
 
+```bash
+cd frontend && npm test                     # offline: keygen + jsdom
+npx playwright install chromium             # once, for the one below
+node browse.mjs http://127.0.0.1:8001/ui/ /tmp/shots   # live, real browser
+```
+
+`browse.mjs` is deliberately outside `npm test`: it needs a running server and
+a real account, so it belongs beside `scripts/smoke_test.py` rather than beside
+the offline suites. It clicks every sidebar entry, collects console errors and
+screenshots each one. Five bugs came out of it and its throwaway siblings — see
+*What driving the page found*.
+
 Two external scanners were used to benchmark this one, and both fight this
 machine's Python 3.14. Neither belongs in `.venv`: Prowler pins `pydantic<2`
 and `boto3 1.26`, which silently breaks `api/app.py`. `uv` fetches its own
@@ -350,7 +367,9 @@ backend/
   api/         FastAPI over a resource registry, generic across types
   blueprints/  compositions of several resources into a correct architecture
   scripts/     live smoke test and demo helpers, plus the CloudWatch harness
-frontend/      the page: two plain scripts, no build step, no shipped deps
+frontend/      the page, served at /ui. Plain HTML and two scripts, no build
+               step, no shipped deps. One cloud at a time behind a toggle;
+               browse.mjs drives it in a real browser and is not in npm test
 docs/          IAM policy (three files, see iam-setup.md), bastion walkthrough,
                benchmark.md: what Prowler finds that this does not
 ```
@@ -369,6 +388,25 @@ feasible rather than a rewrite.
 it. That contract is why `api/app.py` has one set of routes rather than one per
 resource type. Adding a resource means writing an `aws/` module, a `scanner/`
 module, and one entry in `api/registry.py` — no route changes.
+
+**The page is told which cloud a type is in; it does not work it out.**
+`ResourceType.provider` is served by `GET /resources`, and the toggle groups by
+it. The alternative was matching on the `azure-` key prefix, which is the
+frontend inferring a provider from a naming convention nothing enforces and
+which would need editing again for a third cloud — the one thing adding a
+second was supposed to prove unnecessary. `short_label` travels with it,
+because every Azure label starts with the word Azure for the CLI's benefit and
+a page showing one cloud has already said which. A missing `provider` defaults
+to `aws` on both sides: the failure without a default is silent and total, since
+a type whose provider does not match is skipped, so a server that stopped
+sending the field would render an empty sidebar and look like an empty account.
+
+**A row's id is whatever the routes accept.** For AWS that is `sg-…`, and for
+Azure it is the name — not the ARM path, which carries eight slashes and
+therefore cannot be one segment of a URL. This is stated because it was got
+wrong, and the wrongness was invisible from either side alone: the readers take
+both forms, so every offline test passed while the page 404'd on every resource
+it had just created.
 
 **A reader returns None when the thing is not there.** AWS reports "no such
 resource" by raising, not by returning nothing, so every reader catches its own
@@ -671,35 +709,6 @@ would be a remote "stop reporting this" API on a service holding credentials
 with no login, and one cross-site POST from being the thing the middleware in
 `api/app.py` exists to stop.
 
-**The page shows one cloud at a time, and knows the name of neither.** Fourteen
-types in one row of tabs was the merge showing through, and the fix could have
-been four characters: split the list on the `azure-` prefix in JavaScript. That
-would be `api/registry.py`'s own knowledge written down a second time somewhere
-no test can reach it — the argument the `options` field has made since it was
-written. So `ResourceType.provider` says which cloud a type is in, `PROVIDERS`
-says what each cloud is called, where it puts things, what to call that place
-and which blueprints it has, and `/resources` serves both. `frontend/app.js`
-counts positions rather than assuming two; a third cloud is a third entry in
-`PROVIDERS` and no JavaScript change at all.
-
-The switch is told apart by position and fill, not by colour. AWS orange beside
-Azure blue would have been the first colour on the page that means nothing
-about risk, and `style.css` has said since it was written that severity is the
-only thing colour is spent on. That rule is why red reads as red.
-
-**One control says where, and it means two different things.** An AWS region is
-a property of the connection — the client is built for one and every call goes
-there. An Azure location is a property of the resource, which is why
-`az/*.get_client` says outright that it accepts and ignores a region. The
-header control now reads *Region* or *Location* to match, and `place_field`
-decides where the value lands: in the spec for Azure, nowhere for AWS, whose
-region is already on the query string. What it replaced was a free-text box
-repeated in all five Azure forms, captioned `eastus, westeurope, uksouth…`,
-sitting underneath a header dropdown that said Region and was discarded by
-every Azure route it reached. Each cloud remembers its own place, because
-switching to Azure to look at something and back should not silently move an
-AWS resource from London to Virginia at the moment of creating it.
-
 **Fixes are re-derived server-side.** `POST /fix` takes a `rule_id` and nothing
 else. The server re-reads the resource, re-runs the scanner, and finds the
 warning itself. Accepting an action from the caller would make the API a remote
@@ -891,51 +900,51 @@ written to match the code cannot disagree with it.**
   for a new reason.
 
 - **A read that is refused is not a resource that is absent, and all five
-  readers said it was.** This is the fifth instance of the mistake recorded
-  above and the one that had been missed everywhere: every create path was
-  fixed for it, and `read_account_for_scanning`, `read_vault_for_scanning`,
-  `read_nsg_for_scanning`, `read_vnet_for_scanning` and
-  `read_vm_for_scanning` all still carried the same handler — return None on
-  404, re-raise everything else. So reading anything in a resource group this
-  identity holds no role on arrived as a 500 and a traceback about an HTTP
-  response. The subscription makes it easy to reach rather than theoretical:
-  the service principal is Contributor on two named groups, so every other
-  group in the subscription answers 403 to a read. They check `denied()`
-  first now and raise `AzureRefused`, which a new handler in `api/app.py`
-  turns into a 403 naming the group — 403 rather than 404 because telling
-  somebody "there is nothing there" about a resource they cannot see is the
-  more misleading of the two answers.
+  readers said it was.** The fifth instance of the mistake above, and the one
+  missed everywhere: every create path was fixed for it, and
+  `read_account_for_scanning`, `read_vault_for_scanning`,
+  `read_nsg_for_scanning`, `read_vnet_for_scanning` and `read_vm_for_scanning`
+  all still returned None on 404 and re-raised everything else. Reading
+  anything in a resource group this identity holds no role on arrived as a 500
+  and a traceback about an HTTP response. The subscription makes that ordinary
+  rather than theoretical: the service principal is Contributor on two named
+  groups, so every other group answers 403 to a read. They check `denied()`
+  first now and raise `AzureRefused`, which a handler in `api/app.py` turns
+  into a 403 naming the group — 403 rather than 404, because telling somebody
+  "there is nothing there" about a resource they merely cannot see is the more
+  misleading answer and the one that sends them looking for something they
+  never lost. Both halves are pinned: 404 still returns None.
 
-- **A refused machine leaves three resources behind, and said nothing about
+- **A refused machine leaves three resources behind and said nothing about
   them.** `Standard_B1s` is on the allowlist and this subscription is not
   offered it, so `create_vm` builds a virtual network, a security group and a
-  card, is then refused by Azure for the size, and returns a clear sentence
-  about which sizes would work. Every adapter returns `problems` carrying
-  what it built; the create route discarded that half on failure, so the one
-  place a caller could have read it was the one place it was thrown away —
-  and this project's stated position that partial failures report exactly
-  what exists held everywhere except there. The refusal carries the list now.
+  card, is then refused for the size, and answers with a clear sentence about
+  which sizes would work. Every adapter returns `problems` carrying what it
+  built, and the create route discarded that half on failure — so the one
+  place a caller could read it was the one place it was thrown away, and
+  *Nothing rolls back / partial failures report exactly what exists* held
+  everywhere except there. The refusal carries the list now.
 
-  The leak itself is open, and the obvious fix was written and taken out
-  again. Asking `available_sizes` *before* building prevents it completely —
-  verified, the create made nothing — but `resource_skus.list` takes over
-  200 seconds even filtered to one location, measured against this
-  subscription, so every machine create would wait on it. Trading a leak for
-  a three-minute hang is not a trade. Closing it needs either a cheap way to
-  ask the question or a decision to roll back scaffolding this call created,
-  and the second argues with *Nothing rolls back*. That is a group decision.
-  The same 200 seconds is why a failed machine create currently takes minutes
-  to answer at all: the error path calls it to write a better message.
+  The leak is open, and the obvious fix was written and taken out again.
+  Asking `available_sizes` before building prevents it — verified, the create
+  made nothing — but `resource_skus.list` takes over 200 seconds even filtered
+  to one location, measured here rather than guessed, so every machine create
+  would wait on it. Trading a leak for a three-minute hang is not a trade.
+  Closing it needs either a cheap way to ask or a decision to roll back
+  scaffolding this call created, and the second argues with *Nothing rolls
+  back*. That is a group decision. The same 200 seconds is why a failed
+  machine create takes minutes to answer at all: the error path calls it to
+  write a better message.
 
-- **Two name rules disagreed with Azure, and both were found at the edges
-  rather than the middle.** A key vault name may not carry doubled hyphens —
-  only the container half of that rule was written down, and
-  `check_name_availability` answers `scp-edge--probe` with
-  `available=False, reason=Invalid`. And a one-character security group name
-  is legal: the pattern needed a first character and a last one, so it
-  refused every one-character name while its own message promised "1 to 80
-  characters", an error naming the rule the name had just satisfied. Verified
-  by creating a group called `a` and deleting it.
+- **Two name rules disagreed with Azure, both found at the edges rather than
+  the middle.** A key vault name may not carry doubled hyphens — only the
+  container half of that rule was written down, and `check_name_availability`
+  answers `scp-edge--probe` with `available=False, reason=Invalid`. And a
+  one-character security group name is legal: the pattern needed a first
+  character and a last one, so it refused every one-character name while its
+  own message promised "1 to 80 characters" — an error naming the rule the
+  name had just satisfied. Verified by creating a group called `a` and
+  deleting it.
 
 Two smaller things measured rather than assumed:
 
@@ -1105,6 +1114,91 @@ correction `test_the_page_starts_without` already made one layer along: a test
 for the unconfigured case has to *build* the unconfigured case rather than hope
 the machine provides it.
 
+## What driving the page found that nothing else did
+
+The offline suite passed, both smoke tests passed, and the page had five bugs
+in it. All five were found by opening it in a real browser with Playwright and
+doing the ordinary thing — create something, look at it, fix it, delete it —
+against real accounts. `frontend/browse.mjs` does the sweep; the lifecycle
+scripts that found these were throwaways.
+
+They are worth reading as a set, because four of the five share one shape:
+**the page and the API disagreed about something, and every test on each side
+of the seam agreed with its own side.**
+
+- **"Not scanned" was rendered as "clean".** `worst_level` is null both when
+  nothing was found and when nothing was looked for, and *scan each (slow)* is
+  off by default — so every row on first load carried a verdict nobody had
+  asked for. A storage account with two critical findings sat in the list
+  labelled clean. This is the failure this project warns about in the IAM
+  scanner and then shipped on the front page: *a partial scan that looks clean
+  is the one way this tool can actively mislead.* `counts` is the signal,
+  because it is set only when a scan ran.
+
+- **An Azure row was keyed by something that cannot survive a URL.** The list
+  returned the full ARM path, which carries eight slashes; a route takes its id
+  as one path segment. So `/resources/azure-storage/<that>` matched no route
+  and 404'd before any Azure code ran. The readers accept either form quite
+  happily, which is exactly why nothing offline noticed — every test that
+  called one passed it a name. What it cost was the page, which passes a row's
+  id straight into scan, fix and delete: creating an Azure resource worked, and
+  then the detail panel said "Not Found" about the thing it had just built and
+  the delete modal opened empty with its button disabled forever.
+
+- **Three Azure types could not be deleted through the API at all.** AWS
+  returns a flat list of things a delete destroys; all three Azure planners
+  return `{"items", "destroys", "message"}`, and the route did
+  `DeletionPlanItem(**item)` over it — which iterates a dict as its keys and
+  raises on the first one. `azure-nsg`, `azure-vnet` and `azure-vm` answered
+  500 on their deletion plan *and* on the delete. The route takes both shapes
+  now and keeps the Azure message, because the generic one counts items and
+  calls them destroyed, which is false of a security group whose delete
+  destroys nothing and merely stops filtering whatever was behind it.
+
+- **The machine size menu offered nine sizes that cannot start.** Azure
+  restricts sizes per subscription as well as per region and reports both as
+  `SkuNotAvailable`, so `ALLOWED_VM_SIZES` is what this tool permits rather
+  than what a subscription can launch. `az/vm.py` already had `available_sizes`
+  and already used it to explain a refusal; the form was not asking it. Against
+  the real subscription the menu offered fourteen and five worked — and all
+  three `Standard_B1*` entries, which sit at the top of the list and are what
+  somebody picks, were among the nine that fail.
+
+- **The machine form threw away half of what you typed.** `ResourceSpec`
+  declared no `vm_size`, `open_ports`, `allowed_source` or
+  `encryption_at_host`, and pydantic drops what a model does not declare, so
+  `_az_vm_create` and `check_vm_spec` read all four as None however the form
+  was filled in. The pre-flight was the dangerous half: a form opening 22 to
+  the entire internet on a machine with a public address answered **0
+  critical** — this tool declaring safe the exact configuration the type exists
+  to warn about. The create then ignored the ports as well, so the machine came
+  up without the access somebody asked for and nothing said so either way.
+
+Two smaller things, both from the same runs:
+
+- **The acknowledgement audit was answering a question it could not see.** It
+  compared every entry against the rule ids of one resource's scan and reported
+  each one that was not about that resource — which is most of them, every
+  time. Two entries for a single S3 bucket produced two informational findings
+  on every scan of every other resource in both clouds. It was never a
+  cross-cloud problem; scanning a second bucket did the same. `audit(...,
+  scanned=)` scopes it; `None` keeps the unscoped behaviour for the
+  whole-account sweep that could honestly answer it, which nothing runs yet.
+
+- **`azure-mgmt-compute` was listed in no requirements file.** `az/vm.py` has
+  needed it since virtual machines arrived. A checkout that installed both
+  files still could not open that tab, and said so as a 503 naming a module
+  rather than as an import error — which is the lazy-import design working: the
+  page starts and one type is unavailable.
+
+**The browser is now part of how this is checked.** `frontend/browse.mjs`
+drives every sidebar entry in a real Chromium against the real API, collects
+console errors, and screenshots each one, because the class of bug that makes a
+button silently do nothing leaves no other trace. It needs `npx playwright
+install chromium` once. It is not in `npm test`, because it needs a running
+server and a real account; run it before believing the page works, the same way
+the smoke test is run before believing the API does.
+
 ## Style
 
 Comments explain *why*, not what. Test names are sentences describing the
@@ -1114,16 +1208,30 @@ Severity means something — if everything is critical, nothing is.
 
 ## Not done
 
-- **The page can create Azure resources now, except a firewall with rules.**
-  `frontend/app.js` had a hardcoded `FIELDS` map with no Azure entries, so
-  every Azure create fell back to a name-only form, submitted without a
-  resource group and was refused. All five types have entries now. The
-  exception is `azure-nsg`, whose form creates an *empty* group: the existing
-  `rules` widget produces AWS-shaped rules and an Azure rule is a different
-  shape carrying a priority, so submitting one as the other would be exactly
-  the drift recorded under *One switch, not a field per setting*. Rules come
-  from the API or the CLI until a widget exists that knows about priority.
-  Nothing about the page's rendering is covered by a test; see below.
+- **The page shows one cloud at a time, and the firewall form still makes an
+  empty group.** A toggle in the header switches between AWS and Azure and the
+  page repaints, so which account is in front of you is not a tab label to
+  read. What that fixed was not cosmetic: "This talks to a real AWS account"
+  and the AWS region selector used to sit above the five Azure tabs, at a
+  subscription that has never heard of `us-east-1`, and the bastion blueprint
+  rendered as a panel under every one of them. Each now lives in its own
+  branch, and the blueprint is a sidebar entry rather than a panel.
+
+  The one exception left is `azure-nsg`, whose form still creates an *empty*
+  group: the existing `rules` widget produces AWS-shaped rules and an Azure
+  rule is a different shape carrying a priority, so submitting one as the other
+  would be exactly the drift recorded under *One switch, not a field per
+  setting*. Rules come from the API or the CLI until a widget exists that knows
+  about priority.
+
+  Two smaller gaps against the design. The Azure table shows the name in both
+  its columns, because an Azure row's id *is* its name now; the mockup replaces
+  them with resource group and location, which means adding both to the five
+  Azure list adapters — the readers already know them. And the page's wordmark
+  is **Sanctum** while the CLI, the README and this package are all still
+  Secure Cloud Provisioner. That is a decision nobody has made rather than a
+  rename; the served-page test asserts the page was served rather than
+  asserting a product name, so either answer costs one line.
 
 - **The four Azure capabilities that lived outside `backend/` have landed.**
   Network security group creation was in `azure_crud.py`; virtual networks,
@@ -1154,16 +1262,19 @@ Severity means something — if everything is critical, nothing is.
   project exists to prevent. jsdom is a devDependency; the page itself has
   none.
 
-  What remains uncovered is whether any of it *looks* right — layout, the
-  modal, whether a button is reachable — and that is still only ever found by
-  a person opening the page, or by `browse.mjs`, which drives the real page in
-  a real browser against a running API and screenshots every tab. It walks
-  both clouds now: photographing only the tabs on screen at load would have
-  covered the AWS half and reported "no console errors" about an Azure half it
-  never rendered, which is worse than not running, because it reads like
-  coverage. Playwright is a devDependency and its browser is not, so this
-  needs `npx playwright install chromium` and, on a machine without them, the
-  system libraries chromium links against.
+  What jsdom cannot see is whether any of it *looks* right, and that gap is
+  now half closed rather than open. `frontend/browse.mjs` drives the real page
+  in a real Chromium against the real API — every sidebar entry, console errors
+  collected, a screenshot of each. It found the three rendering defects in the
+  redesign that no test could: a health pill that was green on burnt orange and
+  invisible, a field hint landing in the label column so it read as a second
+  caption, and a rule row's remove button sitting outside its own border
+  because a grid item will not shrink below its content's minimum width.
+
+  It is not in `npm test`: it needs a running server, a real account, and
+  `npx playwright install chromium`. Run it the way the smoke test is run.
+  What is still only ever found by a person is judgement — whether the thing
+  is *good*, as opposed to present and not broken.
 - **Benchmarked against Prowler and CloudGoat.** `docs/benchmark.md` has both
   and is the first thing to read before adding a rule; it records what was
   measured rather than what was assumed.
@@ -1272,6 +1383,23 @@ the same routes, the same CLI and the same page as every AWS type. All of it
 has run against a real subscription, including a machine that booted, was
 scanned with an administration port open to the internet, and was destroyed.
 
+**The guided form has now been driven, by a browser, against both real
+clouds.** That sentence is the one this section could not make before. Every
+provisionable type — nine AWS, five Azure — was created, scanned, fixed and
+deleted from the page against real accounts, and the bastion blueprint built
+and tore down from it with and without its machines. Five bugs came out of
+doing it, all of them invisible to a suite that passes.
+
+It also closed the one claim in this file with nothing behind it. The browser
+key generator had been proved correct in the abstract — `keygen.test.mjs` has
+`ssh-keygen` derive the public half from the file it produces — but no
+browser-generated key had ever been given to a cloud. Building the bastion from
+the page generated two pairs in WebCrypto, downloaded the private halves and
+sent only the public ones; AWS recorded a fingerprint for the imported key that
+matches `ssh-keygen -lf` run on the public half derived from the downloaded
+private one. The failure that rules out is the quiet one: machines that exist
+and nobody can log into.
+
 Not done: the page cannot yet submit firewall *rules*, only an empty group.
 Everything else in *Not done* above is a refinement.
 
@@ -1303,11 +1431,15 @@ Everything else in *Not done* above is a refinement.
    name for 90 days — so test vaults with the weak option, which is what the
    smoke test does deliberately, and let the offline spec test cover the secure
    path.
-3. **Azure NSG provisioning, or a decision not to.** The one thing root
-   `main.py` can still do that `backend/` cannot, and therefore the thing
-   keeping it alive. It needs the whole ordered rule set read before a single
-   rule can be created or narrowed — the same problem blocking `az/nsg.py`'s
-   `apply_fix`, and worth solving once for both.
+3. **A rules widget that knows about priority.** This item used to say "Azure
+   NSG provisioning, or a decision not to", and described it as the one thing
+   root `main.py` could do that `backend/` could not. That has been false since
+   `scanner/azure_nsg_effective.py` landed: `az/nsg.py` creates, fixes and
+   deletes, and the fix has been applied to a real group through the page. What
+   is actually left is one form. The page can only build an *empty* security
+   group, because the `rules` widget emits AWS-shaped rules and an Azure rule
+   carries a priority deciding which of several overlapping rules wins.
+   Rules reach Azure through the API and the CLI meanwhile.
 4. Detach `AmazonEC2FullAccess` and friends from `EC2_Dude`, so the documented
    least-privilege policy is the one actually in force and the smoke test
    proves it. Already done for EC2 and S3; SNS, CloudWatch and SSM remain and

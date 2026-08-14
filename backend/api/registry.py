@@ -67,111 +67,6 @@ DEFAULT_REGION = "us-east-1"
 # DEFAULT_REGION because "us-east-1" is not a place Azure has heard of.
 DEFAULT_AZURE_LOCATION = "eastus"
 
-# Where each cloud will put things, as {value, label} like every other menu.
-#
-# Not fetched. DescribeRegions and the subscription's location list are both
-# extra calls answering a question that rarely surprises anyone, and the page
-# needs this before it has picked a resource type - so there is no client to
-# ask with yet. The trade is the same one the instance allowlist makes: a
-# short honest list beats a long live one nobody reads.
-#
-# The place names are given in words as well, because "ap-northeast-1" and
-# "uksouth" are jargon in the sense this project uses the word - somebody
-# choosing where their data lives should not have to already know.
-AWS_REGIONS = [
-    ("us-east-1", "N. Virginia"), ("us-east-2", "Ohio"),
-    ("us-west-1", "N. California"), ("us-west-2", "Oregon"),
-    ("eu-west-1", "Ireland"), ("eu-west-2", "London"),
-    ("eu-central-1", "Frankfurt"), ("ap-southeast-1", "Singapore"),
-    ("ap-southeast-2", "Sydney"), ("ap-northeast-1", "Tokyo"),
-    ("ap-south-1", "Mumbai"), ("ca-central-1", "Canada"),
-    ("sa-east-1", "São Paulo"),
-]
-
-AZURE_LOCATIONS = [
-    ("eastus", "Virginia"), ("eastus2", "Virginia"),
-    ("centralus", "Iowa"), ("westus2", "Washington"),
-    ("westus3", "Arizona"), ("northeurope", "Ireland"),
-    ("westeurope", "Netherlands"), ("uksouth", "London"),
-    ("francecentral", "Paris"), ("swedencentral", "Gävle"),
-    ("germanywestcentral", "Frankfurt"), ("australiaeast", "New South Wales"),
-    ("southeastasia", "Singapore"), ("japaneast", "Tokyo"),
-    ("canadacentral", "Toronto"), ("brazilsouth", "São Paulo"),
-]
-
-
-def _place_choices(places):
-    return [{"value": value, "label": f"{value} — {where}"}
-            for value, where in places]
-
-
-@dataclass(frozen=True)
-class Provider:
-    """A cloud, as the page needs to know it.
-
-    This exists so the frontend can offer one cloud at a time without holding
-    a list of which types belong to which. It knows there are providers, that
-    each has resource types and a place to put them, and nothing else - so a
-    third cloud is a third entry here and no JavaScript change at all.
-    """
-
-    key: str
-    label: str
-
-    # What the two clouds call the same idea, and they are not the same idea.
-    #
-    # An AWS region is a property of the connection: the client is built for
-    # one and every call goes there. An Azure location is a property of the
-    # resource - az/storage.get_client says outright that the region is
-    # accepted and ignored - so it travels in the spec instead. The page shows
-    # one control either way; where the value ends up is decided here.
-    place_label: str
-    place_field: Optional[str]
-    places: list
-    default_place: str
-
-    # The sentence at the top of the page. Per provider because "a real AWS
-    # account" is false and reassuring on the Azure half, which is the worst
-    # combination for a warning.
-    caution: str
-
-    # Which blueprints this cloud has, by name.
-    #
-    # Empty for Azure, which is a statement about today rather than a design:
-    # blueprints/ holds one composition and it is built from VPCs, subnets and
-    # EC2 instances. The page hides the panel when this is empty instead of
-    # showing an AWS architecture above a subscription that cannot build it.
-    blueprints: tuple = ()
-
-
-PROVIDERS = (
-    Provider(
-        key="aws",
-        label="AWS",
-        place_label="Region",
-        # None: the region rides on the query string for every route, because
-        # it is what the client is built from. Nothing puts it in a spec.
-        place_field=None,
-        places=_place_choices(AWS_REGIONS),
-        default_place=DEFAULT_REGION,
-        caution="This talks to a real AWS account. Creating and deleting here "
-                "does the same thing it does from the command line.",
-        blueprints=("bastion",),
-    ),
-    Provider(
-        key="azure",
-        label="Azure",
-        place_label="Location",
-        place_field="location",
-        places=_place_choices(AZURE_LOCATIONS),
-        default_place=DEFAULT_AZURE_LOCATION,
-        caution="This talks to a real Azure subscription. Creating and "
-                "deleting here does the same thing it does from the command "
-                "line. A key vault built with purge protection holds its name "
-                "for 90 days and nothing can shorten that.",
-    ),
-)
-
 # Ports a form should offer, which is not the same list as the ports the
 # scanner warns about. RISKY_PORTS exists to describe what is dangerous;
 # 80 and 443 belong in a menu of things people open on purpose and would be
@@ -314,6 +209,28 @@ class ResourceType:
     #
     # The default suits every type that filters by this tool's own tag.
     only_ours_label: Optional[str] = "only ones this tool made"
+
+    # Which cloud this lives in, so a caller can group by it.
+    #
+    # The page needs the split to offer one cloud at a time rather than
+    # fourteen tabs in a row, and the only other way to get it is to match on
+    # the "azure-" key prefix - the page inferring a provider from a naming
+    # convention nothing guarantees. Declared here instead, next to the
+    # adapters that actually talk to that cloud, so a third provider is one
+    # more value rather than another prefix rule in JavaScript.
+    #
+    # Defaulted to aws because eight of the nine AWS types predate the second
+    # cloud and none of them should have to say so.
+    provider: str = "aws"
+
+    # The label again, for somewhere the cloud is already established.
+    #
+    # Every Azure label starts with the word Azure because the CLI lists all
+    # fourteen types together and "Storage account" beside "Storage bucket"
+    # would be a guess. A page showing one cloud at a time has already said
+    # which, so the prefix is a word repeated in every row of a 212px column.
+    # None means the label was already short enough.
+    short_label: Optional[str] = None
 
     # What the resource looks like, as opposed to what is wrong with it.
     #
@@ -1237,6 +1154,8 @@ def _az_nsg_cleanup(client, options):
 
 AZURE_NSG = ResourceType(
     key="azure-nsg",
+    provider="azure",
+    short_label="Network security group",
     label="Azure network security group",
     id_label="Group name",
     get_client=az_nsg.get_client,
@@ -1257,7 +1176,6 @@ AZURE_NSG = ResourceType(
     # inside it and exposes everything attached to it, which is a list this can
     # actually produce.
     plan_deletion=az_nsg.plan_deletion,
-    provider="azure",
 )
 
 
@@ -1308,6 +1226,8 @@ def _az_storage_cleanup(client, options):
 
 AZURE_STORAGE = ResourceType(
     key="azure-storage",
+    provider="azure",
+    short_label="Storage account",
     label="Azure storage account",
     id_label="Account name",
     get_client=az_storage.get_client,
@@ -1324,7 +1244,6 @@ AZURE_STORAGE = ResourceType(
     # takes every container and blob with it, and "nothing else would be
     # destroyed" is the one answer that must not appear in front of this
     # button. The route says there is no preview instead.
-    provider="azure",
 )
 
 
@@ -1374,6 +1293,8 @@ def _az_keyvault_cleanup(client, options):
 
 AZURE_KEYVAULT = ResourceType(
     key="azure-keyvault",
+    provider="azure",
+    short_label="Key vault",
     label="Azure key vault",
     id_label="Vault name",
     get_client=az_keyvault.get_client,
@@ -1390,7 +1311,6 @@ AZURE_KEYVAULT = ResourceType(
     # this tool could print - what breaks is whatever was encrypted with the
     # keys inside, which lives in resources this tool has never read. An empty
     # preview in front of that would be the most misleading thing here.
-    provider="azure",
 )
 
 
@@ -1436,6 +1356,8 @@ def _az_vnet_cleanup(client, options):
 
 AZURE_VNET = ResourceType(
     key="azure-vnet",
+    provider="azure",
+    short_label="Virtual network",
     label="Azure virtual network",
     id_label="Network name",
     get_client=az_vnet.get_client,
@@ -1450,7 +1372,6 @@ AZURE_VNET = ResourceType(
     cleanup=_az_vnet_cleanup,
     only_ours_label="only ones this tool made",
     plan_deletion=az_vnet.plan_deletion,
-    provider="azure",
 )
 
 
@@ -1551,6 +1472,8 @@ def _az_vm_options(client):
 
 AZURE_VM = ResourceType(
     key="azure-vm",
+    provider="azure",
+    short_label="Virtual machine",
     label="Azure virtual machine",
     id_label="Machine name",
     get_client=az_vm.get_client,
@@ -1566,7 +1489,6 @@ AZURE_VM = ResourceType(
     options=_az_vm_options,
     only_ours_label="only ones this tool made",
     plan_deletion=az_vm.plan_deletion,
-    provider="azure",
 )
 
 

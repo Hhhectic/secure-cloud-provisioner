@@ -1,327 +1,546 @@
-/* Deliberately plain. Severity is the only thing colour is spent on, because
-   it is the only thing here where colour carries meaning rather than mood.
+/* Sanctum.
 
-   That rule survived the cloud switch, which was the first thing to ask for an
-   exception: AWS orange beside Azure blue would have been the first colour on
-   this page that means nothing about risk, and every red thing below would
-   have had to compete with it. The switch is told apart by position and fill
-   instead, which is what the selected tab has always used.
+   Severity is still the only thing colour is spent on where colour carries
+   meaning. Everything else the palette does is orientation: which cloud you
+   are pointed at, and which of fourteen resource types you are looking at.
+   Those two questions were previously answered by reading a row of wrapping
+   tabs, and getting them wrong is how somebody deletes the right-named thing
+   in the wrong account.
 
-   Two typefaces, and the split is by what the words are rather than by where
-   they sit. Findings are prose aimed at somebody who does not know the jargon,
-   and monospace prose is measurably slower to read; identifiers, keys and
-   anything a person will compare character by character stay mono, because
-   that is where a lost character matters. */
+   One accent variable, set by a class on <body>, is what makes the cloud
+   switch a single assignment rather than a repaint. */
 
 :root {
-  --ink: #1a1a1a;
-  --paper: #fff;
-  --page: #fbfbfa;
-  --line: #ccc;
-  --line-soft: #e2e2e0;
-  --quiet: #5a5a58;
-  --wash: #f6f6f4;
+  --ink: #17181a;
+  --ink-soft: #3d4145;
+  --muted: #585b5f;
+  --muted-2: #6a6c66;
+  --muted-3: #82847e;
+  --page: #fcfcfb;
 
-  /* The only three that mean anything. */
-  --critical: #a00;
-  --warning: #8a6400;
-  --info: #26c;
+  --line: #e2e0da;
+  --line-soft: #ecebe6;
+  --line-faint: #f2f1ec;
+  --line-row: #f4f3ef;
 
-  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-          "Helvetica Neue", Arial, sans-serif;
-  --mono: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+  --critical: #b4251d;
+  --warning: #92670a;
+  --info: #5b6672;
 
-  --gap: 1rem;
+  --sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Overridden per cloud below. AWS is the default because it is the cloud
+     the page opens on. */
+  --accent: #d9822b;
+  --accent-deep: #a3591a;
+  --accent-hover: #b7681a;
+  --tint: #fdf6ee;
+  --row-hover: #faf8f4;
+  --blob-1: rgba(217, 130, 43, .26);
+  --blob-2: rgba(226, 163, 80, .22);
+  --blob-3: rgba(184, 96, 26, .14);
+}
+
+body.cloud-azure {
+  --accent: #2c72c7;
+  --accent-deep: #1f5aa6;
+  --accent-hover: #1f5aa6;
+  --tint: #f2f7fd;
+  --row-hover: #f7fafe;
+  --blob-1: rgba(44, 114, 199, .24);
+  --blob-2: rgba(88, 151, 222, .20);
+  --blob-3: rgba(31, 90, 166, .13);
 }
 
 * { box-sizing: border-box; }
 
 body {
-  font: 15px/1.55 var(--sans);
-  margin: 0 auto;
-  padding: 1rem 1.25rem 3rem;
-  max-width: 92rem;
+  margin: 0;
+  min-height: 100vh;
   background: var(--page);
   color: var(--ink);
+  font: 14px/1.62 var(--sans);
   -webkit-font-smoothing: antialiased;
 }
 
-/* Identifiers, keys, commands: anything compared character by character. */
-.mono-block, .cite, code, pre, input, textarea, select, .pill { font-family: var(--mono); }
+a { color: var(--ink); }
+a:hover { color: #4a4d51; }
 
-/* ------------------------------------------------------------------ header */
+@keyframes scpIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes scpFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes driftA {
+  0%   { transform: translate3d(-4%, -6%, 0) scale(1); }
+  50%  { transform: translate3d(10%, 8%, 0) scale(1.18); }
+  100% { transform: translate3d(-4%, -6%, 0) scale(1); }
+}
+@keyframes driftB {
+  0%   { transform: translate3d(6%, 4%, 0) scale(1.1); }
+  50%  { transform: translate3d(-8%, -6%, 0) scale(.92); }
+  100% { transform: translate3d(6%, 4%, 0) scale(1.1); }
+}
+@keyframes driftC {
+  0%   { transform: translate3d(-2%, 8%, 0) scale(.95); }
+  50%  { transform: translate3d(6%, -10%, 0) scale(1.22); }
+  100% { transform: translate3d(-2%, 8%, 0) scale(.95); }
+}
+
+/* Anyone who has asked not to be moved is not moved. The drift is decorative
+   and the entry animations are not load-bearing, so both simply stop. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+}
+
+/* --------------------------------------------------------------- background */
+
+.drift { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
+.drift i { position: absolute; border-radius: 50%; display: block; }
+.drift i:nth-child(1) {
+  top: -18%; left: -12%; width: 70vw; height: 70vw;
+  background: radial-gradient(circle at 50% 50%, var(--blob-1), transparent 68%);
+  animation: driftA 34s ease-in-out infinite;
+}
+.drift i:nth-child(2) {
+  bottom: -26%; right: -14%; width: 62vw; height: 62vw;
+  background: radial-gradient(circle at 50% 50%, var(--blob-2), transparent 66%);
+  animation: driftB 44s ease-in-out infinite;
+}
+.drift i:nth-child(3) {
+  top: 24%; right: 16%; width: 38vw; height: 38vw;
+  background: radial-gradient(circle at 50% 50%, var(--blob-3), transparent 70%);
+  animation: driftC 56s ease-in-out infinite;
+}
+
+/* ------------------------------------------------------------------- header */
 
 header {
-  border-bottom: 2px solid var(--ink);
-  padding-bottom: .7rem;
-  margin-bottom: .2rem;
-  position: sticky;
-  top: 0;
-  background: var(--page);
-  z-index: 5;
+  position: sticky; top: 0; z-index: 20;
+  color: #fff;
+  background: var(--accent-deep);
+  transition: background .5s ease;
+  border-bottom: 1px solid rgba(255, 255, 255, .2);
+  box-shadow: 0 1px 14px rgba(0, 0, 0, .06);
 }
 
-h1 {
-  font-size: 1.05rem;
-  letter-spacing: -.01em;
-  margin: 0;
-  white-space: nowrap;
+.head-inner {
+  max-width: 1240px; margin: 0 auto; padding: 20px 40px;
+  display: flex; align-items: center; justify-content: space-between; gap: 32px;
+  flex-wrap: wrap;
 }
 
-h2 {
-  font-size: .82rem;
-  text-transform: uppercase;
-  letter-spacing: .07em;
-  color: var(--quiet);
-  margin: 0 0 .7rem;
-  border-bottom: 1px solid var(--line-soft);
-  padding-bottom: .4rem;
+.brand { display: flex; flex-direction: column; gap: 5px; }
+.wordmark { font: 600 26px/1.1 var(--sans); letter-spacing: -.02em; }
+.tagline {
+  font: 11px/1.2 var(--mono); letter-spacing: .09em; text-transform: uppercase;
+  color: rgba(255, 255, 255, .92);
 }
 
-h3 { font-size: .9rem; margin: 1rem 0 .35rem; }
+.head-right { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
 
-.bar { display: flex; gap: 1.1rem; align-items: center; flex-wrap: wrap; }
-.bar-end { display: flex; gap: .9rem; align-items: center; margin-left: auto; }
-.row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-top: .6rem; }
-.controls { float: right; font-weight: normal; display: flex; gap: .9rem; align-items: center;
-            text-transform: none; letter-spacing: 0; font-size: .82rem; }
-
-/* --------------------------------------------------------- the cloud switch
-
-   A real sliding control: one knob, moved by transform across as many
-   positions as there are providers. It counts them rather than assuming two,
-   because /resources decides how many there are and a third cloud should not
-   need this file reopened. */
-
-.switch {
-  --positions: 2;
-  --position: 0;
-  position: relative;
-  display: inline-flex;
-  border: 1px solid var(--ink);
-  background: var(--paper);
-  padding: 2px;
+/* The health pill. Kept as .pill/.ok/.bad because app.js sets those. */
+.pill {
+  display: inline-flex; align-items: center; gap: 7px;
+  font: 11.5px/1 var(--mono); letter-spacing: .04em; color: #fff;
+  border: 0; padding: 0; background: none;
 }
-
-.switch::before {
-  content: "";
-  position: absolute;
-  top: 2px;
-  bottom: 2px;
-  left: 2px;
-  width: calc((100% - 4px) / var(--positions));
-  transform: translateX(calc(var(--position) * 100%));
-  background: var(--ink);
-  transition: transform .18s ease;
+.pill::before {
+  content: ""; width: 6px; height: 6px; border-radius: 50%; background: #fff;
 }
+/* These two beat the bare .ok/.bad further down, which are for text on the
+   page rather than for a pill sitting on a coloured header. Green on burnt
+   orange was very nearly invisible. */
+.pill.ok { color: #fff; }
+.pill.ok::before { background: #fff; }
+.pill.bad { color: #ffdcd7; }
+.pill.bad::before { background: #ffdcd7; }
 
-.switch button {
-  position: relative;
-  z-index: 1;
-  border: 0;
-  background: none;
-  min-width: 5.5rem;
-  padding: .3rem .9rem;
-  font-weight: 600;
-  font-size: .85rem;
-  letter-spacing: .02em;
-  color: var(--quiet);
-  transition: color .18s ease;
+/* The cloud switch. Two labels and a knob that slides between them, so the
+   thing being switched and its current position are the same control. */
+.toggle {
+  position: relative; display: flex; align-items: center;
+  width: 200px; height: 40px; padding: 4px;
+  border: 1px solid rgba(255, 255, 255, .4); border-radius: 999px;
+  background: rgba(255, 255, 255, .2);
+  cursor: pointer; font: inherit;
 }
-
-.switch button:hover:not(.active) { background: none; color: var(--ink); }
-.switch button.active { color: var(--paper); }
-
-@media (prefers-reduced-motion: reduce) {
-  .switch::before, .switch button { transition: none; }
+.toggle .knob {
+  position: absolute; top: 4px; left: 4px; width: 96px; height: 30px;
+  border-radius: 999px; background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .10), 0 4px 12px rgba(0, 0, 0, .06);
+  transition: transform .38s cubic-bezier(.4, 0, .2, 1);
 }
-
-/* -------------------------------------------------------------------- warn */
-
-.warn {
-  background: #fff4d6;
-  border-left: 3px solid #b8860b;
-  padding: .55rem .75rem;
-  margin: .9rem 0;
-  font-size: .88rem;
-  max-width: 62rem;
+body.cloud-azure .toggle .knob { transform: translateX(96px); }
+.toggle .opt {
+  position: relative; z-index: 1; flex: 1;
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  font: 600 12px/1 var(--mono); letter-spacing: .1em;
+  color: rgba(255, 255, 255, .96); transition: color .3s ease;
 }
-.warn:empty { display: none; }
-
-/* -------------------------------------------------------------------- tabs */
-
-nav { display: flex; gap: .3rem; flex-wrap: wrap; margin: .9rem 0 1.1rem; }
-nav button { display: inline-flex; align-items: baseline; gap: .4rem; }
-nav button.active { background: var(--ink); color: var(--paper); }
-
-/* The generic hover below sets a light background and comes later, so it won
-   on background while .active kept the white text: the selected tab turned
-   white-on-near-white for exactly as long as the pointer sat on it, which is
-   whenever somebody is about to click something else. Found by a real browser;
-   jsdom has no cursor and computes no styles. */
-nav button.active:hover { background: var(--ink); color: var(--paper); }
-
-/* "audit only" travels with the tab it qualifies rather than inside its label,
-   so the resource keeps the name the registry gave it. */
-.tag {
-  font-size: .68rem;
-  text-transform: uppercase;
-  letter-spacing: .06em;
-  color: var(--quiet);
+.toggle .opt .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: rgba(255, 255, 255, .5); transition: background .3s ease;
 }
-nav button.active .tag { color: #cfcfcf; }
+body:not(.cloud-azure) .toggle .opt[data-cloud="aws"],
+body.cloud-azure .toggle .opt[data-cloud="azure"] { color: var(--ink); }
+body:not(.cloud-azure) .toggle .opt[data-cloud="aws"] .dot { background: #d9822b; }
+body.cloud-azure .toggle .opt[data-cloud="azure"] .dot { background: #2c72c7; }
+
+/* ------------------------------------------------------------ context strip */
+
+.context {
+  position: relative; z-index: 1;
+  max-width: 1240px; margin: 0 auto; padding: 26px 40px 0;
+  display: flex; align-items: baseline; gap: 28px; flex-wrap: wrap;
+}
+.context > label {
+  display: inline-flex; align-items: center; gap: 10px;
+  font: 11px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase;
+  color: #4f524c;
+}
+.context select {
+  font: 13px/1 var(--mono); color: var(--ink); padding: 7px 9px;
+  border: 1px solid var(--line); background: #fff; border-radius: 4px;
+  letter-spacing: 0; text-transform: none;
+}
+.context p {
+  margin: 0; max-width: 58ch; color: var(--muted);
+  font-size: 12.5px; line-height: 1.55;
+  border-left: 2px solid var(--tint-line, var(--line)); padding-left: 12px;
+  text-wrap: pretty;
+}
+body:not(.cloud-azure) .context p { border-left-color: #f0dfc9; }
+body.cloud-azure .context p { border-left-color: #d5e4f7; }
 
 /* ------------------------------------------------------------------ layout */
 
-main { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); align-items: start; }
-@media (max-width: 900px) { main { grid-template-columns: 1fr; } }
-section { border: 1px solid var(--line-soft); background: var(--paper); padding: .9rem 1rem 1.1rem; }
-#listing { grid-column: 1 / -1; }
-
-/* ---------------------------------------------------------------- controls */
-
-button {
-  font: inherit;
-  font-size: .87rem;
-  padding: .32rem .7rem;
-  cursor: pointer;
-  border: 1px solid var(--ink);
-  background: var(--paper);
-  color: inherit;
+main {
+  position: relative; z-index: 1;
+  max-width: 1240px; margin: 0 auto; padding: 34px 40px 96px;
+  display: grid; grid-template-columns: 212px minmax(0, 1fr); gap: 44px;
+  align-items: start;
 }
-button:hover:not(:disabled) { background: #ededea; }
-button:disabled { opacity: .4; cursor: not-allowed; }
-button.danger { border-color: var(--critical); color: var(--critical); }
-button.danger:hover:not(:disabled) { background: #fee; }
-
-:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
-
-input, textarea, select {
-  font: inherit;
-  font-size: .87rem;
-  padding: .28rem .35rem;
-  border: 1px solid #999;
-  background: var(--paper);
-  color: inherit;
+@media (max-width: 900px) {
+  main { grid-template-columns: 1fr; gap: 26px; padding: 26px 20px 64px; }
+  .head-inner, .context { padding-left: 20px; padding-right: 20px; }
+  #sidebar { position: static !important; }
 }
-textarea { width: 100%; }
-label { display: inline-flex; gap: .35rem; align-items: center; }
+
+.stack { display: flex; flex-direction: column; gap: 34px; min-width: 0; }
+
+/* ----------------------------------------------------------------- sidebar */
+
+#sidebar {
+  animation: scpIn .5s cubic-bezier(.2, .75, .3, 1) both;
+  position: sticky; top: 110px;
+}
+.side-head, .side-foot-head {
+  font: 10.5px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase;
+  color: #4f524c; padding: 0 0 14px;
+}
+#types { display: flex; flex-direction: column; gap: 1px; }
+#types button {
+  text-align: left; font: inherit; cursor: pointer;
+  border: 0; border-left: 2px solid transparent;
+  background: transparent; color: var(--ink-soft);
+  padding: 9px 12px;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  transition: background .18s ease;
+}
+#types button:hover { background: var(--row-hover); }
+#types button.active {
+  border-left-color: var(--accent); background: var(--tint);
+  color: var(--ink); font-weight: 600;
+}
+#types button > span:first-child { line-height: 1.3; }
+#types button .tag {
+  font: 10.5px/1 var(--mono); color: var(--muted-2); letter-spacing: .04em;
+  font-weight: 400; white-space: nowrap;
+}
+/* The blueprint is not a resource type and is set apart from the ones that
+   are, because building it makes six things at once. */
+#types button.set-apart { margin-top: 14px; }
+
+#side-foot {
+  margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line-soft);
+  font: 11.5px/1.6 var(--mono); color: var(--muted); word-break: break-all;
+}
+#side-foot:empty { display: none; }
+
+/* ------------------------------------------------------------------- cards */
+
+section {
+  animation: scpIn .5s cubic-bezier(.2, .75, .3, 1) both;
+  background: rgba(255, 255, 255, .84);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(228, 226, 220, .9);
+  border-radius: 6px;
+  padding: 26px 28px;
+}
+#listing { animation-delay: .09s; padding-bottom: 12px; }
+#detail { animation-delay: .14s; }
+#create { animation-delay: .19s; }
+#blueprint { animation-delay: .09s; }
+
+h1 { font: 600 26px/1.1 var(--sans); margin: 0; }
+h2 {
+  margin: 0; font: 600 15px/1.3 var(--sans); letter-spacing: -.01em;
+}
+h3 {
+  font: 10.5px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase;
+  color: var(--muted-2); margin: 22px 0 10px;
+}
+
+.card-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 24px; flex-wrap: wrap; padding: 0 0 18px;
+}
+.controls {
+  display: flex; align-items: center; gap: 20px;
+  font-size: 12.5px; color: var(--muted); flex-wrap: wrap;
+}
+.controls label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.controls input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent); margin: 0; }
+
+.audit-badge {
+  font: 10.5px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase;
+  color: var(--accent); border: 1px solid var(--line); border-radius: 3px;
+  padding: 5px 7px;
+}
 
 /* ------------------------------------------------------------------ tables */
 
-table { border-collapse: collapse; width: 100%; margin-top: .5rem; font-size: .87rem; }
-th, td { border-bottom: 1px solid var(--line-soft); padding: .4rem .5rem; text-align: left; vertical-align: top; }
+table { width: 100%; border-collapse: collapse; }
 th {
-  background: none;
-  border-bottom: 1px solid var(--line);
-  font-size: .72rem;
-  text-transform: uppercase;
-  letter-spacing: .06em;
-  color: var(--quiet);
-  font-weight: 600;
+  text-align: left; font: 10.5px/1 var(--mono); letter-spacing: .12em;
+  text-transform: uppercase; color: var(--muted-2); font-weight: 400;
+  padding: 0 12px 12px 0; border-bottom: 1px solid var(--line-soft);
 }
-tbody tr:last-child td { border-bottom: 0; }
-tr.clickable:hover { background: var(--wash); cursor: pointer; }
+td {
+  padding: 15px 12px 15px 0; border-bottom: 1px solid var(--line-row);
+  vertical-align: top;
+}
+th:last-child, td:last-child { padding-right: 0; }
+td:first-child { font: 13px var(--mono); }
+tr.clickable { cursor: pointer; transition: background .16s ease; }
+tr.clickable:hover { background: var(--row-hover); }
+tr.foreign { background: #fdf7f6; }
 
-.pill { padding: .12rem .45rem; border: 1px solid; font-size: .74rem; }
-.ok { color: #060; border-color: #060; }
-.bad { color: var(--critical); border-color: var(--critical); }
+.worst {
+  font: 11.5px var(--mono); letter-spacing: .08em; text-transform: uppercase;
+}
+.worst.critical { color: var(--critical); }
+.worst.warning { color: var(--warning); }
+.worst.info { color: var(--info); }
+.worst.clean { color: #3f7d54; }
+.worst.unscanned { color: var(--muted-2); }
+.summary { color: var(--muted); font-size: 12.5px; }
+.badge {
+  margin-left: 9px; font: 10px/1 var(--mono); letter-spacing: .08em;
+  text-transform: uppercase; color: var(--muted-2);
+  border: 1px solid var(--line-soft); border-radius: 3px; padding: 3px 5px;
+}
+
+/* ----------------------------------------------------------------- buttons */
+
+button {
+  font: 12.5px/1 var(--sans); padding: 11px 15px; cursor: pointer;
+  color: var(--ink); background: #fff;
+  border: 1px solid var(--line); border-radius: 4px;
+  transition: border-color .18s ease, background .18s ease;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+
+button.primary {
+  color: #fff; background: var(--ink); border-color: var(--ink);
+}
+button.primary:hover:not(:disabled) {
+  background: var(--accent); border-color: var(--accent);
+}
+button.danger { color: var(--critical); border-color: #eedcda; background: #fff; }
+button.danger:hover:not(:disabled) { background: #fdf4f3; border-color: #eedcda; }
+button.quiet {
+  font: 11px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase;
+  background: transparent; padding: 8px 12px;
+}
+button.link {
+  font: 12px/1 var(--sans); color: var(--critical); background: transparent;
+  border: 0; border-bottom: 1px solid #eedcda; border-radius: 0;
+  padding: 2px 0 4px;
+}
+
+/* --------------------------------------------------------------- form bits */
+
+input, textarea, select {
+  font: 13px var(--sans); padding: 9px 11px;
+  border: 1px solid var(--line); border-radius: 4px;
+  background: #fff; color: var(--ink);
+}
+textarea { width: 100%; font: 12.5px/1.55 var(--mono); resize: vertical; }
+label { display: inline-flex; gap: .4rem; align-items: center; }
+
+.field {
+  display: grid; grid-template-columns: 170px minmax(0, 520px);
+  gap: 20px; align-items: start; padding: 0 0 18px;
+}
+.field > label {
+  font: 12px/1.5 var(--sans); color: var(--muted); padding-top: 9px;
+  display: block;
+}
+/* Everything that is not the caption belongs in the second column and stacks
+   there. Without this a field's hint became the first cell of the next
+   implicit row, so "which network it belongs to" appeared underneath the word
+   "network" in the label column, reading like a second caption. */
+.field > *:not(label) { min-width: 0; grid-column: 2; }
+.field input[type="text"], .field input:not([type]), .field textarea, .field select {
+  width: 100%;
+}
+/* A button in a field is as wide as its words. Stretched across the column it
+   read as a text box somebody had styled oddly. */
+.field > button { justify-self: start; }
+.field input[type="checkbox"] {
+  width: 15px; height: 15px; accent-color: var(--accent); margin: 0;
+}
+.field .hint { color: var(--muted-2); font-size: 12px; }
+@media (max-width: 700px) {
+  .field { grid-template-columns: 1fr; gap: 6px; }
+  .field > label { padding-top: 0; }
+}
+
+.note {
+  color: #71747a; font-size: 12px; line-height: 1.5;
+  margin: 0 0 18px 190px; max-width: 46ch; text-wrap: pretty;
+}
+@media (max-width: 700px) { .note { margin-left: 0; } }
+
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding-top: 6px; }
+
+.rule {
+  display: grid; grid-template-columns: 1fr 1fr 1.35fr auto; gap: 10px;
+  align-items: end; background: #faf9f6; border: 1px solid #f0efea;
+  border-radius: 4px; padding: 12px; margin-bottom: 10px;
+}
+@media (max-width: 700px) { .rule { grid-template-columns: 1fr; } }
+/* A grid item will not shrink below its content's minimum width, and the
+   source menu's longest option is "0.0.0.0/0 — the entire internet, IPv6".
+   That pushed the row wider than its own box and left the remove button
+   sitting outside the border it belongs inside. */
+.rule > * { min-width: 0; }
+.rule select, .rule input { width: 100%; }
+.labelled { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.labelled > span:last-child { display: flex; min-width: 0; }
+.labelled small {
+  font: 9.5px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase;
+  color: var(--muted-2);
+}
+.labelled select, .labelled input { font: 12.5px var(--sans); padding: 7px 8px; }
+
+.keygen {
+  border: 1px dashed #ddd9d0; border-radius: 4px; padding: 16px; margin: 0 0 20px;
+}
+.keygen .warn { margin: 12px 0 0; }
 
 /* ---------------------------------------------------------------- findings */
 
 .finding {
-  border-left: 3px solid #999;
-  padding: .5rem .7rem;
-  margin: .45rem 0;
-  background: #fafafa;
-  max-width: 62rem;
+  border-top: 1px solid var(--line-faint); margin-top: 20px; padding-top: 18px;
 }
-.finding.critical { border-color: var(--critical); background: #fff5f5; }
-.finding.warning  { border-color: #b8860b; background: #fffdf3; }
-.finding.info     { border-color: var(--info); background: #f5f8ff; }
-.level { font-weight: 700; text-transform: uppercase; font-size: .7rem; letter-spacing: .07em; }
-.critical .level { color: var(--critical); }
-.warning .level  { color: var(--warning); }
-.info .level     { color: var(--info); }
-.cite { color: var(--quiet); font-size: .78rem; }
+.finding .level {
+  font: 600 10.5px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase;
+}
+.finding.critical .level { color: var(--critical); }
+.finding.warning .level { color: var(--warning); }
+.finding.info .level { color: var(--info); }
+.finding p { margin: 11px 0 0; max-width: 60ch; text-wrap: pretty; }
+.finding.acknowledged { opacity: .62; }
+.cite { font: 11.5px var(--mono); color: #7a7c76; }
+.ack { font-size: 12.5px; font-style: italic; color: var(--muted); max-width: 60ch; }
 
-.finding.acknowledged { opacity: .62; border-left-style: dashed; }
-.ack { font-size: .8rem; color: var(--quiet); margin-top: .3rem; font-style: italic; }
-
-/* Forms. Every control gets a caption above it rather than a placeholder
-   inside it, because a placeholder disappears exactly when it is needed. */
-.field { display: flex; align-items: center; gap: .6rem; margin: .6rem 0; flex-wrap: wrap; }
-.field > label { min-width: 9rem; font-weight: 600; font-size: .87rem; }
-.field .hint { color: var(--quiet); font-size: .8rem; }
-
-/* Boxes grow to their column rather than to the size attribute they were
-   built with. That attribute is 32 characters for every text field, which was
-   narrower than the longest placeholder - so the Azure resource group field
-   asked "Azure needs one; it is created if it is n" and stopped, which reads
-   as a bug in the sentence rather than in the box. Capped, because a text
-   field the width of a monitor invites an answer nobody wants to type. */
-.field > input:not([type="checkbox"]), .field > textarea {
-  flex: 1 1 20rem;
-  max-width: 32rem;
-  min-width: 0;
+.warn {
+  margin: 13px 0 0; padding: 12px 14px; background: #faf9f6;
+  color: #4d5054; font-size: 12.5px; max-width: 62ch; border-radius: 4px;
+  border-left: 2px solid var(--accent);
 }
 
-.rule {
-  display: flex; gap: .9rem; align-items: flex-end; flex-wrap: wrap;
-  border: 1px solid var(--line-soft); padding: .6rem; margin: .45rem 0; background: #fafafa;
-}
-.labelled { display: flex; flex-direction: column; gap: .18rem; }
-.labelled small {
-  color: var(--quiet); font-size: .68rem;
-  text-transform: uppercase; letter-spacing: .06em;
-}
+/* ------------------------------------------------------------------- misc */
 
-.note {
-  color: #444; font-size: .84rem; line-height: 1.5;
-  margin: -.15rem 0 .75rem; padding-left: .65rem; border-left: 2px solid var(--line-soft);
-  max-width: 52rem;
+.muted { color: var(--muted-2); }
+.bad { color: var(--critical); }
+.ok { color: #3f7d54; }
+.hidden { display: none !important; }
+
+.mono-block {
+  margin: 0; font: 12.5px/1.6 var(--mono); color: #4a4d51;
+  background: #faf9f6; border-radius: 4px; padding: 14px 16px;
+  overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+  max-height: 300px;
 }
 
 .existing {
-  border: 1px solid var(--line-soft); padding: .55rem .75rem; margin: .45rem 0;
-  background: #fafafa; display: flex; flex-direction: column; gap: .3rem;
+  border: 1px solid var(--line-soft); border-radius: 4px;
+  padding: 14px 16px; margin: 10px 0; background: #faf9f6;
+  display: flex; flex-direction: column; gap: 6px;
 }
 
-.keygen { border: 1px dashed #999; padding: .7rem; margin: .7rem 0; background: #fcfcfc; }
-.keygen .warn { margin: .5rem 0 0; }
-
-.muted { color: var(--quiet); }
-.mono-block {
-  background: var(--wash); padding: .55rem; overflow-x: auto; white-space: pre-wrap;
-  word-break: break-word; max-height: 22rem; font-size: .82rem;
-  border: 1px solid var(--line-soft);
+.live:not(:empty) {
+  border-top: 1px solid var(--line-faint); margin-top: 22px; padding-top: 18px;
+  animation: scpIn .4s cubic-bezier(.2, .75, .3, 1) both;
 }
-.foreign { background: #fff5f5; }
-.hidden { display: none !important; }
+.live-head { font-size: 13px; color: var(--muted); margin: 0 0 4px; max-width: 56ch; }
+.live-clean { font-size: 13px; color: #3f7d54; margin: 0; }
 
-/* ------------------------------------------------------------------- modal */
+/* The create panel folds away, because on an audited type there is nothing
+   under it and on a wide one it pushes the findings off the screen. */
+.fold {
+  width: 100%; display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; padding: 0; background: transparent; border: 0; cursor: pointer;
+  text-align: left; font: inherit; color: var(--ink);
+}
+.fold:hover:not(:disabled) { border-color: transparent; }
+.fold .fold-left { display: flex; align-items: baseline; gap: 12px; }
+.fold .fold-right { display: flex; align-items: center; gap: 12px; }
+.fold .sub {
+  font: 11px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted-2);
+}
+.chev {
+  width: 7px; height: 7px; margin-bottom: 2px;
+  border-right: 1.5px solid var(--muted-2); border-bottom: 1.5px solid var(--muted-2);
+  transition: transform .28s ease; transform: rotate(45deg);
+}
+.fold[aria-expanded="true"] .chev { transform: rotate(225deg); }
+.fold-body { animation: scpFade .3s ease both; }
+.divider { height: 1px; background: var(--line-faint); margin: 20px 0 24px; }
+
+/* ------------------------------------------------------------ modal, toast */
 
 #modal {
-  position: fixed; inset: 0; background: rgba(0,0,0,.55);
-  display: flex; align-items: center; justify-content: center; padding: 1rem;
-  z-index: 20;
+  position: fixed; inset: 0; z-index: 60; background: rgba(23, 24, 26, .42);
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+  animation: scpFade .2s ease both;
 }
 .sheet {
-  background: var(--paper); padding: 1.1rem 1.2rem; max-width: 46rem; width: 100%;
-  max-height: 90vh; overflow-y: auto; border: 2px solid var(--critical);
-  box-shadow: 0 10px 40px rgba(0,0,0,.25);
+  background: #fff; border-radius: 6px; padding: 28px 30px;
+  max-width: 640px; width: 100%; max-height: 88vh; overflow-y: auto;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, .22);
+  animation: scpIn .28s cubic-bezier(.2, .75, .3, 1) both;
 }
+.sheet h2 { margin: 0 0 12px; font-size: 16px; }
+.sheet p { margin: 0 0 18px; color: var(--muted); font-size: 13px; max-width: 62ch; text-wrap: pretty; }
+.sheet .row { justify-content: flex-end; }
+.sheet table { margin-bottom: 18px; }
+.sheet td, .sheet th { font-size: 12.5px; padding: 8px 12px 8px 0; }
 
 #toast {
-  position: fixed; bottom: 1rem; right: 1rem; padding: .65rem .95rem;
-  border: 1px solid var(--ink); background: var(--paper); max-width: 34rem;
-  font-size: .87rem; box-shadow: 0 4px 18px rgba(0,0,0,.15); z-index: 30;
+  position: fixed; bottom: 26px; right: 26px; z-index: 70; max-width: 420px;
+  background: var(--ink); color: #fff; border-radius: 5px; padding: 14px 18px;
+  font-size: 12.5px; line-height: 1.5;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .24);
+  border-left: 3px solid var(--accent);
+  animation: scpIn .3s cubic-bezier(.2, .75, .3, 1) both;
 }
-#toast.err { border-color: var(--critical); background: #fee; }
-
-/* The live pre-flight, above the Create button. Deliberately quieter than the
-   output of an explicit check: this appears without being asked for, so it
-   states what it knows and does not compete with the findings inside it. */
-.live:not(:empty) { border-top: 1px dashed var(--line); margin-top: .85rem; padding-top: .65rem; }
-.live-head { font-size: .85rem; color: #444; margin: 0 0 .4rem; }
-.live-clean { font-size: .85rem; color: #060; margin: 0; }
+#toast.err { border-left-color: var(--critical); }

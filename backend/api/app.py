@@ -342,26 +342,20 @@ def list_resource_types():
     to assume it was, which left the role list showing AWS's own service roles
     with no way to hide them.
 
-    providers travels with them for the same reason both of those do: the page
-    shows one cloud at a time, and the alternative was splitting the list on
-    the "azure-" prefix in JavaScript. That would be this file's own knowledge
-    written down a second time somewhere it cannot be tested, which is the
-    argument the options field has made since it was written.
+    provider is here for the same reason: the page shows one cloud at a time,
+    and the only other way to know which is which is to match on the "azure-"
+    key prefix. That would be the frontend inferring a provider from a naming
+    convention nothing enforces, and it would need editing again for a third
+    cloud - the one thing adding Azure was supposed to prove unnecessary.
     """
     return {
         "resources": [
             {"key": r.key, "label": r.label, "id_label": r.id_label,
              "read_only": r.read_only,
              "only_ours_label": r.only_ours_label,
-             "provider": r.provider}
+             "provider": r.provider,
+             "short_label": r.short_label or r.label}
             for r in registry.REGISTRY.values()
-        ],
-        "providers": [
-            {"key": p.key, "label": p.label, "place_label": p.place_label,
-             "place_field": p.place_field, "places": p.places,
-             "default_place": p.default_place, "caution": p.caution,
-             "blueprints": list(p.blueprints)}
-            for p in registry.PROVIDERS
         ],
     }
 
