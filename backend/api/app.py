@@ -259,6 +259,32 @@ def _must_be_writable(known):
         )
 
 
+def _spec_for_checking(known, spec, region):
+    """The spec the pre-flight sees, carrying the region the request is for.
+
+    A rule can only judge what it is handed. The region arrives as a query
+    parameter rather than in the body, so `spec["region"]` was always None and
+    `billing_wrong_region` could not fire from the page at all - a billing
+    alarm built in us-west-2 pre-flighted as 0 critical and was created,
+    whereupon it sat in INSUFFICIENT_DATA forever because AWS publishes
+    spending figures only to us-east-1. That is the state the rule's own text
+    calls "easy to read as nothing is wrong", and the guardrail against it was
+    reachable only by a caller who put the region in the body by hand.
+
+    AWS only, and deliberately. `region` on an Azure spec carries the
+    *location*: `_az_vm_create` reads `spec.get("region") or
+    spec.get("location")`, so injecting an AWS region here would quietly try to
+    build somebody's storage account in "us-east-1".
+
+    setdefault rather than assignment, so a caller who did state a region in
+    the body still means it.
+    """
+    data = spec.as_dict()
+    if known.provider == "aws":
+        data.setdefault("region", region)
+    return data
+
+
 def _acknowledge(warnings, scanned=None):
     """Marks what somebody has already decided to live with.
 
@@ -392,14 +418,19 @@ def cleanup_plan(resource_type: str, region: str = "us-east-1"):
 
 
 @app.post("/resources/{resource_type}/check", response_model=models.ScanResponse)
-def check_spec(resource_type: str, spec: models.ResourceSpec):
+def check_spec(resource_type: str, spec: models.ResourceSpec,
+               region: str = "us-east-1"):
     """Scans settings that have not been created yet.
 
     Separate from create on purpose: the form can call this on every keystroke
     and show warnings live, before anything exists in the account.
+
+    Takes the region for the same reason create does: some findings are about
+    where a thing would be built rather than how, and this route could not see
+    that at all until now.
     """
     known = _resource(resource_type)
-    warnings = known.check_spec(spec.as_dict())
+    warnings = known.check_spec(_spec_for_checking(known, spec, region))
 
     return models.ScanResponse(
         resource_type=resource_type,
@@ -434,7 +465,7 @@ def create(resource_type: str, spec: models.ResourceSpec, region: str = "us-east
     _must_be_writable(known)
     client = known.get_client(region)
 
-    blocking = [w for w in known.check_spec(spec.as_dict())
+    blocking = [w for w in known.check_spec(_spec_for_checking(known, spec, region))
                 if w["level"] == CRITICAL]
     if blocking and not accept_risk:
         raise HTTPException(
