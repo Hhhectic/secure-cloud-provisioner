@@ -249,6 +249,27 @@ def test_connection_instructions_use_proxyjump_and_say_why(ec2, keys):
     assert "worse" in lines
 
 
+def test_the_instructions_start_by_making_the_keys_private(ec2, keys):
+    """ssh refuses a key other people on the machine could read, and a browser
+    downloads one as exactly that - 0644, every time, by the route this tool
+    recommends.
+
+    These instructions went straight to ssh-add, so anyone who followed them
+    got a wall of hashes about an unprotected key file instead of a shell. The
+    keygen panel said chmod 600 and this did not, so generating the keys here
+    and then reading this gave you the half without it.
+
+    Asserted before ssh-add rather than merely present: an order that puts the
+    fix after the thing it fixes is the same failure with more words.
+    """
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    lines = bastion.connection_instructions(details, key_directory=keys)
+    joined = "\n".join(lines)
+
+    assert "chmod 600" in joined
+    assert joined.index("chmod 600") < joined.index("ssh-add")
+
+
 def test_instructions_are_honest_when_addresses_are_not_ready():
     lines = bastion.connection_instructions(
         {"bastion_public_ip": None, "private_ip": None,

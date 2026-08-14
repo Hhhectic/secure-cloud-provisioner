@@ -254,7 +254,21 @@ def connection_instructions(details, key_directory="~/.ssh"):
     private_key = folder / details["private_key"]
 
     return [
-        "Load both keys into your SSH agent:",
+        # First, and it was missing.
+        #
+        # ssh refuses any private key that other people on the machine could
+        # read, and says so in a wall of hashes that reads like something is
+        # badly wrong. A browser download is 0644 every time - which is the
+        # route this tool recommends and `frontend/keygen.js` implements - so
+        # these instructions were unusable as written for anyone who followed
+        # them. The keygen panel says `chmod 600` and this did not; somebody
+        # generating keys and then reading this got the half without it.
+        "Make the keys readable only by you. A browser downloads them as",
+        "readable by anyone on this machine, and ssh refuses a key like that:",
+        "",
+        f"    chmod 600 {bastion_key} {private_key}",
+        "",
+        "Load both into your SSH agent:",
         "",
         '    eval "$(ssh-agent -s)"',
         f"    ssh-add {bastion_key}",
