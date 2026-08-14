@@ -1060,24 +1060,38 @@ let liveTimer = null;
 let liveSeq = 0;
 
 function scheduleLiveCheck() {
+  // A refusal is about the spec that was sent. The moment the form changes it
+  // is describing something else, and it sits below the live panel where a
+  // stale "0 critical" reads as the final word.
+  const out = $("create-out");
+  if (out && out.dataset.spec) {
+    out.replaceChildren();
+    delete out.dataset.spec;
+  }
+
   clearTimeout(liveTimer);
   liveTimer = setTimeout(runLiveCheck, LIVE_CHECK_DELAY_MS);
 }
 
-async function runLiveCheck() {
+async function runLiveCheck(explicit = false) {
   const box = $("create-live");
   const inputs = state.createInputs;
   if (!box || !inputs) return;
 
+  clearTimeout(liveTimer);
   const spec = collectSpec(inputs);
 
-  // Not an error worth showing. Somebody who has typed two characters of a
-  // name is mid-thought, and a red box telling them the name is missing is
-  // the tool nagging rather than helping.
+  // Not an error worth showing, unless it was asked for. Somebody who has
+  // typed two characters of a name is mid-thought, and a red box telling them
+  // the name is missing is the tool nagging rather than helping - but somebody
+  // who pressed the button and got nothing back is owed the reason.
   if (!spec.name) {
     box.replaceChildren();
+    if (explicit) box.append(text("p", "A name is required.", "bad"));
     return;
   }
+
+  if (explicit) box.replaceChildren(text("p", "Checking…", "muted"));
 
   // Two guards against showing an answer to a question nobody asked any more.
   // Responses can arrive out of order, so a slower earlier one must not
@@ -1127,9 +1141,9 @@ async function runLiveCheck() {
   }
 }
 
-async function submitSpec(inputs, dryRun, acceptRisk = false) {
+async function submitSpec(inputs, acceptRisk = false) {
   const out = $("create-out");
-  out.replaceChildren(text("p", dryRun ? "Checking…" : "Creating…", "muted"));
+  out.replaceChildren(text("p", "Creating…", "muted"));
 
   const spec = collectSpec(inputs);
   if (!spec.name) {
@@ -1137,9 +1151,8 @@ async function submitSpec(inputs, dryRun, acceptRisk = false) {
     return;
   }
 
-  const path = dryRun
-    ? `/resources/${state.type}/check`
-    : `/resources/${state.type}` + (acceptRisk ? "?accept_risk=true" : "");
+  const path = `/resources/${state.type}`
+    + (acceptRisk ? "?accept_risk=true" : "");
 
   let body;
   try {
@@ -1156,8 +1169,14 @@ async function submitSpec(inputs, dryRun, acceptRisk = false) {
       for (const w of e.detail.warnings) out.append(renderFinding(w, null));
 
       const anyway = text("button", "Create it anyway", "danger");
-      anyway.onclick = () => submitSpec(inputs, false, true);
+      anyway.onclick = () => submitSpec(inputs, true);
       out.append(anyway);
+
+      // This refusal describes the spec as it was submitted. Editing the form
+      // makes it a statement about something that is no longer on screen, so
+      // it is dropped on the next change rather than left contradicting the
+      // live panel above.
+      out.dataset.spec = "1";
       return;
     }
     out.replaceChildren(text("p", e.message, "bad"));
@@ -1165,14 +1184,11 @@ async function submitSpec(inputs, dryRun, acceptRisk = false) {
   }
 
   out.replaceChildren();
+  delete out.dataset.spec;
 
-  if (!dryRun) {
-    out.append(text("p", `Created ${body.resource_id}`));
-    for (const p of body.problems || []) out.append(text("p", p, "muted"));
-    loadList();
-  } else {
-    out.append(text("p", "Nothing was created. This is what it would report:"));
-  }
+  out.append(text("p", `Created ${body.resource_id}`));
+  for (const p of body.problems || []) out.append(text("p", p, "muted"));
+  loadList();
 
   const counts = body.counts;
   out.append(text("p",

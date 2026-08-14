@@ -450,6 +450,57 @@ if (check(Boolean(anyway), "and offers a way through, once the reasons are shown
   }
 }
 
+// ------------------------------------------ a refusal must not outlive the form
+
+/* Two panels used to answer "what would this create?" - the live one above the
+ * buttons and a second copy below them - and the lower one was never cleared.
+ * Pressing Check with safe settings, then making the form dangerous, left
+ * "0 critical" sitting underneath a live panel saying "2 critical", lower down
+ * the page where it reads as the conclusion. The check now has one home; what
+ * remains below the buttons is the result of acting, and a refusal there is
+ * about the spec that was sent. */
+
+console.log("\nA refusal is about the spec that was sent");
+console.log("-----------------------------------------");
+
+const { document: staleDoc } = await boot({
+  "/resources/security-group": (options) => {
+    if (options.method !== "POST") {
+      return { resource_type: "security-group", resources: [] };
+    }
+    return {
+      __status: 400,
+      detail: {
+        message: "Not created. The settings submitted have 1 critical problem.",
+        warnings: [{
+          level: "critical", message: "Anyone on the internet can reach port 22.",
+          rule_id: null, resource_id: null, rule: null, fix: null, control: null,
+        }],
+      },
+    };
+  },
+});
+
+const staleBody = $(staleDoc, "create-body");
+const [staleName] = staleBody.querySelectorAll("input");
+staleName.value = "open-sg";
+[...staleBody.querySelectorAll("button")]
+  .find((b) => b.textContent === "Create").click();
+await new Promise((r) => setTimeout(r, 60));
+
+const staleOut = $(staleDoc, "create-out");
+check(staleOut.textContent.includes("Not created"), "the refusal is shown");
+
+staleName.value = "open-sg-renamed";
+staleName.dispatchEvent(new staleDoc.defaultView.Event("input", { bubbles: true }));
+await new Promise((r) => setTimeout(r, 60));
+
+check(staleOut.textContent.trim() === "",
+      "and is dropped the moment the form it described changes");
+
+check(!$(staleDoc, "create-out").querySelector("button"),
+      "taking its Create it anyway button with it, which was for the old spec");
+
 // ----------------------------------------------------------------- alarms
 
 console.log("\nThe alarm form");
