@@ -957,6 +957,41 @@ def test_the_page_is_served_from_the_same_process_as_the_api(client):
         assert client.get(asset).status_code == 200, asset
 
 
+def test_the_page_may_not_be_reused_without_asking_first(client):
+    """The failure this prevents is a page that is not stale but broken.
+
+    With no Cache-Control header a browser decides for itself how long a file
+    stays fresh, and it decides per file - so a load can pair a *new* app.js
+    with an *old* style.css. That is markup the stylesheet has never heard of,
+    rendering as unstyled fragments: the severity counts arrived as new tally
+    elements against a stylesheet with no rule for them and stacked up reading
+    "2critical".
+
+    Worth a test rather than a comment because of how it presents. "I
+    refreshed and nothing changed" cannot be told from "the change did not
+    work", so the next hour goes on looking for a bug in code that is already
+    correct.
+    """
+    for asset in ("/ui/", "/ui/app.js", "/ui/style.css", "/ui/keygen.js"):
+        answered = client.get(asset)
+        assert "no-cache" in answered.headers.get("cache-control", ""), asset
+        # An ETag as well, because no-cache means "ask", and without something
+        # to ask about every load would re-send the whole file.
+        assert answered.headers.get("etag"), asset
+
+
+def test_an_unchanged_asset_still_answers_304(client):
+    """no-cache is not no-store. The file stays cached; the browser just has
+    to check. This is what keeps the cost of the header at one conditional
+    request rather than a full re-send on every load."""
+    first = client.get("/ui/style.css")
+    again = client.get("/ui/style.css",
+                       headers={"If-None-Match": first.headers["etag"]})
+
+    assert again.status_code == 304
+    assert not again.content
+
+
 def test_the_root_sends_you_to_the_page(client):
     landing = client.get("/", follow_redirects=False)
     assert landing.status_code in (307, 308)

@@ -1127,5 +1127,36 @@ def build_bastion(spec: models.BastionSpec):
 # checkout where the frontend is absent.
 _PAGE = Path(__file__).resolve().parent.parent.parent / "frontend"
 
+
+class _AlwaysRevalidated(StaticFiles):
+    """Serves the page, and refuses to let a browser reuse it without asking.
+
+    Without this the browser decides for itself how long a file stays fresh,
+    and with no Cache-Control header it is allowed to guess. It guesses
+    differently per file - so a page can load a *new* app.js against an *old*
+    style.css, which is not a stale page but a broken one: markup the
+    stylesheet has never heard of, rendering as unstyled fragments. That
+    happened here. The counts arrived as new tally elements and the old
+    stylesheet had no rule for them, so they stacked up as "2critical".
+
+    It is the worst kind of stale, because "I refreshed and nothing changed"
+    is indistinguishable from "the change did not work", and the obvious next
+    move is to go looking for a bug in code that is already correct.
+
+    `no-cache` is not `no-store`: the file is still cached, the browser simply
+    has to ask whether it has changed. StaticFiles already sends an ETag and
+    answers 304 when it has not, so the cost of this on a page served from
+    localhost is one conditional request per file per load.
+
+    A build step with hashed filenames is the other answer to this, and is the
+    right one for something deployed. This page has no build step on purpose.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
+
 if _PAGE.is_dir():
-    app.mount("/ui", StaticFiles(directory=_PAGE, html=True), name="ui")
+    app.mount("/ui", _AlwaysRevalidated(directory=_PAGE, html=True), name="ui")
