@@ -122,13 +122,21 @@ a:hover { color: var(--accent-deep); }
 
 /* ------------------------------------------------------------------- header */
 
+/* A light bar with the cloud named in one stripe, not a solid slab of it.
+
+   This was 100% burnt orange across the full width, which made the loudest
+   thing on a page about severity the piece of furniture at the top of it.
+   The stripe keeps what the colour was for - which account you are about to
+   change is answerable at a glance, and getting it wrong is how somebody
+   deletes the right-named thing in the wrong place - while giving the
+   findings the contrast back. */
 header {
   position: sticky; top: 0; z-index: 20;
-  color: #fff;
-  background: var(--accent-deep);
-  transition: background .5s ease;
-  border-bottom: 1px solid rgba(255, 255, 255, .2);
-  box-shadow: 0 1px 14px rgba(0, 0, 0, .06);
+  color: var(--ink);
+  background: #fff;
+  border-top: 4px solid var(--accent);
+  border-bottom: 1px solid var(--line-soft);
+  transition: border-color .5s ease;
 }
 
 .head-inner {
@@ -141,41 +149,49 @@ header {
 .wordmark { font: 600 26px/1.1 var(--sans); letter-spacing: -.02em; }
 .tagline {
   font: 11px/1.2 var(--mono); letter-spacing: .09em; text-transform: uppercase;
-  color: rgba(255, 255, 255, .92);
+  color: var(--ink);
 }
 
 .head-right { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
 
-/* The health pill. Kept as .pill/.ok/.bad because app.js sets those. */
+/* The health pill. Kept as .pill/.ok/.bad because app.js sets those.
+
+   It used to be white-on-orange with a white dot, and the note here said
+   green on burnt orange was very nearly invisible - which it was, on the
+   solid header this replaced. On white the ordinary colours work: the word
+   is ink like everything else and the dot carries the state, which is the
+   only part of a health indicator that has to be seen from across a desk. */
 .pill {
   display: inline-flex; align-items: center; gap: 7px;
-  font: 11.5px/1 var(--mono); letter-spacing: .04em; color: #fff;
+  font: 11.5px/1 var(--mono); letter-spacing: .04em; color: var(--ink);
   border: 0; padding: 0; background: none;
 }
 .pill::before {
-  content: ""; width: 6px; height: 6px; border-radius: 50%; background: #fff;
+  content: ""; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--muted-3);
 }
-/* These two beat the bare .ok/.bad further down, which are for text on the
-   page rather than for a pill sitting on a coloured header. Green on burnt
-   orange was very nearly invisible. */
-.pill.ok { color: #fff; }
-.pill.ok::before { background: #fff; }
-.pill.bad { color: #ffdcd7; }
-.pill.bad::before { background: #ffdcd7; }
+.pill.ok::before { background: #3f7d54; }
+.pill.bad { color: var(--critical); }
+.pill.bad::before { background: var(--critical); }
 
 /* The cloud switch. Two labels and a knob that slides between them, so the
    thing being switched and its current position are the same control. */
+/* Inverted with the header. The track was translucent white over orange and
+   the knob was solid white, which on a white bar leaves a white knob on a
+   white track: the control still worked and stopped saying anything. The
+   track is now the page's own faint grey and the knob is white with a
+   border, so the raised half is the selected one. */
 .toggle {
   position: relative; display: flex; align-items: center;
   width: 200px; height: 40px; padding: 4px;
-  border: 1px solid rgba(255, 255, 255, .4); border-radius: 999px;
-  background: rgba(255, 255, 255, .2);
+  border: 1px solid var(--line); border-radius: 999px;
+  background: var(--line-faint);
   cursor: pointer; font: inherit;
 }
 .toggle .knob {
   position: absolute; top: 4px; left: 4px; width: 96px; height: 30px;
-  border-radius: 999px; background: #fff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .10), 0 4px 12px rgba(0, 0, 0, .06);
+  border-radius: 999px; background: #fff; border: 1px solid var(--line-soft);
+  box-shadow: 0 1px 2px rgba(23, 24, 26, .08);
   transition: transform .38s cubic-bezier(.4, 0, .2, 1);
 }
 body.cloud-azure .toggle .knob { transform: translateX(96px); }
@@ -183,14 +199,18 @@ body.cloud-azure .toggle .knob { transform: translateX(96px); }
   position: relative; z-index: 1; flex: 1;
   display: flex; align-items: center; justify-content: center; gap: 7px;
   font: 600 12px/1 var(--mono); letter-spacing: .1em;
-  color: rgba(255, 255, 255, .96); transition: color .3s ease;
+  color: var(--ink); transition: opacity .3s ease;
+  /* The unselected side is the same ink, set back by weight of presence
+     rather than by a grey - the knob under the other one is what says which
+     is live. */
+  opacity: .45;
 }
 .toggle .opt .dot {
   width: 6px; height: 6px; border-radius: 50%;
-  background: rgba(255, 255, 255, .5); transition: background .3s ease;
+  background: var(--muted-3); transition: background .3s ease;
 }
 body:not(.cloud-azure) .toggle .opt[data-cloud="aws"],
-body.cloud-azure .toggle .opt[data-cloud="azure"] { color: var(--ink); }
+body.cloud-azure .toggle .opt[data-cloud="azure"] { opacity: 1; }
 body:not(.cloud-azure) .toggle .opt[data-cloud="aws"] .dot { background: #d9822b; }
 body.cloud-azure .toggle .opt[data-cloud="azure"] .dot { background: #2c72c7; }
 
@@ -730,11 +750,10 @@ button.tally:disabled::after { display: none; }
 
 /* -------------------------------------------------------------- dashboard */
 
-.dash-head {
-  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+/* Under the grid it describes, and above the next heading. */
+.scan-when {
+  margin: -14px 0 26px; font-size: 11.5px;
 }
-.dash-head h3 { margin-bottom: 0; }
-.scan-when { font-size: 11.5px; }
 
 .dash-grid {
   display: grid; gap: 10px; margin: 0 0 26px;

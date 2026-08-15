@@ -557,12 +557,13 @@ async function loadDashboard() {
 
   body.replaceChildren();
 
-  const head = document.createElement("div");
-  head.className = "dash-head";
-  head.append(text("h3", "What is in this account"));
-  head.append(text("span", "counting…", "muted scan-when"));
-  body.append(head);
+  body.append(text("h3", "What is in this account"));
   body.append(grid);
+
+  // Under the cards, not beside the heading. It describes every one of them,
+  // and sitting next to the title it read as a caption on the title - and
+  // pushed that title off its own line as the time got longer.
+  body.append(text("p", "counting…", "scan-when"));
 
   const activity = document.createElement("div");
   body.append(text("h3", "Recent activity"));
