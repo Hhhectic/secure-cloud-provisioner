@@ -917,7 +917,14 @@ button.tally:disabled::after { display: none; }
   transition: transform .28s ease; transform: rotate(45deg);
 }
 .fold[aria-expanded="true"] .chev { transform: rotate(225deg); }
-.fold-body { animation: scpFade .3s ease both; }
+/* Room between the panel's own heading and the first thing under it.
+
+   Measured at zero: a `.field` carries its spacing as padding *below* itself,
+   so every row had 18px under it and the first row had nothing above it. The
+   heading sat flush on "Name", closer to that one field than the fields were
+   to each other - which groups a title with the first item in a list instead
+   of with the list. */
+.fold-body { animation: scpFade .3s ease both; padding-top: 22px; }
 .divider { height: 1px; background: var(--line-faint); margin: 20px 0 24px; }
 
 /* ------------------------------------------------------------ modal, toast */
