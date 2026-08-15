@@ -9,6 +9,8 @@ builds one per request, so the fixture wraps each test rather than the module.
 """
 
 import json
+import os
+import re
 
 import boto3
 import pytest
@@ -972,12 +974,66 @@ def test_the_page_may_not_be_reused_without_asking_first(client):
     work", so the next hour goes on looking for a bug in code that is already
     correct.
     """
-    for asset in ("/ui/", "/ui/app.js", "/ui/style.css", "/ui/keygen.js"):
+    # The assets, not the page: /ui/ is served from its own route and is
+    # no-store, because it is what carries the versioned URLs and a cached
+    # copy of it would pin every asset to yesterday's version.
+    for asset in ("/ui/app.js", "/ui/style.css", "/ui/keygen.js"):
         answered = client.get(asset)
         assert "no-cache" in answered.headers.get("cache-control", ""), asset
         # An ETag as well, because no-cache means "ask", and without something
         # to ask about every load would re-send the whole file.
         assert answered.headers.get("etag"), asset
+
+
+def test_every_asset_url_carries_a_version(client):
+    """The header was necessary and was not sufficient.
+
+    Cache-Control governs responses fetched *after* it exists. A browser
+    holding style.css from before it was added gives that copy a heuristic
+    freshness lifetime and then uses it without asking - so it never sends the
+    request that would carry the new header, and refreshing changes nothing.
+    Two rounds of "hard-refresh and it will be fine" went that way.
+
+    A URL the cache is not keyed on is what actually forces a fetch. The
+    version is the file's mtime, so it changes exactly when the file does:
+    edit the stylesheet and every browser gets it once, edit nothing and every
+    browser keeps what it has.
+    """
+    page = client.get("/ui/")
+    assert page.status_code == 200
+
+    for asset in ("style.css", "app.js", "keygen.js"):
+        assert f'{asset}?v=' in page.text, f"{asset} is unversioned"
+
+    # And the versioned URL is really served, rather than 404ing on the query.
+    stamped = re.search(r'href="(style\.css\?v=\d+)"', page.text).group(1)
+    assert client.get(f"/ui/{stamped}").status_code == 200
+
+
+def test_the_version_follows_the_file(client, tmp_path, monkeypatch):
+    """A version somebody has to remember to bump is a version that goes
+    stale, which is the bug it was added to fix wearing a different hat."""
+    from api import app as api_app
+
+    page = client.get("/ui/")
+    before = re.search(r'style\.css\?v=(\d+)', page.text).group(1)
+
+    stylesheet = api_app._PAGE / "style.css"
+    was = stylesheet.stat().st_mtime
+    try:
+        os.utime(stylesheet, (was + 500, was + 500))
+        after = re.search(r'style\.css\?v=(\d+)',
+                          client.get("/ui/").text).group(1)
+    finally:
+        os.utime(stylesheet, (was, was))
+
+    assert after != before
+
+
+def test_the_page_itself_is_never_served_from_a_cache(client):
+    """It is the one document that carries the new URLs, so a cached copy of
+    it pins every asset to the versions it already had."""
+    assert "no-store" in client.get("/ui/").headers.get("cache-control", "")
 
 
 def test_an_unchanged_asset_still_answers_304(client):

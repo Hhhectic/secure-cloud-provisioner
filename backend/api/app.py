@@ -20,6 +20,7 @@ would be theatre. Do not put it on a public interface.
 
 import json
 import queue
+import re
 import secrets
 import threading
 import time
@@ -30,7 +31,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import (JSONResponse, RedirectResponse,
+from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse,
                                StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 
@@ -1158,5 +1159,48 @@ class _AlwaysRevalidated(StaticFiles):
         return response
 
 
+_ASSET = re.compile(r'(href|src)="([^"?:]+\.(?:css|js))"')
+
+
+def _stamped_page():
+    """index.html with every local asset URL carrying its file's timestamp.
+
+    The Cache-Control header added alongside this was necessary and was not
+    sufficient, for a reason worth writing down because it wasted an evening:
+    **a header only governs responses fetched after it exists.** A browser
+    that had already stored style.css with no Cache-Control at all assigns it
+    a heuristic freshness lifetime and then uses it *without asking* - so it
+    never issues the request that would have carried the new header, and no
+    number of refreshes changes that. The header fixes the next visitor and
+    does nothing for the one who already has the file.
+
+    What breaks a cache entry is a URL it is not keyed on. So each asset gets
+    ?v=<mtime>, which changes exactly when the file does: edit style.css and
+    every browser fetches it once, edit nothing and every browser keeps using
+    what it has. No manual version to bump and forget.
+
+    The page itself is served from here rather than by the mount so the
+    rewrite has somewhere to happen, and is marked no-store because it is the
+    one document that must never come from a cache - it is what carries the
+    new URLs.
+    """
+    html = (_PAGE / "index.html").read_text()
+
+    def stamp(match):
+        attribute, name = match.group(1), match.group(2)
+        beside = _PAGE / name
+        version = int(beside.stat().st_mtime) if beside.is_file() else 0
+        return f'{attribute}="{name}?v={version}"'
+
+    return _ASSET.sub(stamp, html)
+
+
 if _PAGE.is_dir():
+    @app.get("/ui/", include_in_schema=False)
+    def page():
+        return HTMLResponse(
+            _stamped_page(),
+            headers={"Cache-Control": "no-store, must-revalidate"},
+        )
+
     app.mount("/ui", _AlwaysRevalidated(directory=_PAGE, html=True), name="ui")
