@@ -1004,5 +1004,103 @@ if (check(Boolean(nsgPost), "pressing Create sends the firewall")) {
         "no rule names a priority, leaving az/nsg to number them in order");
 }
 
+
+// -------------------------------------------- deleting, with progress shown
+
+/* A cascade delete spends four or five minutes in one request, nearly all of
+ * it waiting for AWS to detach network interfaces, and the page used to show
+ * nothing for the whole of it. It reads the response a line at a time now.
+ *
+ * What is checked here is mostly the fallback. jsdom's fetch is a stub that
+ * answers a plain object with no readable body, which is also what an old
+ * proxy or a non-streaming intermediary would produce - so a page that only
+ * worked against a real stream would break in both places and be untestable
+ * in one of them. */
+
+console.log("\nDeleting, and being told what is happening");
+console.log("------------------------------------------");
+
+const { document: delDoc, sent: delSent } = await boot({
+  "/resources": () => ({
+    resources: [{ key: "network", label: "Network", id_label: "VPC ID",
+                  read_only: false, provider: "aws" }],
+  }),
+  "/resources/network": () => ({
+    resource_type: "network",
+    resources: [{ id: "vpc-1", name: "demo" }],
+  }),
+  "/resources/network/options": () => ({ options: {} }),
+  "/resources/network/vpc-1": () => ({
+    resource_type: "network", resource_id: "vpc-1", settings: {},
+    warnings: [], counts: { critical: 0, warning: 0, info: 0 },
+  }),
+  // The unforced delete refuses, which is what opens the cascade dialog.
+  "/resources/network/vpc-1/deletion-plan": () => ({
+    resource_type: "network", resource_id: "vpc-1", confirm_with: "vpc-1",
+    items: [{ kind: "server", id: "i-1", label: "a machine",
+              created_by_this_tool: true }],
+    foreign_count: 0, message: "Deleting this would destroy 2 things.",
+  }),
+});
+
+await new Promise((r) => setTimeout(r, 60));
+
+// Refuse the plain delete so the dialog opens, then accept the forced one.
+let refusedOnce = false;
+const priorFetch = delDoc.defaultView.fetch;
+delDoc.defaultView.fetch = async (url, options = {}) => {
+  const path = String(url).split("?")[0].replace("..", "");
+  if (path === "/resources/network/vpc-1" && options.method === "DELETE") {
+    if (!String(url).includes("force=true")) {
+      refusedOnce = true;
+      delSent.push({ path, options, url: String(url) });
+      return { ok: false, status: 400,
+               json: async () => ({ detail: "It still contains machines." }) };
+    }
+    delSent.push({ path, options, url: String(url) });
+    // No body, no getReader: the fallback path.
+    return { ok: true, status: 200,
+             json: async () => ({ ok: true, message: "Deleted vpc-1." }) };
+  }
+  return priorFetch(url, options);
+};
+
+// The Delete button lives on the row, not in the detail panel.
+const delButton = delDoc.querySelector("#list button.danger");
+check(Boolean(delButton), "a row offers a delete");
+
+delButton.click();
+await new Promise((r) => setTimeout(r, 80));
+
+check(refusedOnce, "the unforced delete is tried first and refused");
+check(!$(delDoc, "modal").classList.contains("hidden"),
+      "which opens the cascade dialog rather than destroying anything");
+
+const confirmBox = $(delDoc, "modal-body").querySelector("input");
+check(Boolean(confirmBox), "the dialog asks for the id to be typed back");
+
+const goButton = $(delDoc, "modal-go");
+check(goButton.disabled, "with Delete disabled until it matches");
+
+confirmBox.value = "vpc-1";
+confirmBox.dispatchEvent(new delDoc.defaultView.Event("input", { bubbles: true }));
+check(!goButton.disabled, "and enabled once it does");
+
+const beforeDelete = delSent.length;
+goButton.click();
+await new Promise((r) => setTimeout(r, 120));
+
+const forced = delSent.slice(beforeDelete)
+  .find((r) => r.options.method === "DELETE" && r.url.includes("force=true"));
+
+check(Boolean(forced), "pressing Delete sends the forced delete");
+check(forced.url.includes("stream=true"),
+      "asking for it a step at a time, which is the whole point");
+check(forced.url.includes("confirm=vpc-1"),
+      "still repeating the id, which the server demands regardless");
+check($(delDoc, "modal").classList.contains("hidden"),
+      "and the dialog closes when it finishes, even with nothing to stream");
+
+
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");
 process.exit(failures ? 1 : 0);

@@ -8,6 +8,8 @@ The moto mock has to be active before the app builds a boto3 client, and the app
 builds one per request, so the fixture wraps each test rather than the module.
 """
 
+import json
+
 import boto3
 import pytest
 from fastapi.testclient import TestClient
@@ -1572,3 +1574,82 @@ def test_acknowledging_is_refused_from_another_site(
 
     assert refused.status_code == 403
     assert not somewhere_to_write.exists()
+
+
+# ------------------------------------------------ Watching a delete happen
+#
+# A cascade with running machines spends four or five minutes inside one
+# request, nearly all of it waiting for AWS to detach network interfaces. The
+# page showed nothing for the whole of it, which is indistinguishable from a
+# hang and was reported as one.
+
+
+def test_a_streamed_delete_reports_its_steps_then_the_outcome(client, vpc_id):
+    """The stream is newline-delimited JSON: steps, then one final object."""
+    made = client.post("/resources/network?accept_risk=true",
+                       json={"name": "stream-delete-vpc", "cidr": "10.9.0.0/16"})
+    assert made.status_code in (200, 201), made.text
+    new_vpc = made.json()["resource_id"]
+
+    answered = client.request(
+        "DELETE",
+        f"/resources/network/{new_vpc}?force=true&confirm={new_vpc}&stream=true")
+
+    assert answered.status_code == 200
+    assert "ndjson" in answered.headers["content-type"]
+
+    lines = [json.loads(l) for l in answered.text.splitlines() if l.strip()]
+    steps = [l["step"] for l in lines if "step" in l]
+    final = [l for l in lines if l.get("done")]
+
+    assert steps, "the cascade names its steps and used to throw them away"
+    assert any("subnets" in s for s in steps)
+    assert len(final) == 1, "exactly one closing object"
+    assert final[0]["ok"] is True
+    assert new_vpc in final[0]["message"]
+    # The outcome arrives last, so a reader can take the final object as the
+    # answer without having to know how many steps there were.
+    assert lines[-1] is final[0]
+
+
+def test_the_unstreamed_delete_is_unchanged(client, vpc_id):
+    """Everything already calling this wants one answer.
+
+    The CLI, the smoke test and every other test here read a JSON body with
+    ok and message on it. Streaming is opt-in precisely so none of them had to
+    change.
+    """
+    made = client.post("/resources/network?accept_risk=true",
+                       json={"name": "plain-delete-vpc", "cidr": "10.8.0.0/16"})
+    new_vpc = made.json()["resource_id"]
+
+    answered = client.request(
+        "DELETE", f"/resources/network/{new_vpc}?force=true&confirm={new_vpc}")
+
+    assert answered.status_code == 200
+    assert answered.json()["ok"] is True
+    assert "application/json" in answered.headers["content-type"]
+
+
+def test_a_streamed_delete_still_refuses_before_it_streams(client, vpc_id):
+    """The confirm guard runs before the response begins.
+
+    It has to: a streamed body has already sent 200 by the time the first step
+    is written, so a refusal discovered partway through could not change the
+    status. Everything that can refuse this does so first, which is why the
+    page can still show a 400 with the deletion plan in it.
+    """
+    made = client.post("/resources/network?accept_risk=true",
+                       json={"name": "refuse-stream-vpc", "cidr": "10.7.0.0/16"})
+    new_vpc = made.json()["resource_id"]
+
+    answered = client.request(
+        "DELETE",
+        f"/resources/network/{new_vpc}?force=true&confirm=wrong&stream=true")
+
+    assert answered.status_code == 400
+    assert answered.json()["detail"]["confirm_with"] == new_vpc
+
+    # And nothing was destroyed on the way to saying so.
+    still = client.get(f"/resources/network/{new_vpc}")
+    assert still.status_code == 200

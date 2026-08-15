@@ -614,3 +614,100 @@ def test_the_full_lifecycle_through_the_registry(ec2):
 
 def test_checking_a_spec_that_asks_for_a_nat_gateway_warns_first():
     assert registry.VPC.check_spec({"name": "demo"}) == []
+
+
+# ------------------------------------------------- saying what it is doing
+
+
+def test_a_cascade_names_each_step_as_it_takes_it(ec2):
+    """The steps were always named; the names were thrown away.
+
+    delete_vpc has had a list of labelled steps since it was written and
+    reported none of them, so a caller got one answer four or five minutes
+    after asking and nothing in between. That is the same shape as the
+    `problems` list a failed create discarded: the information existed at the
+    only point it was useful and was dropped there.
+    """
+    _, made, _ = vpcs.create_vpc(ec2, "progress-demo", "10.30.0.0/16")
+    said = []
+
+    ok, _ = vpcs.delete_vpc(ec2, made, force=True, report=said.append)
+    assert ok
+
+    joined = "\n".join(said)
+    for expected in ("subnets", "route tables", "internet gateways",
+                     "security groups", "the network itself"):
+        assert expected in joined, f"no step mentioned {expected}"
+
+
+def test_a_cascade_without_a_report_is_unchanged(ec2):
+    """Every existing caller passes nothing. The CLI, the smoke test and the
+    rest of this file must not have to learn about progress to keep working."""
+    _, made, _ = vpcs.create_vpc(ec2, "silent-demo", "10.31.0.0/16")
+
+    ok, message = vpcs.delete_vpc(ec2, made, force=True)
+
+    assert ok
+    assert made in message
+
+
+class _InterfacesThatLinger:
+    """describe_network_interfaces that answers "still attached" a few times.
+
+    moto detaches instantly, so the wait this narrates never actually waits
+    against the fake - and it is where a real cascade spends nearly all of its
+    four or five minutes. Without a stub the one thing worth reporting is the
+    one thing no test would see.
+    """
+
+    def __init__(self, rounds):
+        self.rounds = rounds
+
+    def describe_network_interfaces(self, **kwargs):
+        self.rounds -= 1
+        if self.rounds >= 0:
+            return {"NetworkInterfaces": [{"NetworkInterfaceId": "eni-1"},
+                                          {"NetworkInterfaceId": "eni-2"}]}
+        return {"NetworkInterfaces": []}
+
+
+def test_the_long_wait_says_how_many_are_left_and_for_how_long():
+    """The part somebody is actually staring at.
+
+    A log that goes quiet for four minutes reads as broken, so this reports
+    every time round rather than only on a change: the count is the same on
+    each pass and the elapsed time is not, which is what says the thing is
+    alive.
+    """
+    said = []
+    cleared = vpcs.wait_for_interfaces_to_clear(
+        _InterfacesThatLinger(rounds=3), "vpc-1",
+        attempts=10, delay=0, report=said.append)
+
+    assert cleared
+    assert len(said) == 4, "three waiting lines and the all-clear"
+    assert "2 network connections" in said[0]
+    assert said[-1] == "Network connections are clear."
+
+
+def test_the_wait_counts_the_time_it_has_spent():
+    """Elapsed rather than attempt number: "3 of 96" means nothing to somebody
+    deciding whether to keep waiting."""
+    said = []
+    vpcs.wait_for_interfaces_to_clear(
+        _InterfacesThatLinger(rounds=3), "vpc-1",
+        attempts=10, delay=30, report=said.append)
+
+    assert "0m 00s" in said[0]
+    assert "0m 30s" in said[1]
+    assert "1m 00s" in said[2]
+
+
+def test_one_remaining_interface_is_not_described_in_the_plural():
+    said = []
+    vpcs.wait_for_interfaces_to_clear(
+        type("One", (), {"describe_network_interfaces":
+                         lambda self, **k: {"NetworkInterfaces": [{"x": 1}]}})(),
+        "vpc-1", attempts=1, delay=0, report=said.append)
+
+    assert "1 network connection " in said[0]

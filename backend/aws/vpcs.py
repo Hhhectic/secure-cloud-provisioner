@@ -451,9 +451,21 @@ INTERFACE_WAIT_ATTEMPTS = 96
 INTERFACE_WAIT_SECONDS = 5
 
 
+def _say(report, message):
+    """Sends one line of progress, if anybody asked for it.
+
+    Optional throughout, because the CLI, the smoke test and every offline
+    test call these functions without one and none of them should have to
+    learn about progress to keep working.
+    """
+    if report:
+        report(message)
+
+
 def wait_for_interfaces_to_clear(ec2, vpc_id,
                                  attempts=INTERFACE_WAIT_ATTEMPTS,
-                                 delay=INTERFACE_WAIT_SECONDS):
+                                 delay=INTERFACE_WAIT_SECONDS,
+                                 report=None):
     """Waits until no network interfaces are left in the VPC.
 
     Deliberately not the instance_terminated waiter. That waiter treats the
@@ -469,7 +481,15 @@ def wait_for_interfaces_to_clear(ec2, vpc_id,
     the two do not disappear at the same moment.
 
     Checks before sleeping, so a VPC that is already clear returns at once.
+
+    This is where a cascade spends nearly all of its time - up to eight
+    minutes, and four or five is ordinary with two machines to terminate - so
+    it is also where a caller most needs to be told something is still
+    happening. `report` gets a line each time round, naming how many
+    interfaces are left and how long it has been, because "nothing has changed
+    for four minutes" and "this has hung" look identical from outside.
     """
+    waited = 0
     for attempt in range(attempts):
         try:
             interfaces = ec2.describe_network_interfaces(Filters=[
@@ -481,15 +501,24 @@ def wait_for_interfaces_to_clear(ec2, vpc_id,
             return True
 
         if not interfaces:
+            _say(report, "Network connections are clear.")
             return True
+
+        left = len(interfaces)
+        plural = "connection" if left == 1 else "connections"
+        _say(report,
+             f"Waiting for {left} network {plural} to detach "
+             f"({waited // 60}m {waited % 60:02d}s). AWS releases these a "
+             "little after the machines stop.")
 
         if attempt < attempts - 1:
             time.sleep(delay)
+            waited += delay
 
     return False
 
 
-def delete_vpc(ec2, vpc_id, force=False):
+def delete_vpc(ec2, vpc_id, force=False, report=None):
     """Deletes a VPC and everything this tool put in it.
 
     AWS demands a specific order and reports failure as DependencyViolation
@@ -500,6 +529,12 @@ def delete_vpc(ec2, vpc_id, force=False):
 
     Without force, this refuses and names what is in the way rather than
     destroying running machines because someone typed a VPC ID.
+
+    `report` takes one line per step, the same arrangement `bastion.build`
+    has always had. This function names its steps already and threw the names
+    away, so a caller got one answer four or five minutes after asking and
+    nothing at all in between - which is indistinguishable from a hang, and
+    was reported as one.
     """
     blockers = whats_inside(ec2, vpc_id)
     instances = [b[1] for b in blockers if b[0] == "instance"]
@@ -513,13 +548,17 @@ def delete_vpc(ec2, vpc_id, force=False):
         )
 
     if instances:
+        count = len(instances)
+        plural = "machine" if count == 1 else "machines"
+        _say(report, f"Terminating {count} running {plural} "
+                     f"({', '.join(instances)}).")
         try:
             ec2.terminate_instances(InstanceIds=instances)
         except ClientError as e:
             return False, (f"Could not terminate the machines in {vpc_id}: "
                            f"{e.response['Error']['Message']}")
 
-        if not wait_for_interfaces_to_clear(ec2, vpc_id):
+        if not wait_for_interfaces_to_clear(ec2, vpc_id, report=report):
             return False, (
                 f"The machines in {vpc_id} were told to terminate, but their "
                 "network connections are still attached after several minutes. "
@@ -536,8 +575,14 @@ def delete_vpc(ec2, vpc_id, force=False):
 
     failures = []
     for label, step in steps:
+        _say(report, f"Deleting {label}.")
         error = step()
         if error:
+            # Named as it happens rather than only in the final message. A
+            # cascade collects failures and keeps going, so a step that failed
+            # four minutes ago would otherwise first be mentioned at the end,
+            # under a sentence about the VPC.
+            _say(report, f"Could not delete the {label}: {error}")
             failures.append(f"{label}: {error}")
 
     # Retried, because DependencyViolation here is usually a dependency that
@@ -546,6 +591,7 @@ def delete_vpc(ec2, vpc_id, force=False):
     # case; asking again costs a few seconds and saves someone deleting a
     # network by hand in the console.
     detail = None
+    _say(report, "Deleting the network itself.")
     for attempt in range(4):
         try:
             ec2.delete_vpc(VpcId=vpc_id)
@@ -555,6 +601,9 @@ def delete_vpc(ec2, vpc_id, force=False):
             if e.response["Error"]["Code"] != "DependencyViolation":
                 break
             if attempt < 3:
+                _say(report,
+                     "Something in the network is still being released. "
+                     f"Trying again in 5 seconds ({attempt + 1} of 3).")
                 time.sleep(5)
 
     if failures:

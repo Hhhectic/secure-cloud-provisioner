@@ -57,6 +57,70 @@ async function api(path, options = {}) {
   return body;
 }
 
+/* The same request, read a line at a time.
+
+   `onStep` is called with each progress line as the server produces it, and
+   the final object is returned like api() would. A cascade delete spends four
+   or five minutes inside one request, and before this the page showed nothing
+   for the whole of it - which is what somebody waiting cannot tell apart from
+   a hang, and reported as one.
+
+   Falls back to reading the whole body when there is no stream to read. That
+   is not defensive padding: the jsdom suite replaces fetch with a stub that
+   answers a plain object, and a page that only worked against a real
+   streaming server would be untestable there. */
+async function apiStream(path, options = {}, onStep = () => {}) {
+  const sep = path.includes("?") ? "&" : "?";
+  const res = await fetch(`${API}${path}${sep}region=${encodeURIComponent(state.region)}`, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+
+  if (!res.ok || !res.body || !res.body.getReader) {
+    // A refusal still arrives as one JSON object with a status on it, because
+    // everything that can refuse this does so before the stream begins.
+    let body = null;
+    try { body = await res.json(); } catch { /* empty body */ }
+    if (!res.ok) {
+      const detail = body && body.detail;
+      const err = new Error(
+        typeof detail === "string" ? detail
+          : detail && detail.message ? detail.message
+          : `HTTP ${res.status}`);
+      err.status = res.status;
+      err.detail = detail;
+      throw err;
+    }
+    return body;
+  }
+
+  const reader = res.body.getReader();
+  const decode = new TextDecoder();
+  let pending = "";
+  let last = null;
+
+  // A chunk boundary lands wherever the network puts it, so the tail of a
+  // read is usually half a line. It is held back until the newline arrives.
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    pending += decode.decode(value, { stream: true });
+
+    const lines = pending.split("\n");
+    pending = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const parsed = JSON.parse(line);
+      if (parsed.step) onStep(parsed.step);
+      else last = parsed;
+    }
+  }
+  if (pending.trim()) last = JSON.parse(pending);
+
+  if (last && last.ok === false) throw new Error(last.message);
+  return last;
+}
+
 function toast(message, isError = false) {
   const el = $("toast");
   el.textContent = message;
@@ -1472,12 +1536,22 @@ async function showCascade(id, refusal, andThen) {
   go.textContent = "Delete";
   go.onclick = async () => {
     go.disabled = true;
+    typed.disabled = true;
+
+    // Progress replaces the plan. Leaving a table of ten things above a live
+    // log reads as a list of what is still to come, when most of it is
+    // already gone.
+    const progress = deleteProgress();
+    body.replaceChildren(progress.el);
+
     try {
-      const res = await api(
+      const res = await apiStream(
         `/resources/${state.type}/${encodeURIComponent(id)}` +
-        `?force=true&confirm=${encodeURIComponent(plan.confirm_with)}`,
-        { method: "DELETE" }
+        `?force=true&confirm=${encodeURIComponent(plan.confirm_with)}&stream=true`,
+        { method: "DELETE" },
+        progress.step,
       );
+      progress.finish();
       toast(res.message);
       closeModal();
       loadList();
@@ -1486,8 +1560,12 @@ async function showCascade(id, refusal, andThen) {
       // network and are still there once the cascade has finished.
       if (andThen) await andThen();
     } catch (e) {
+      progress.fail(e.message);
       toast(e.message, true);
-      go.disabled = false;
+      // Not re-enabled. Some of it is destroyed by now, so the plan the
+      // button was built from no longer describes what is there - Cancel and
+      // look again is the honest next step.
+      go.textContent = "Delete";
     }
   };
 
@@ -1781,6 +1859,62 @@ function renderBlueprintResult(out, body) {
    dedicated "remove blueprint" button that skipped that would be the one
    destructive path in the tool without a preview, and it destroys two running
    machines. */
+/* A live log of a delete, plus a clock.
+
+   The clock is not decoration. Nearly all of a cascade is one wait for AWS to
+   detach network interfaces, and during it the server has genuinely nothing
+   new to say for thirty seconds at a time - so a log alone still goes quiet,
+   and quiet is the thing that reads as broken. Something moving every second
+   is the difference between "this is slow" and "this has died".
+
+   The last line stays highlighted rather than the list scrolling away,
+   because what is happening now is the question being asked. */
+function deleteProgress() {
+  const el = document.createElement("div");
+  el.className = "delete-progress";
+
+  const heading = text("p", "Deleting. This can take several minutes.");
+  const clock = text("span", "0:00", "muted mono");
+  const spent = document.createElement("p");
+  spent.className = "muted";
+  spent.append(document.createTextNode("Elapsed "), clock);
+
+  const log = document.createElement("ul");
+  log.className = "steps";
+
+  el.append(heading, spent, log);
+
+  const started = Date.now();
+  const tick = setInterval(() => {
+    const s = Math.floor((Date.now() - started) / 1000);
+    clock.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  }, 1000);
+
+  let current = null;
+
+  return {
+    el,
+    step(line) {
+      if (current) current.className = "done";
+      current = text("li", line, "current");
+      log.append(current);
+    },
+    finish() {
+      clearInterval(tick);
+      if (current) current.className = "done";
+      heading.textContent = "Done.";
+    },
+    fail(why) {
+      clearInterval(tick);
+      if (current) current.className = "failed";
+      heading.textContent = "Stopped.";
+      // What already happened stays on screen. Nothing rolls back here, so
+      // the steps above this line are things that really were destroyed.
+      log.append(text("li", why, "failed"));
+    },
+  };
+}
+
 function teardownControls(created) {
   const box = document.createElement("div");
   box.className = "row";

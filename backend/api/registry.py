@@ -798,7 +798,13 @@ def _vpc_fix(client, resource_id, warning, options):
 
 
 def _vpc_delete(client, resource_id, options):
-    return vpcs.delete_vpc(client, resource_id, force=options.get("force", False))
+    # report travels in options rather than as a parameter on ResourceType.
+    # delete, because thirteen other adapters would otherwise have to grow an
+    # argument they ignore. A delete that has nothing to say simply never
+    # calls it, which is every type but this one so far.
+    return vpcs.delete_vpc(client, resource_id,
+                           force=options.get("force", False),
+                           report=options.get("report"))
 
 
 def _vpc_cleanup(client, options):

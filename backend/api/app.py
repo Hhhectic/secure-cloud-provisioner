@@ -18,7 +18,10 @@ login screen to a tool that already trusts whoever is sitting at the machine
 would be theatre. Do not put it on a public interface.
 """
 
+import json
+import queue
 import secrets
+import threading
 import time
 from datetime import date
 from pathlib import Path
@@ -27,7 +30,8 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import (JSONResponse, RedirectResponse,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 
 # Before api.registry imports the provider modules, and well before any route
@@ -854,10 +858,52 @@ def deletion_plan(resource_type: str, resource_id: str,
     return _deletion_plan(known, client, resource_type, resource_id)
 
 
+def _delete_as_it_happens(known, client, resource_id, force):
+    """Runs a delete on a thread and yields its progress as it arrives.
+
+    A cascade spends four or five minutes inside one blocking boto3 sequence,
+    so the progress cannot be yielded from the call itself - the callback and
+    the generator want to be in charge at the same time. A queue is the seam:
+    the worker pushes lines, this drains them, and the sentinel says the
+    worker has finished.
+
+    Every exception is caught and turned into a failed outcome rather than
+    raised. Once a streaming response has begun the status code is already
+    sent, so an exception escaping here would truncate the body and the page
+    would see a stream that simply stopped - which is the failure this whole
+    endpoint exists to remove.
+    """
+    lines = queue.Queue()
+    outcome = {}
+
+    def run():
+        try:
+            ok, message = known.delete(
+                client, resource_id, {"force": force, "report": lines.put})
+            outcome.update(ok=ok, message=message)
+        except Exception as e:
+            outcome.update(ok=False, message=f"{type(e).__name__}: {e}")
+        finally:
+            lines.put(None)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+
+    while True:
+        line = lines.get()
+        if line is None:
+            break
+        yield json.dumps({"step": line}) + "\n"
+
+    worker.join()
+    yield json.dumps({"done": True, **outcome}) + "\n"
+
+
 @app.delete("/resources/{resource_type}/{resource_id}",
             response_model=models.ActionResponse)
 def delete(resource_type: str, resource_id: str, force: bool = False,
-           confirm: Optional[str] = None, region: str = "us-east-1"):
+           confirm: Optional[str] = None, region: str = "us-east-1",
+           stream: bool = False):
     """Deletes one resource. force cascades, and cascading needs confirming.
 
     confirm has to repeat the resource's own ID. That is the same demand the
@@ -870,6 +916,14 @@ def delete(resource_type: str, resource_id: str, force: bool = False,
     The refusal carries the whole deletion plan, so a caller learns what it
     was about to destroy at the moment it is stopped rather than having to go
     and ask.
+
+    `stream=true` answers with newline-delimited JSON instead: one object per
+    step as it happens, then a final one carrying the same ok and message the
+    plain form returns. It is opt-in because everything already calling this -
+    the CLI, the smoke test, every offline test - wants one answer, and
+    because a streamed body cannot carry a status code that is decided
+    partway through. The refusals above still happen before any of it, so a
+    caller that forgot to confirm gets a 400 with the plan in it either way.
     """
     known = _resource(resource_type)
     _must_be_writable(known)
@@ -878,6 +932,15 @@ def delete(resource_type: str, resource_id: str, force: bool = False,
     if force and confirm != resource_id:
         plan = _deletion_plan(known, client, resource_type, resource_id)
         raise HTTPException(status_code=400, detail=plan.model_dump())
+
+    if stream:
+        return StreamingResponse(
+            _delete_as_it_happens(known, client, resource_id, force),
+            media_type="application/x-ndjson",
+            # Nothing between here and the browser should hold this back
+            # waiting for a complete body; the whole point is the partial one.
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
 
     ok, message = known.delete(client, resource_id, {"force": force})
     if not ok:

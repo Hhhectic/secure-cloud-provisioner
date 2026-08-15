@@ -481,6 +481,37 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
   border-left: 2px solid var(--accent);
 }
 
+/* ------------------------------------------- a delete, while it is happening */
+
+.delete-progress p { margin: 0 0 6px; font-size: 13px; }
+.delete-progress .mono { font-family: var(--mono); font-size: 12.5px; }
+
+.delete-progress .steps {
+  margin: 12px 0 0; padding: 0; list-style: none;
+  max-height: 260px; overflow-y: auto;
+}
+
+.delete-progress .steps li {
+  padding: 5px 0 5px 20px; font-size: 12.5px; position: relative;
+  color: var(--muted-2); max-width: 62ch;
+}
+
+/* The marker carries the state, so a step reads as finished or not without
+   the colour having to do it alone. */
+.delete-progress .steps li::before {
+  position: absolute; left: 0; content: "·";
+}
+.delete-progress .steps li.done::before { content: "✓"; color: #3f7d54; }
+.delete-progress .steps li.failed::before { content: "×"; color: var(--critical); }
+
+.delete-progress .steps li.current {
+  color: #33363a; font-weight: 500;
+}
+.delete-progress .steps li.current::before {
+  content: "→"; color: var(--accent-deep);
+}
+.delete-progress .steps li.failed { color: var(--critical); }
+
 /* ------------------------------------------------------------------- misc */
 
 .muted { color: var(--muted-2); }
