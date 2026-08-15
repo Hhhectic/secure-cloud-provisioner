@@ -27,6 +27,7 @@ Everything is free except the two instances, which are t3.micro and free-tier
 eligible. build() can be asked to skip them.
 """
 
+import shlex
 from pathlib import Path
 
 from aws import instances as ec2i
@@ -311,6 +312,125 @@ def connection_instructions(details, key_directory="~/.ssh",
         "worse: anyone with root on the bastion could use your forwarded agent",
         "to authenticate as you elsewhere, for as long as you stay connected.",
     ]
+
+
+def connect_script(details, key_directory="~/.ssh", name="scp-bastion"):
+    """The instructions above, as one script the tool hands over.
+
+    A browser cannot move a file, change its mode, reach an ssh-agent or open
+    a shell, so `connection_instructions` ends by asking somebody to retype six
+    commands carrying two generated filenames and two addresses. This is the
+    same six, written down, so the whole thing is one line: `bash <this file>`.
+
+    **The private key is not in here and does not pass through the server.**
+    That is the property the whole key-pair design exists to protect - the
+    private half goes from WebCrypto to a download and nowhere else. This
+    script contains filenames and addresses and finds the keys already on
+    disk; it would work identically if the server had never heard of them,
+    which it has not.
+
+    No ssh-agent, deliberately. `eval "$(ssh-agent -s)"` inside a script
+    starts an agent that dies when the script exits, so the ssh-add pair in
+    the printed instructions is useless to a script and confusing in one. Each
+    hop is given its own key with -i instead, which needs no agent, and
+    IdentitiesOnly stops ssh offering every other key in the directory first
+    and being refused for too many attempts.
+
+    Re-runnable. The keys are searched for rather than assumed, the move is
+    skipped when they are already filed, and chmod on an already-correct file
+    is a no-op - so somebody who runs it twice gets a second shell rather than
+    an error about a file that is not where it was the first time.
+    """
+    if not details or not details.get("bastion_public_ip"):
+        return None
+
+    folder = Path(key_directory).expanduser()
+    bastion_name = details["bastion_key"]
+    private_name = details["private_key"]
+
+    q = shlex.quote
+    return f"""#!/usr/bin/env bash
+#
+# Connects to the {name} bastion architecture built by Secure Cloud Provisioner.
+#
+# Run it:   bash {q(f"connect-{name}.sh")}
+#
+# It files the two keys your browser downloaded, makes them readable only by
+# you, and opens a shell on the private machine through the bastion. It holds
+# no secret: the private keys are the files it looks for, and this script has
+# never seen their contents. Read it before running it - that is the point of
+# handing you a script rather than doing it somewhere you cannot look.
+
+set -euo pipefail
+
+KEYS={q(str(folder))}
+BASTION_KEY="$KEYS"/{q(bastion_name)}
+PRIVATE_KEY="$KEYS"/{q(private_name)}
+
+BASTION_HOST={q(details["bastion_public_ip"])}
+PRIVATE_HOST={q(details["private_ip"] or "")}
+LOGIN=ec2-user
+
+# Where the browser put them. The script's own directory is checked because
+# the usual way to run this is `bash ~/Downloads/connect-...sh`, with the keys
+# sitting beside it.
+HERE="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+LOOK_IN=("$KEYS" "$HERE" "$HOME/Downloads" "$PWD")
+
+find_key() {{
+    local wanted="$1" where
+    for where in "${{LOOK_IN[@]}}"; do
+        if [ -f "$where/$wanted" ]; then
+            printf '%s\\n' "$where/$wanted"
+            return 0
+        fi
+    done
+    return 1
+}}
+
+file_key() {{
+    local wanted="$1" target="$2" found
+    if ! found="$(find_key "$wanted")"; then
+        echo "Could not find $wanted." >&2
+        echo "Looked in: ${{LOOK_IN[*]}}" >&2
+        echo "It is one of the two keys your browser downloaded when the" >&2
+        echo "bastion was built. Move it into $KEYS and run this again." >&2
+        return 1
+    fi
+
+    if [ "$found" != "$target" ]; then
+        echo "Filing $(basename "$found") into $KEYS"
+        mv -- "$found" "$target"
+    fi
+
+    # ssh refuses a private key other people on this machine could read, and a
+    # browser downloads one as exactly that.
+    chmod 600 -- "$target"
+}}
+
+mkdir -p -- "$KEYS"
+chmod 700 -- "$KEYS"
+
+file_key {q(bastion_name)} "$BASTION_KEY"
+file_key {q(private_name)} "$PRIVATE_KEY"
+
+echo
+echo "Opening a shell on $PRIVATE_HOST, through the bastion at $BASTION_HOST."
+echo "Type exit to come back."
+echo
+
+# ProxyCommand rather than -J, so each hop can be given its own key without an
+# agent. The bastion never sees the key used for the machine behind it, which
+# is the whole reason there are two of them - and it is why this does not use
+# agent forwarding, where anyone with root on the bastion could authenticate
+# as you elsewhere for as long as you stay connected.
+exec ssh \\
+    -i "$PRIVATE_KEY" \\
+    -o IdentitiesOnly=yes \\
+    -o ProxyCommand="ssh -i $(printf '%q' "$BASTION_KEY") \\
+        -o IdentitiesOnly=yes -W %h:%p $LOGIN@$BASTION_HOST" \\
+    "$LOGIN@$PRIVATE_HOST"
+"""
 
 
 def teardown_instructions(created):

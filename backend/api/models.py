@@ -288,6 +288,13 @@ class BastionResponse(BaseModel):
     instructions: list[str]
     teardown: list[str]
 
+    # The instructions as one runnable script, or None before the addresses
+    # exist. Carries no key material: the private halves went from the
+    # browser to a download and this server has never held one. See
+    # bastion.connect_script.
+    script: Optional[str] = None
+    script_name: Optional[str] = None
+
 
 class DeletionPlanItem(BaseModel):
     kind: str

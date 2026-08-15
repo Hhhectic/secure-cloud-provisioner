@@ -1736,6 +1736,32 @@ function renderBlueprintResult(out, body) {
 
   if (body.instructions.length) {
     out.append(text("h3", "How to connect"));
+
+    // The script first, because it is the answer for most people and the six
+    // commands below it are the explanation. A browser cannot move a file,
+    // change its mode, reach an ssh-agent or open a shell - so the nearest
+    // the tool gets to doing this for you is handing over something that
+    // does. It carries no key material; see blueprints/bastion.connect_script.
+    if (body.script && body.script_name) {
+      const row = document.createElement("div");
+      row.className = "row";
+
+      const get = document.createElement("button");
+      get.textContent = "Download connect script";
+      get.onclick = () => {
+        download(body.script_name, body.script);
+        toast(`Downloaded ${body.script_name}. Run: bash ~/Downloads/${body.script_name}`);
+      };
+
+      row.append(get, text("span",
+        `or run the six commands below by hand`, "muted"));
+      out.append(row);
+      out.append(text("p",
+        `It files both keys, makes them readable only by you, and opens a ` +
+        `shell on the private machine through the bastion. It holds no key ` +
+        `material — read it before running it.`, "muted"));
+    }
+
     out.append(commandBlock(body.instructions));
   }
   if (body.teardown.length) {

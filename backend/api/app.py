@@ -1038,6 +1038,14 @@ def build_bastion(spec: models.BastionSpec):
         instructions=bastion.connection_instructions(
             details, keys_were_downloaded=True) if ok else [],
         teardown=bastion.teardown_instructions(created),
+        # The same steps as one file, because the four the instructions list
+        # are the four a browser cannot perform: it cannot move a file, change
+        # its mode, reach an ssh-agent or open a shell. Handing over a script
+        # is the closest the tool gets to doing them, and it does it without
+        # ever holding a private key - which a route that filed the keys
+        # server-side could not claim.
+        script=bastion.connect_script(details, name=spec.name) if ok else None,
+        script_name=f"connect-{spec.name}.sh" if ok else None,
     )
 
 

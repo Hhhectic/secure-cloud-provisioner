@@ -11,7 +11,9 @@ Keys are generated into a temporary directory so a test run never writes to
 
 import os
 import shutil
+import subprocess
 import tempfile
+from pathlib import Path
 
 import boto3
 import pytest
@@ -301,6 +303,185 @@ def test_the_move_step_is_absent_for_keys_that_were_never_downloaded(ec2, keys):
 
     assert "~/Downloads" not in joined
     assert "chmod 600" in joined
+
+
+def test_the_connect_script_holds_no_key_material(ec2, keys):
+    """The property the whole key-pair design exists to protect.
+
+    A private half goes from WebCrypto to a download and nowhere else. This
+    server has never held one, so a script it generates cannot contain one -
+    but the check is worth making directly rather than inferring it, because
+    the failure would be silent and total: a private key in a response body is
+    in the logs, in the proxy, and in everything between.
+    """
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    script = bastion.connect_script(details, key_directory=keys)
+
+    assert "PRIVATE KEY" not in script
+    assert "BEGIN OPENSSH" not in script
+    # The filenames are in there; the contents are not.
+    assert details["bastion_key"] in script
+    assert details["private_key"] in script
+
+
+def test_the_connect_script_needs_no_ssh_agent(ec2, keys):
+    """ssh-add inside a script adds to an agent that dies with the script.
+
+    The printed instructions start an agent because a person runs them in a
+    shell that outlives them. A script cannot, so it gives each hop its own
+    key with -i - which is also why it works on a machine with no agent at
+    all.
+    """
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    script = bastion.connect_script(details, key_directory=keys)
+
+    assert "ssh-agent" not in script
+    assert "ssh-add" not in script
+    assert "IdentitiesOnly=yes" in script
+    # Each hop names its own key, which is the point of building two.
+    assert "ProxyCommand" in script
+
+
+def test_the_connect_script_is_valid_shell(ec2, keys):
+    """Parsed by bash rather than eyeballed.
+
+    A generated script is assembled from an f-string carrying braces, quotes
+    and backslashes, all of which mean something to both languages. `bash -n`
+    catches an unbalanced one; nothing else here would until somebody ran it.
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("no bash on this machine")
+
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    script = Path(keys) / "connect.sh"
+    script.write_text(bastion.connect_script(details, key_directory=keys))
+
+    checked = subprocess.run([bash, "-n", str(script)],
+                             capture_output=True, text=True)
+    assert checked.returncode == 0, checked.stderr
+
+
+def test_the_connect_script_files_the_keys_and_makes_them_private(ec2, keys,
+                                                                  tmp_path):
+    """The half that can be tested without a machine to connect to.
+
+    Runs the real script against real files, with the final ssh replaced, and
+    checks it does what the instructions promise: finds the keys wherever the
+    browser left them, moves them into place, and leaves them readable only by
+    the owner. That last one is what ssh refuses over, and it is the reason
+    any of this exists.
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("no bash on this machine")
+
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+
+    # Where the browser put them: not the target directory.
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    target = tmp_path / "dot-ssh"
+    for which in ("bastion_key", "private_key"):
+        made = downloads / details[which]
+        made.write_text("not a real key, and the script never reads one\n")
+        made.chmod(0o644)  # exactly what a browser download is
+
+    script = tmp_path / "connect.sh"
+    script.write_text(bastion.connect_script(details, key_directory=target))
+
+    # A stub ssh on PATH, so the script's exec lands somewhere harmless. The
+    # script is run from the downloads directory, which is where its own
+    # search is meant to find the keys.
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "ssh").write_text("#!/bin/sh\necho stub-ssh-reached\n")
+    (stub / "ssh").chmod(0o755)
+
+    ran = subprocess.run(
+        [bash, str(script)], capture_output=True, text=True, cwd=downloads,
+        env={"PATH": f"{stub}:/usr/bin:/bin", "HOME": str(tmp_path)},
+    )
+
+    assert ran.returncode == 0, ran.stderr
+    assert "stub-ssh-reached" in ran.stdout, ran.stdout
+
+    for which in ("bastion_key", "private_key"):
+        filed = target / details[which]
+        assert filed.exists(), f"{which} was not filed into {target}"
+        assert not (downloads / details[which]).exists(), "and was moved, not copied"
+        assert filed.stat().st_mode & 0o777 == 0o600, "ssh refuses anything looser"
+
+    assert target.stat().st_mode & 0o777 == 0o700
+
+
+def test_running_the_connect_script_twice_still_works(ec2, keys, tmp_path):
+    """Somebody will. The first run moves the keys, so a second one has to
+    find them where the first put them rather than fail on an absent file."""
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("no bash on this machine")
+
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    target = tmp_path / "dot-ssh"
+    for which in ("bastion_key", "private_key"):
+        (downloads / details[which]).write_text("placeholder\n")
+
+    script = tmp_path / "connect.sh"
+    script.write_text(bastion.connect_script(details, key_directory=target))
+
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "ssh").write_text("#!/bin/sh\necho stub-ssh-reached\n")
+    (stub / "ssh").chmod(0o755)
+    env = {"PATH": f"{stub}:/usr/bin:/bin", "HOME": str(tmp_path)}
+
+    first = subprocess.run([bash, str(script)], capture_output=True, text=True,
+                           cwd=downloads, env=env)
+    assert first.returncode == 0, first.stderr
+
+    second = subprocess.run([bash, str(script)], capture_output=True, text=True,
+                            cwd=downloads, env=env)
+    assert second.returncode == 0, second.stderr
+    assert "stub-ssh-reached" in second.stdout
+
+
+def test_the_connect_script_says_what_is_missing_rather_than_failing_oddly(
+        ec2, keys, tmp_path):
+    """A key that is nowhere is the likeliest failure: somebody cleared their
+    downloads, or ran this on a different machine from the one that built it.
+
+    `set -e` alone would exit on the mv with a message about a file, naming
+    neither which key nor where it was looked for.
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("no bash on this machine")
+
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    script = tmp_path / "connect.sh"
+    script.write_text(bastion.connect_script(
+        details, key_directory=tmp_path / "dot-ssh"))
+
+    ran = subprocess.run(
+        [bash, str(script)], capture_output=True, text=True, cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+    )
+
+    assert ran.returncode != 0
+    assert details["bastion_key"] in ran.stderr
+    assert "Looked in" in ran.stderr
+
+
+def test_no_script_before_the_addresses_exist(ec2, keys):
+    """The same silence connection_instructions keeps, for the same reason: a
+    script naming an empty address would fail in a way that looks like the
+    machine refusing rather than the machine not being ready."""
+    assert bastion.connect_script(
+        {"bastion_public_ip": None, "private_ip": None,
+         "bastion_key": "k", "private_key": "k2"}) is None
 
 
 def test_instructions_are_honest_when_addresses_are_not_ready():
