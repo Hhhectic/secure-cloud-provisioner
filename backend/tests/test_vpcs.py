@@ -660,47 +660,64 @@ class _InterfacesThatLinger:
     one thing no test would see.
     """
 
-    def __init__(self, rounds):
-        self.rounds = rounds
+    def __init__(self, counts):
+        # One answer per poll, so a test can make the count fall the way a
+        # real one does rather than only switch off.
+        self.counts = list(counts)
 
     def describe_network_interfaces(self, **kwargs):
-        self.rounds -= 1
-        if self.rounds >= 0:
-            return {"NetworkInterfaces": [{"NetworkInterfaceId": "eni-1"},
-                                          {"NetworkInterfaceId": "eni-2"}]}
-        return {"NetworkInterfaces": []}
+        left = self.counts.pop(0) if self.counts else 0
+        return {"NetworkInterfaces": [{"NetworkInterfaceId": f"eni-{n}"}
+                                      for n in range(left)]}
 
 
-def test_the_long_wait_says_how_many_are_left_and_for_how_long():
-    """The part somebody is actually staring at.
+def test_the_long_wait_speaks_once_rather_than_once_per_poll():
+    """The first version reported every time round and it was wrong.
 
-    A log that goes quiet for four minutes reads as broken, so this reports
-    every time round rather than only on a change: the count is the same on
-    each pass and the elapsed time is not, which is what says the thing is
-    alive.
+    Polling every five seconds for four minutes is about fifty lines, of which
+    forty-nine repeat the one before them - so the log scrolls, the earlier
+    steps leave the screen, and the one genuinely new fact arrives looking
+    like more of the same. Whether the thing is alive is a different question
+    from what it is doing, and the page answers it with a clock.
     """
     said = []
     cleared = vpcs.wait_for_interfaces_to_clear(
-        _InterfacesThatLinger(rounds=3), "vpc-1",
+        _InterfacesThatLinger([2, 2, 2, 2, 2, 0]), "vpc-1",
         attempts=10, delay=0, report=said.append)
 
     assert cleared
-    assert len(said) == 4, "three waiting lines and the all-clear"
+    assert len(said) == 2, f"one line for the wait, one for the all-clear: {said}"
     assert "2 network connections" in said[0]
     assert said[-1] == "Network connections are clear."
 
 
-def test_the_wait_counts_the_time_it_has_spent():
-    """Elapsed rather than attempt number: "3 of 96" means nothing to somebody
-    deciding whether to keep waiting."""
+def test_the_wait_speaks_again_when_the_count_actually_changes():
+    """A change is news. Two machines releasing one interface each is the
+    difference between "still waiting" and "halfway", and it is the only thing
+    during this wait that is worth a new line."""
     said = []
     vpcs.wait_for_interfaces_to_clear(
-        _InterfacesThatLinger(rounds=3), "vpc-1",
+        _InterfacesThatLinger([3, 3, 2, 2, 1, 0]), "vpc-1",
+        attempts=10, delay=0, report=said.append)
+
+    assert len(said) == 4, said
+    assert "3 network connections" in said[0]
+    assert "2 network connections" in said[1]
+    assert "1 network connection " in said[2]
+    assert said[3] == "Network connections are clear."
+
+
+def test_the_wait_carries_no_clock_of_its_own():
+    """Two timers started at different moments disagree by however long the
+    earlier steps took, which reads as one of them being broken rather than as
+    them measuring different things. The page has the clock; this has the
+    facts."""
+    said = []
+    vpcs.wait_for_interfaces_to_clear(
+        _InterfacesThatLinger([2, 2, 0]), "vpc-1",
         attempts=10, delay=30, report=said.append)
 
-    assert "0m 00s" in said[0]
-    assert "0m 30s" in said[1]
-    assert "1m 00s" in said[2]
+    assert not any("0m" in line or "1m" in line for line in said), said
 
 
 def test_one_remaining_interface_is_not_described_in_the_plural():

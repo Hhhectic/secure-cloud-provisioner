@@ -483,13 +483,17 @@ def wait_for_interfaces_to_clear(ec2, vpc_id,
     Checks before sleeping, so a VPC that is already clear returns at once.
 
     This is where a cascade spends nearly all of its time - up to eight
-    minutes, and four or five is ordinary with two machines to terminate - so
-    it is also where a caller most needs to be told something is still
-    happening. `report` gets a line each time round, naming how many
-    interfaces are left and how long it has been, because "nothing has changed
-    for four minutes" and "this has hung" look identical from outside.
+    minutes, and four or five is ordinary with two machines to terminate.
+
+    `report` is called when the count *changes*, not once per poll. Polling
+    every five seconds for four minutes is around fifty lines, of which
+    forty-nine say exactly what the one before them said - so the log scrolls,
+    the earlier steps leave the screen, and the one genuinely new fact when it
+    finally arrives is indistinguishable from the noise above it. Whether the
+    thing is alive is a different question from what it is doing, and it is
+    answered better by a clock than by repetition.
     """
-    waited = 0
+    last_seen = None
     for attempt in range(attempts):
         try:
             interfaces = ec2.describe_network_interfaces(Filters=[
@@ -505,15 +509,20 @@ def wait_for_interfaces_to_clear(ec2, vpc_id,
             return True
 
         left = len(interfaces)
-        plural = "connection" if left == 1 else "connections"
-        _say(report,
-             f"Waiting for {left} network {plural} to detach "
-             f"({waited // 60}m {waited % 60:02d}s). AWS releases these a "
-             "little after the machines stop.")
+        if left != last_seen:
+            # No elapsed time in here. The one caller that shows these runs a
+            # clock of its own, and two timers started at different moments
+            # disagree by however long the earlier steps took - which reads as
+            # one of them being wrong rather than as them measuring different
+            # things.
+            plural = "connection" if left == 1 else "connections"
+            _say(report,
+                 f"Waiting for {left} network {plural} to detach. AWS "
+                 "releases these a little after the machines stop.")
+            last_seen = left
 
         if attempt < attempts - 1:
             time.sleep(delay)
-            waited += delay
 
     return False
 
