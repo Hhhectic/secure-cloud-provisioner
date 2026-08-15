@@ -17,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 from moto import mock_aws
 
-from api import models
+from api import audit, models
 from api.app import app
 from aws import security_groups as sg
 
@@ -1744,3 +1744,67 @@ def test_a_streamed_delete_still_refuses_before_it_streams(client, vpc_id):
     # And nothing was destroyed on the way to saying so.
     still = client.get(f"/resources/network/{new_vpc}")
     assert still.status_code == 200
+
+
+# ------------------------------------------------------------------ Activity
+
+
+def test_activity_reports_what_was_done_and_what_was_refused(client, tmp_path,
+                                                             monkeypatch):
+    """Written since the first commit and never readable until now.
+
+    The refusals are the half of this tool's behaviour that leaves no trace
+    anywhere else: CloudTrail records that an API call happened and cannot
+    record that somebody asked for a cascade, failed to type the ID back, and
+    was stopped. A log nobody can see is a file somebody has to know about and
+    go and find.
+    """
+    log = tmp_path / "audit.log"
+    monkeypatch.setenv("SCP_AUDIT_LOG", str(log))
+
+    # A refusal: force without the id repeated back.
+    refused = client.request("DELETE", "/resources/network/vpc-nope?force=true")
+    assert refused.status_code in (400, 404)
+
+    answered = client.get("/activity")
+    assert answered.status_code == 200
+
+    entries = answered.json()["activity"]
+    assert entries, "the refusal should be recorded"
+    assert entries[0]["path"] == "/resources/network/vpc-nope"
+    assert entries[0]["method"] == "DELETE"
+
+
+def test_activity_is_newest_first_and_bounded(tmp_path, monkeypatch):
+    """A page asking for twelve lines should not read a log of a hundred
+    thousand, and should get the twelve that just happened."""
+    log = tmp_path / "audit.log"
+    monkeypatch.setenv("SCP_AUDIT_LOG", str(log))
+
+    for n in range(40):
+        audit.record(method="POST", path=f"/thing/{n}", outcome="done")
+
+    found = audit.read_recent(limit=5)
+    assert [e["path"] for e in found] == [f"/thing/{n}"
+                                          for n in (39, 38, 37, 36, 35)]
+
+
+def test_a_truncated_line_does_not_take_the_panel_with_it(tmp_path, monkeypatch):
+    """The writer never raises, so a line cut short by a full disk is a thing
+    that can exist. One bad line should cost one line."""
+    log = tmp_path / "audit.log"
+    monkeypatch.setenv("SCP_AUDIT_LOG", str(log))
+
+    audit.record(method="POST", path="/first", outcome="done")
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write('{"at": "2026-08-15T00:00:00", "method": "POST"\n')
+    audit.record(method="POST", path="/last", outcome="done")
+
+    found = audit.read_recent()
+    assert [e["path"] for e in found] == ["/last", "/first"]
+
+
+def test_an_absent_log_is_empty_rather_than_an_error(tmp_path, monkeypatch):
+    """A tool that has changed nothing has no log, and that is not a fault."""
+    monkeypatch.setenv("SCP_AUDIT_LOG", str(tmp_path / "never-written.log"))
+    assert audit.read_recent() == []

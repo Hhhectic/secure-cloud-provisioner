@@ -12,8 +12,8 @@
 
 const API = "..";
 
-const state = { types: [], type: null, cloud: "aws", region: "us-east-1",
-                options: {}, createInputs: null };
+const state = { types: [], type: null, tab: "dashboard", cloud: "aws",
+                region: "us-east-1", options: {}, createInputs: null };
 
 // The blueprint's sidebar key. Deliberately not a resource type: it composes
 // six of them and the registry has no entry for it, so nothing must ever ask
@@ -247,7 +247,12 @@ function setCloud(cloud) {
     $("health").className = "pill";
   }
   renderScope();
-  renderTypes();
+  // Switching cloud on the dashboard reloads the dashboard, not the picker.
+  // Repainting a hidden sidebar and leaving the visible panel showing the
+  // other account's counts is how "which cloud am I looking at" becomes a
+  // question again, which is what the toggle exists to answer.
+  if (state.tab === "dashboard") loadDashboard();
+  else renderTypes();
 }
 
 /* What the header pill says about the cloud in front of you.
@@ -339,6 +344,7 @@ async function loadTypes() {
   const clouds = cloudsPresent();
   $("cloud-toggle").classList.toggle("hidden", clouds.length < 2);
   setCloud(clouds.includes(state.cloud) ? state.cloud : (clouds[0] || "aws"));
+  selectTab(state.tab);
 }
 
 /* One cloud's types, plus the blueprint where there is one.
@@ -348,12 +354,76 @@ async function loadTypes() {
    for. It used to be a panel rendered under every tab, including the five
    Azure ones, where it advertised an AWS architecture at a subscription that
    cannot build it. */
+/* Which tab a resource type belongs on.
+
+   Create is where things begin and Audit is where you look at what exists, so
+   a type that cannot be created has no business on the Create tab - a form
+   that always answers 405 is an advertised endpoint that can never work,
+   which is the reasoning `read_only` already carries on the server.
+
+   Everything appears under Audit, creatable or not. Scanning a bucket you
+   made a minute ago and auditing a role you did not are the same activity. */
+function belongsOn(type, tab) {
+  if (tab === "audit") return true;
+  if (tab === "create") return !type.read_only;
+  return false;
+}
+
+/* Which panels each tab is made of.
+
+   The sections are laid out once in index.html and shown or hidden, rather
+   than moved between tabs. Moving them would mean re-creating the create form
+   and re-fetching the list on every tab change, and the form is the one thing
+   on this page somebody may have half-filled in. */
+const PANELS = {
+  dashboard: ["dashboard"],
+  create: ["create"],
+  audit: ["listing", "detail"],
+};
+
+function selectTab(name) {
+  state.tab = name;
+
+  for (const b of $("tabs").children) {
+    const on = b.dataset.tab === name;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", String(on));
+  }
+
+  // The blueprint builds six resources, so it is a Create thing and is
+  // reached from the sidebar there. It hides itself here and selectType puts
+  // it back when it is the chosen entry.
+  $("blueprint").classList.add("hidden");
+  for (const id of ["dashboard", "listing", "detail", "create"]) {
+    $(id).classList.toggle("hidden", !(PANELS[name] || []).includes(id));
+  }
+
+  // The dashboard is about the whole account rather than one type, so it has
+  // no use for a resource picker and the region control means nothing there.
+  const picking = name !== "dashboard";
+  $("sidebar").classList.toggle("hidden", !picking);
+  document.body.classList.toggle("no-picker", !picking);
+  $("side-head").textContent = name === "create" ? "Make" : "Inspect";
+
+  // The region control belongs to a request about a resource. The dashboard
+  // asks about every type at once and the scope note underneath it talks
+  // about creating and deleting, neither of which happens there.
+  $("scope-box").classList.toggle("hidden", !picking);
+
+  if (name === "dashboard") {
+    loadDashboard();
+    return;
+  }
+  renderTypes();
+}
+
 function renderTypes() {
   const nav = $("types");
   nav.replaceChildren();
 
   for (const t of state.types) {
     if (providerOf(t) !== state.cloud) continue;
+    if (!belongsOn(t, state.tab)) continue;
     const b = document.createElement("button");
     b.dataset.key = t.key;
     b.append(text("span", t.short_label || t.label));
@@ -362,7 +432,9 @@ function renderTypes() {
     nav.append(b);
   }
 
-  if (state.cloud === "aws") {
+  // Six resources at once, and all of them AWS. It is a way of making things,
+  // so it is offered where things are made.
+  if (state.cloud === "aws" && state.tab === "create") {
     const b = document.createElement("button");
     b.dataset.key = BLUEPRINT;
     b.className = "set-apart";
@@ -388,10 +460,10 @@ function selectType(key) {
   }
 
   // The blueprint is six resources at once rather than one of anything, so it
-  // replaces the three panels instead of appearing under them.
+  // replaces this tab's panels instead of appearing under them.
   const isBlueprint = key === BLUEPRINT;
   $("blueprint").classList.toggle("hidden", !isBlueprint);
-  for (const id of ["listing", "detail", "create"]) {
+  for (const id of PANELS[state.tab] || []) {
     $(id).classList.toggle("hidden", isBlueprint);
   }
   if (isBlueprint) {
@@ -416,8 +488,167 @@ function selectType(key) {
   $("audit-badge").classList.toggle("hidden", !known.read_only);
   $("detail-id").textContent = "";
   $("detail-body").replaceChildren(text("p", "Pick something from the list.", "muted"));
-  buildCreateForm();
-  loadList();
+
+  // Only the work this tab actually shows. Building the form while the Audit
+  // tab is open fetches that type's option menus - every machine size the
+  // subscription can start, which is a five to eight second call - to fill in
+  // a form nobody can see.
+  if (state.tab === "create") buildCreateForm();
+  if (state.tab === "audit") loadList();
+}
+
+// --------------------------------------------------------------- dashboard
+
+/* What exists, and what this tool has been doing.
+
+   Deliberately not a scan. Counting what is in the account is one call per
+   type and answers in a second; judging it is seven AWS calls per bucket,
+   one after another, which CLAUDE.md already records as visibly slow past a
+   demo account. A landing page that takes a minute is a landing page people
+   learn to skip, so the posture is behind a button and arrives per type as
+   each answer lands.
+
+   The two are kept visibly apart. A type that has not been scanned says so
+   rather than showing a zero, because "nothing found" and "nothing looked
+   for" are the one confusion this tool cannot afford - it is the same bug the
+   list had on its first load, where every row read as clean because
+   worst_level is null in both cases. */
+async function loadDashboard() {
+  const body = $("dash-body");
+  body.replaceChildren(text("p", "Loading…", "muted"));
+
+  const mine = state.types.filter((t) => providerOf(t) === state.cloud);
+
+  const grid = document.createElement("div");
+  grid.className = "dash-grid";
+  const cards = {};
+
+  for (const t of mine) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "dash-card";
+    card.append(text("div", t.short_label || t.label, "dash-name"));
+    card.append(text("div", "—", "dash-count"));
+    card.append(text("div", "counting…", "dash-state"));
+    // The dashboard is a way in, not a dead end: a card is the resource it
+    // names, so clicking one opens it where it can be acted on.
+    card.onclick = () => { selectTab("audit"); selectType(t.key); };
+    cards[t.key] = card;
+    grid.append(card);
+  }
+
+  body.replaceChildren();
+  body.append(text("h3", "What is in this account"));
+  body.append(grid);
+
+  const activity = document.createElement("div");
+  body.append(text("h3", "Recent activity"));
+  body.append(activity);
+  loadActivity(activity);
+
+  // One request per type, all at once. The server does each list serially
+  // inside itself; firing them together is what keeps the whole grid to about
+  // the time of its slowest type rather than the sum of all of them.
+  await Promise.all(mine.map(async (t) => {
+    const card = cards[t.key];
+    try {
+      const found = await api(`/resources/${t.key}?only_ours=false&with_scan=false`);
+      const n = (found.resources || []).length;
+      card.querySelector(".dash-count").textContent = String(n);
+      card.querySelector(".dash-state").textContent =
+        n === 0 ? "none" : "not scanned";
+      card.dataset.count = String(n);
+    } catch (e) {
+      card.querySelector(".dash-count").textContent = "—";
+      card.querySelector(".dash-state").textContent = "unreachable";
+      card.classList.add("unreachable");
+      card.title = e.message;
+    }
+  }));
+
+  reportCloudReach(!Object.values(cards).every((c) => c.classList.contains("unreachable")));
+}
+
+/* Fills in the posture, per type, as each answer arrives.
+
+   with_scan=true is the slow path by design - the server scans every resource
+   in the list one after another - so this is a button rather than something
+   the page does on its own, and every card updates the moment its own type
+   comes back instead of the grid waiting for the last one. */
+async function scanEverything() {
+  const button = $("scan-all");
+  button.disabled = true;
+  button.textContent = "Scanning…";
+
+  const mine = state.types.filter((t) => providerOf(t) === state.cloud);
+  const cards = [...$("dash-body").querySelectorAll(".dash-card")];
+  const byName = new Map(cards.map((c) =>
+    [c.querySelector(".dash-name").textContent, c]));
+
+  for (const card of cards) card.querySelector(".dash-state").textContent = "scanning…";
+
+  await Promise.all(mine.map(async (t) => {
+    const card = byName.get(t.short_label || t.label);
+    if (!card) return;
+    try {
+      const found = await api(`/resources/${t.key}?only_ours=false&with_scan=true`);
+      const rows = found.resources || [];
+      let critical = 0, warning = 0;
+      for (const r of rows) {
+        if (!r.counts) continue;
+        critical += r.counts.critical || 0;
+        warning += r.counts.warning || 0;
+      }
+      const where = card.querySelector(".dash-state");
+      where.textContent = rows.length === 0 ? "none"
+        : critical ? `${critical} critical`
+        : warning ? `${warning} warning`
+        : "clean";
+      card.classList.toggle("has-critical", critical > 0);
+      card.classList.toggle("has-warning", !critical && warning > 0);
+      card.classList.toggle("clean", rows.length > 0 && !critical && !warning);
+    } catch (e) {
+      card.querySelector(".dash-state").textContent = "unreachable";
+      card.classList.add("unreachable");
+    }
+  }));
+
+  button.disabled = false;
+  button.textContent = "Scan everything";
+}
+
+async function loadActivity(into) {
+  into.replaceChildren(text("p", "Loading…", "muted"));
+  let body;
+  try {
+    body = await api("/activity?limit=12");
+  } catch (e) {
+    into.replaceChildren(text("p", e.message, "muted"));
+    return;
+  }
+
+  const entries = body.activity || [];
+  if (!entries.length) {
+    // Not an error, and worth saying which. A tool that has changed nothing
+    // has an empty log, and so does one whose log cannot be written.
+    into.replaceChildren(text("p",
+      "Nothing yet. This records what the tool changed and what it refused " +
+      "to do — the refusals leave no trace anywhere else, because nothing " +
+      "happened.", "muted"));
+    return;
+  }
+
+  const list = document.createElement("ul");
+  list.className = "activity";
+  for (const e of entries) {
+    const li = document.createElement("li");
+    li.append(text("span", e.outcome || "—", `outcome ${e.outcome || ""}`));
+    li.append(text("span", `${e.method || ""} ${e.path || ""}`.trim(), "what"));
+    li.append(text("span", (e.at || "").replace("T", " ").slice(0, 19), "when"));
+    if (e.why) li.append(text("span", e.why, "why"));
+    list.append(li);
+  }
+  into.replaceChildren(list);
 }
 
 // ----------------------------------------------------------------- listing
@@ -2136,6 +2367,12 @@ $("with-scan").onchange = loadList;
 
 $("cloud-toggle").onclick = () =>
   setCloud(state.cloud === "aws" ? "azure" : "aws");
+
+for (const b of $("tabs").children) {
+  b.onclick = () => selectTab(b.dataset.tab);
+}
+$("scan-all").onclick = scanEverything;
+$("dash-refresh").onclick = loadDashboard;
 
 // The create panel folds. Its state is remembered across type changes,
 // because somebody who closed it did so to see the findings above it and

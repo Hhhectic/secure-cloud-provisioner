@@ -362,6 +362,19 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/activity")
+def recent_activity(limit: int = 20):
+    """What this tool has changed, or refused to, most recently.
+
+    Read-only, and the log holds no request bodies - method, path, outcome and
+    a reason. It is exposed because the refusals are the half of this tool's
+    behaviour that leaves no trace anywhere else: CloudTrail records that an
+    API call happened and cannot record that somebody asked for a cascade,
+    failed to type the ID back, and was stopped.
+    """
+    return {"activity": audit.read_recent(min(max(limit, 1), 100))}
+
+
 @app.get("/resources")
 def list_resource_types():
     """What this tool knows about. Lets the frontend build its own menu.

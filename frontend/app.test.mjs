@@ -155,7 +155,7 @@ function fakeApi(overrides = {}) {
   return { fetchStub, sent };
 }
 
-async function boot(overrides) {
+async function boot(overrides, tab) {
   const { fetchStub, sent } = fakeApi(overrides);
 
   const dom = new JSDOM(readFileSync(join(here, "index.html"), "utf8"), {
@@ -190,6 +190,19 @@ async function boot(overrides) {
 
   // Let the boot sequence's promises settle.
   await new Promise((resolve) => setTimeout(resolve, 50));
+
+  /* The page opens on the Dashboard, which has no resource picker and no
+     forms, so almost every test here has to say which job it is testing
+     first. `audit` is the default because it is the tab that lists every
+     type - the audited ones included - and because the list and the detail
+     panel are the two things most of these assertions are about.
+
+     Deliberately a click rather than reaching into state: the tab bar is part
+     of what is being tested, and a test that bypassed it would keep passing
+     if the buttons stopped working. */
+  const wanted = tab || "audit";
+  window.document.querySelector(`.tab[data-tab="${wanted}"]`).click();
+  await new Promise((resolve) => setTimeout(resolve, 60));
   return { window, document: window.document, sent };
 }
 
@@ -200,28 +213,53 @@ const $ = (doc, id) => doc.getElementById(id);
 console.log("\nBooting");
 console.log("-------");
 
-const { window, document, sent } = await boot();
+/* Most of this file drives forms, so the shared page sits on Create. The page
+ * itself opens on the Dashboard, which has no picker and no forms. */
+const { window, document, sent } = await boot(undefined, "create");
 
 check($(document, "health").textContent === "API up",
       "the health pill reflects a reachable API");
-/* The sidebar holds one cloud at a time plus the blueprint, not all fourteen
- * types at once. Counted from the stub rather than written as a number, so
- * adding a type to the stub cannot silently make this assertion about
- * something else. */
+
 const awsTypes = STUB_TYPES.filter((t) => t.provider === "aws");
 const azureTypes = STUB_TYPES.filter((t) => t.provider === "azure");
+const creatable = awsTypes.filter((t) => !t.read_only);
 
-check($(document, "types").children.length === awsTypes.length + 1,
-      "the sidebar lists this cloud's types, and the blueprint after them");
+/* Three jobs above fourteen nouns. "Resources" was one list holding the form
+ * you fill in to make something and the report you read to find out what is
+ * wrong with it, which are different jobs done at different times.
+ *
+ * The two sidebars are asserted separately because the split is the point: a
+ * type that cannot be created has no business on Create, where its form would
+ * be an advertised endpoint that always answers 405. */
+check($(document, "tabs").children.length === 3,
+      "three tabs: dashboard, create, audit");
+check($(document, "dashboard").classList.contains("hidden"),
+      "the dashboard is put away while Create is open");
+
+check($(document, "types").children.length === creatable.length + 1,
+      "Create lists only the types that can be created, and the blueprint");
+check(![...$(document, "types").children]
+        .some((b) => b.textContent.includes("audit")),
+      "so nothing audit-only is offered a form that would always be refused");
 check([...$(document, "types").children].every(
         (b) => b.dataset.key === "blueprint"
           || awsTypes.some((t) => t.key === b.dataset.key)),
       "and nothing belonging to the other cloud");
-check([...$(document, "types").children]
-        .some((b) => b.textContent.includes("audit")),
-      "an audited type is labelled as one");
 check($(document, "types").lastElementChild.dataset.key === "blueprint",
       "the blueprint sits last, being six resources rather than one type");
+
+const { document: auditDoc } = await boot(undefined, "audit");
+check($(auditDoc, "types").children.length === awsTypes.length,
+      "Audit lists every type, because looking at one you made and one you " +
+      "did not is the same activity");
+check([...$(auditDoc, "types").children]
+        .some((b) => b.textContent.includes("audit")),
+      "an audited type is labelled as one");
+check(![...$(auditDoc, "types").children]
+        .some((b) => b.dataset.key === "blueprint"),
+      "and the blueprint is not there, being a way of making things");
+check($(auditDoc, "create").classList.contains("hidden"),
+      "the create form is put away while Audit is open");
 
 // ------------------------------------------- not scanned is not clean
 
@@ -337,7 +375,7 @@ if (check(Boolean(post), "pressing Create sends a POST")) {
 console.log("\nAn empty rule row");
 console.log("-----------------");
 
-const { document: doc2, sent: sent2, window: win2 } = await boot();
+const { document: doc2, sent: sent2, window: win2 } = await boot(undefined, "create");
 const body2 = $(doc2, "create-body");
 body2.querySelectorAll("input")[0].value = "no-rules";
 
@@ -358,26 +396,38 @@ if (check(Boolean(post2), "a form with an untouched rule row still submits")) {
 console.log("\nAudited types");
 console.log("-------------");
 
-const snapshotTab = [...$(doc2, "types").children]
+/* An audited type used to be reached from the same list as every other one
+   and answered with a create panel explaining that it had nothing to create.
+   The tab split says the same thing earlier and without the panel: it is not
+   offered on Create at all. What still has to hold is that it is a full
+   citizen of Audit, filter and all. */
+const auditedDoc = (await boot(undefined, "audit")).document;
+
+check(![...$(document, "types").children]
+        .some((b) => b.dataset.key === "snapshot"),
+      "an audited type is absent from Create rather than explaining itself there");
+
+const snapshotTab = [...$(auditedDoc, "types").children]
   .find((b) => b.dataset.key === "snapshot");
 snapshotTab.click();
 await new Promise((resolve) => setTimeout(resolve, 50));
 
-check($(doc2, "create-body").textContent.includes("audited by this tool"),
-      "an audited type offers no create form and says why");
-check(!$(doc2, "only-ours").disabled,
-      "but its list can still be narrowed, because being unable to change a "
+check(!$(auditedDoc, "audit-badge").classList.contains("hidden"),
+      "and is marked as audit-only where it does appear");
+check(!$(auditedDoc, "only-ours").disabled,
+      "its list can still be narrowed, because being unable to change a "
       + "thing does not mean being unable to filter it");
 
 // The pair the old rule got wrong. read_only was the signal for both
 // questions, so an audited type that genuinely honours the filter lost it.
-const iamTab = [...$(doc2, "types").children].find((b) => b.dataset.key === "iam");
+const iamTab = [...$(auditedDoc, "types").children]
+  .find((b) => b.dataset.key === "iam");
 iamTab.click();
 await new Promise((resolve) => setTimeout(resolve, 50));
 
-check($(doc2, "only-ours").disabled,
+check($(auditedDoc, "only-ours").disabled,
       "a type with nothing to narrow by disables the box");
-check($(doc2, "only-ours-label").textContent.includes("nothing to narrow"),
+check($(auditedDoc, "only-ours-label").textContent.includes("nothing to narrow"),
       "and says so rather than leaving a label that means nothing");
 
 // ------------------------------------------- refusing to build something bad
@@ -414,7 +464,7 @@ const { window: win3, document: doc3, sent: sent3 } = await boot({
              problems: [], settings: {}, warnings: [],
              counts: { critical: 0, warning: 0, info: 0 } };
   },
-});
+}, "create");
 
 const createBody3 = $(doc3, "create-body");
 const [nameInput3] = createBody3.querySelectorAll("input");
@@ -479,7 +529,7 @@ const { document: staleDoc } = await boot({
       },
     };
   },
-});
+}, "create");
 
 const staleBody = $(staleDoc, "create-body");
 const [staleName] = staleBody.querySelectorAll("input");
@@ -530,7 +580,7 @@ const { document: doc4, sent: sent4 } = await boot({
       ],
     },
   }),
-});
+}, "create");
 
 const alarmBody = $(doc4, "create-body");
 const alarmSelects = [...alarmBody.querySelectorAll("select")];
@@ -572,7 +622,7 @@ if (check(Boolean(alarmPost), "and submits what was chosen")) {
 console.log("\nAlarm thresholds are typed, and the metric names the unit");
 console.log("--------------------------------------------------------");
 
-const { document: bandDoc } = await boot();
+const { document: bandDoc } = await boot(undefined, "create");
 [...$(bandDoc, "types").children].find((b) => b.dataset.key === "alarm").click();
 await new Promise((resolve) => setTimeout(resolve, 50));
 
@@ -881,6 +931,17 @@ for (const asked of ["name", "resource group", "location", "secure defaults"]) {
   check(azCaptions.includes(asked), `the create form asks for ${asked}`);
 }
 
+/* The form was on Create; the list is on Audit. Reading an existing resource
+   is auditing it whichever cloud it is in, so the second half of this walk
+   changes tab. The cloud does not change with it - which is the thing worth
+   asserting, because a toggle that reset on every tab change would be a
+   confident answer to "which account am I in" that goes stale on a click. */
+$(document, "tabs").querySelector('.tab[data-tab="audit"]').click();
+await new Promise((r) => setTimeout(r, 80));
+
+check(document.body.classList.contains("cloud-azure"),
+      "moving to Audit keeps the cloud the toggle was left on");
+
 const azRow = document.querySelector("#list tr.clickable");
 if (check(Boolean(azRow), "the account is listed")) {
   await azRow.click();
@@ -928,7 +989,7 @@ const { document: liveDoc, sent: liveSent } = await boot({
     warnings: [liveWarning],
     counts: { critical: 1, warning: 0, info: 0 },
   }),
-});
+}, "create");
 
 const liveName = $(liveDoc, "create-body")
   .querySelector(".field input:not([type])");
@@ -1010,7 +1071,7 @@ const { window: w6, document: doc6, sent: sent6 } = await boot({
       ? { resource_type: "azure-nsg", resource_id: "demo-nsg", problems: [],
           settings: {}, warnings: [], counts: { critical: 0, warning: 0, info: 0 } }
       : { resource_type: "azure-nsg", resources: [] },
-});
+}, "create");
 
 const nsgBody = $(doc6, "create-body");
 const nsgRow = nsgBody.querySelector(".rule");
@@ -1129,7 +1190,7 @@ const { document: ordDoc } = await boot({
   }),
   "/resources/azure-nsg": () => ({ resource_type: "azure-nsg", resources: [] }),
   "/resources/azure-nsg/options": () => ({ options: AZ_NSG_OPTIONS }),
-});
+}, "create");
 
 const ordBody = $(ordDoc, "create-body");
 
@@ -1281,6 +1342,79 @@ check(forced.url.includes("confirm=vpc-1"),
 check($(delDoc, "modal").classList.contains("hidden"),
       "and the dialog closes when it finishes, even with nothing to stream");
 
+
+
+// ------------------------------------------------------------- the dashboard
+
+/* Counting what is in an account and judging it are different questions with
+ * very different costs. One list call per type answers in a second; scanning
+ * is seven AWS calls per bucket one after another, which this repository
+ * already records as visibly slow past a demo account. So the landing page
+ * counts, and posture is a button.
+ *
+ * What must never happen is the two being confused. A type nobody has scanned
+ * says "not scanned" rather than showing a zero - the same failure the list
+ * had on its first load, where worst_level being null for both "nothing
+ * found" and "nothing looked for" made every row read as clean. */
+
+console.log("\nThe dashboard");
+console.log("-------------");
+
+const { document: dashDoc, sent: dashSent } = await boot({
+  // One type with something in it, so "counted but not judged" is reachable.
+  // With every type empty each card would read "none" and the distinction
+  // this whole panel turns on could not be observed.
+  "/resources/security-group": () => ({
+    resource_type: "security-group",
+    resources: [{ id: "sg-1", name: "demo" }, { id: "sg-2", name: "other" }],
+  }),
+  "/activity": () => ({ activity: [
+    { at: "2026-08-15T14:31:17-0400", method: "DELETE",
+      path: "/resources/network/vpc-1", status: 400, outcome: "refused",
+      why: "confirm did not match" },
+  ] }),
+}, "dashboard");
+
+check(!$(dashDoc, "dashboard").classList.contains("hidden"),
+      "the page opens on the dashboard");
+check($(dashDoc, "sidebar").classList.contains("hidden"),
+      "with no resource picker, the question being about the whole account");
+check(dashDoc.body.classList.contains("no-picker"),
+      "and the layout told so, because hiding the sidebar alone left the "
+      + "content in the column that was reserved for it");
+
+const dashCards = [...dashDoc.querySelectorAll(".dash-card")];
+check(dashCards.length === awsTypes.length,
+      "one card per type in the cloud being shown");
+check(dashCards.every((c) => c.querySelector(".dash-state").textContent !== ""),
+      "each saying what is known about it");
+check(dashCards.some((c) => c.querySelector(".dash-state").textContent === "not scanned"),
+      "a type that has resources and no scan says so rather than showing a zero");
+check(!dashSent.some((r) => r.url.includes("with_scan=true")),
+      "and nothing was scanned to draw it, which is what keeps it instant");
+
+// The dashboard is a way in, not a dead end.
+const groupCard = dashCards.find((c) =>
+  c.querySelector(".dash-name").textContent === "Security group");
+groupCard.click();
+await new Promise((r) => setTimeout(r, 80));
+check(!$(dashDoc, "listing").classList.contains("hidden"),
+      "clicking a card opens that type where it can be acted on");
+check($(dashDoc, "dashboard").classList.contains("hidden"),
+      "landing on Audit rather than leaving both on screen");
+
+// Recent activity: the half of this tool's behaviour that leaves no other trace.
+const activityRows = [...dashDoc.querySelectorAll(".activity li")];
+if (check(activityRows.length === 1, "recent activity is listed")) {
+  const row = activityRows[0];
+  check(row.textContent.includes("DELETE /resources/network/vpc-1"),
+        "naming what was asked for");
+  check(row.querySelector(".outcome").textContent === "refused",
+        "and how it ended - a refusal leaves no trace in CloudTrail, because "
+        + "nothing happened");
+  check(row.textContent.includes("confirm did not match"),
+        "and why, where the log says");
+}
 
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");
 process.exit(failures ? 1 : 0);

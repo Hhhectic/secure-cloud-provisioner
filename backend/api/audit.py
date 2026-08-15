@@ -58,6 +58,46 @@ def record(**fields):
         pass
 
 
+def read_recent(limit=25):
+    """The most recent entries, newest first. Never raises.
+
+    Written since the first commit and never readable, which made the log a
+    file somebody had to know about and go and find. The dashboard shows it
+    because the refusals are the half of this tool's behaviour that leaves no
+    trace anywhere else - a cascade that demanded a typed ID and did not get
+    one is invisible in CloudTrail, because nothing happened.
+
+    Reads only what it needs from the end of the file rather than parsing all
+    of it: this grows for as long as the tool is used and the page wants the
+    last twenty lines.
+
+    A malformed line is skipped rather than fatal. The writer never raises,
+    so a line truncated by a full disk is a thing that can exist, and one bad
+    line should not take the panel with it.
+    """
+    where = path()
+    try:
+        if not where.exists():
+            return []
+        with where.open("r", encoding="utf-8") as handle:
+            lines = handle.readlines()[-limit * 2:]
+    except OSError:
+        return []
+
+    found = []
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            found.append(json.loads(line))
+        except ValueError:
+            continue
+        if len(found) >= limit:
+            break
+    return found
+
+
 def describe(status):
     """A word for what happened, from the status code alone.
 

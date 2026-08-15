@@ -31,6 +31,16 @@
 
 <div class="drift" aria-hidden="true"><i></i><i></i><i></i></div>
 
+<!-- Three things a person comes here to do, rather than fourteen nouns.
+     "Resources" was one list mixing the form you fill in to make something
+     with the list you read to find out what is wrong with it, and those are
+     different jobs done at different times. -->
+<nav id="tabs" class="tabs" role="tablist">
+  <button class="tab" data-tab="dashboard" role="tab">Dashboard</button>
+  <button class="tab" data-tab="create" role="tab">Create</button>
+  <button class="tab" data-tab="audit" role="tab">Audit</button>
+</nav>
+
 <div class="context">
   <label id="scope-box"></label>
   <p id="scope-note"></p>
@@ -38,12 +48,23 @@
 
 <main>
   <aside id="sidebar">
-    <div class="side-head">Resources</div>
+    <div class="side-head" id="side-head">Resources</div>
     <nav id="types"></nav>
     <div id="side-foot"></div>
   </aside>
 
   <div class="stack">
+    <section id="dashboard" class="hidden">
+      <div class="card-head">
+        <h2>Dashboard</h2>
+        <span class="controls">
+          <button id="scan-all" class="quiet">Scan everything</button>
+          <button id="dash-refresh" class="quiet">Refresh</button>
+        </span>
+      </div>
+      <div id="dash-body"></div>
+    </section>
+
     <section id="listing">
       <div class="card-head">
         <h2 id="listing-title">Resources</h2>
