@@ -472,13 +472,51 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
    nothing found is an answer, and a row that omits the level somebody was
    looking for cannot be told from one that never ran. */
 
-.tallies { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 4px; }
+.tallies { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 14px; }
 
+/* A tally is the control for its own findings.
+
+   Showing every finding at once is a wall and a wall gets skimmed, so each
+   level is a drawer and its count is the handle. The count is the honest
+   place for it: the thing somebody wants to open is "the two criticals", and
+   that is the words already on the button.
+
+   Criticals are open on arrival and the rest are shut. The rule this page has
+   followed everywhere else is that a finding is made quieter and never
+   absent, and a finding nobody thought to expand has been made absent
+   whatever the count says - so the level that cannot afford that is the one
+   that does not start folded. */
 .tally {
   display: flex; align-items: baseline; gap: 7px;
   padding: 8px 12px; border-radius: 4px; min-width: 92px;
   border: 1px solid var(--line-faint); background: #fff;
+  font: inherit; text-align: left; cursor: pointer;
+  position: relative; padding-right: 26px;
 }
+
+/* The chevron, so a drawer reads as a drawer before it is clicked. */
+button.tally::after {
+  content: "▸"; position: absolute; right: 11px; top: 50%;
+  margin-top: -6px; font-size: 9px; color: var(--muted-3);
+  transition: transform .12s ease;
+}
+button.tally.open::after { transform: rotate(90deg); }
+
+button.tally:hover:not(:disabled) { border-color: var(--line); }
+button.tally.open { border-color: var(--line); }
+button.tally:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Nothing behind it, so it is not a control. A button that answers a click by
+   doing nothing teaches people that clicks here do nothing. */
+button.tally:disabled { cursor: default; }
+button.tally:disabled::after { display: none; }
+
+/* Accepted is a count and not a drawer: those findings are still listed under
+   their own severity, so a fourth drawer would list them twice. */
+.tally.accepted { cursor: default; padding-right: 12px; }
+
+.group { display: none; }
+.group.open { display: block; }
 .tally .n { font: 600 19px/1 var(--sans); letter-spacing: -.01em; }
 .tally .what {
   font: 600 9.5px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase;
@@ -523,7 +561,7 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
 }
 
 .finding .level {
-  display: inline-flex; align-items: center; gap: 6px;
+  display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
   font: 600 10.5px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase;
   padding: 5px 9px; border-radius: 3px;
   color: var(--muted-2); background: var(--line-faint);
@@ -558,6 +596,9 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
   margin-top: 10px; max-width: 62ch; text-wrap: pretty; color: var(--ink-soft);
 }
 .finding.critical > div:not(.level):not(.ack):not(.cite) { color: var(--ink); }
+/* A closed finding is one row high, so its ground and bar have no reason to
+   take the padding an open one needs. */
+.finding:not([open]) { padding: 10px 16px; }
 .finding p { margin: 11px 0 0; max-width: 60ch; text-wrap: pretty; }
 
 /* Accepted, not hidden. It keeps its bar and its badge - it is still a

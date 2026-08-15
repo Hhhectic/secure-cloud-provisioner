@@ -532,23 +532,11 @@ async function showDetail(id) {
   // first line of its contents.
   $("detail-id").textContent = `${known.id_label}: ${id}`;
 
-  const counts = data.counts;
-  // The acknowledged tally sits beside the severities, never subtracted from
-  // them. A reader who cannot see that two of these criticals were already
-  // decided on will either act on them again or stop reading the list.
-  //
-  // Tallies rather than a sentence. "2 critical, 0 warning, 3 informational"
-  // reads at one weight whichever number is which, so the number that matters
-  // is found by parsing rather than by looking - and a zero took exactly as
-  // much of the eye as a two.
-  body.append(countTally(counts));
-
   body.append(text("h3", "Findings"));
   if (!data.warnings.length) {
     body.append(text("p", "Nothing found.", "muted"));
-  }
-  for (const w of data.warnings) {
-    body.append(renderFinding(w, id));
+  } else {
+    renderFindingGroups(body, data.warnings, data.counts, id);
   }
 
   body.append(text("h3", "What it is"));
@@ -562,32 +550,83 @@ async function showDetail(id) {
    the level you were looking for cannot be told from one that never checked -
    which is the failure this project names as the only way the tool can
    actively mislead. */
-function countTally(counts) {
-  const row = document.createElement("div");
-  row.className = "tallies";
+function renderFindingGroups(body, warnings, counts, resourceId) {
+  const LEVELS = ["critical", "warning", "info"];
+  const named = { critical: "critical", warning: "warning", info: "informational" };
 
-  for (const level of ["critical", "warning", "info"]) {
-    const n = counts[level] || 0;
-    const tally = document.createElement("div");
-    tally.className = `tally ${level}` + (n ? "" : " empty");
-    tally.append(text("span", String(n), "n"));
-    tally.append(text("span",
-      level === "info" ? "informational" : level, "what"));
-    row.append(tally);
+  const grouped = { critical: [], warning: [], info: [] };
+  for (const w of warnings) (grouped[w.level] || grouped.info).push(w);
+
+  const tallies = document.createElement("div");
+  tallies.className = "tallies";
+  const panels = document.createElement("div");
+
+  for (const level of LEVELS) {
+    const found = grouped[level];
+
+    const panel = document.createElement("div");
+    panel.className = "group";
+    panel.id = `findings-${level}`;
+    for (const w of found) panel.append(renderFinding(w, resourceId));
+
+    const tally = document.createElement("button");
+    tally.type = "button";
+    tally.className = `tally ${level}` + (found.length ? "" : " empty");
+    tally.setAttribute("aria-controls", panel.id);
+    tally.append(text("span", String(counts[level] || 0), "n"));
+    tally.append(text("span", named[level], "what"));
+
+    // Criticals are open on arrival. Every other level starts shut, which is
+    // what makes the criticals findable rather than the fourth thing down a
+    // wall - but the most urgent thing this tool can say is never behind a
+    // click. A finding is made quieter and never absent, and one nobody
+    // expanded has been made absent whatever the counts say.
+    const show = (open) => {
+      panel.classList.toggle("open", open);
+      tally.classList.toggle("open", open);
+      tally.setAttribute("aria-expanded", String(open));
+    };
+    show(level === "critical" && found.length > 0);
+
+    // An empty level is not a button. There is nothing behind it, and a
+    // control that responds to a click by doing nothing teaches people that
+    // clicks here do nothing.
+    if (found.length) {
+      tally.onclick = () => show(!panel.classList.contains("open"));
+    } else {
+      tally.disabled = true;
+      tally.setAttribute("aria-expanded", "false");
+    }
+
+    tallies.append(tally);
+    panels.append(panel);
   }
 
+  // Accepted is a count, not a group, and so is not a button.
+  //
+  // An acknowledged finding keeps its level and its place in the list, so the
+  // three criticals above may include two that somebody has already decided
+  // on. Making this a fourth drawer would mean either listing those findings
+  // twice or subtracting them from their own severity - and subtracting them
+  // is exactly the "suppression that empties the screen" this project refuses
+  // everywhere else.
   if (counts.acknowledged) {
-    const ack = document.createElement("div");
-    ack.className = "tally accepted";
-    ack.append(text("span", String(counts.acknowledged), "n"));
-    ack.append(text("span", "accepted", "what"));
-    row.append(ack);
+    const accepted = document.createElement("div");
+    accepted.className = "tally accepted";
+    accepted.title =
+      "Findings somebody has accepted. They are still counted at their own " +
+      "severity above, and still listed there.";
+    accepted.append(text("span", String(counts.acknowledged), "n"));
+    accepted.append(text("span", "accepted", "what"));
+    tallies.append(accepted);
   }
 
-  return row;
+  body.append(tallies, panels);
 }
 
 function renderFinding(w, resourceId) {
+  // Not folded itself. Its group is the fold, and folding a finding inside a
+  // folded group means two clicks to read one sentence.
   const box = document.createElement("div");
   box.className = `finding ${w.level}`;
   if (w.acknowledged) box.classList.add("acknowledged");

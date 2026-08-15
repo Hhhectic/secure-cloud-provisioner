@@ -660,6 +660,46 @@ const emptyWarning = detail.querySelector(".tally.warning");
 check(Boolean(emptyWarning) && emptyWarning.classList.contains("empty"),
       "a level with nothing in it is drawn as the non-event it is, not dropped");
 
+/* Each level is a drawer and its count is the handle. Showing every finding
+   at once is a wall and a wall gets skimmed - but the rule this page follows
+   everywhere else is that a finding is made quieter and never absent, and one
+   nobody thought to expand has been made absent whatever the count says. So
+   criticals arrive open and nothing else does. */
+check(detail.querySelector("#findings-critical").classList.contains("open"),
+      "the criticals are open on arrival, never behind a click");
+check(detail.querySelector(".tally.critical").getAttribute("aria-expanded") === "true",
+      "and say so, for anything not reading the colours");
+check(!detail.querySelector("#findings-info").classList.contains("open"),
+      "the quieter levels start folded, which is what makes criticals findable");
+
+check(emptyWarning.disabled,
+      "a level with nothing behind it is not a button that does nothing");
+
+/* Accepted counts findings that are still listed under their own severity, so
+   a fourth drawer would either list them twice or subtract them from the
+   level they belong to - and subtracting is the suppression this refuses. */
+check(detail.querySelector(".tally.accepted").tagName === "DIV",
+      "accepted is a count rather than a drawer, its findings being listed already");
+
+// The interaction itself, which is the whole feature. Driven on critical
+// because it is the level this stub actually has a finding at - clicking one
+// of the empty ones would pass for the wrong reason, since a disabled button
+// also leaves its panel shut.
+const critTally = detail.querySelector(".tally.critical");
+const critPanel = detail.querySelector("#findings-critical");
+critTally.click();
+check(!critPanel.classList.contains("open"), "clicking a count closes that level");
+check(critTally.getAttribute("aria-expanded") === "false",
+      "and the handle says it is shut");
+critTally.click();
+check(critPanel.classList.contains("open"), "clicking it again opens it");
+
+// Every finding is rendered whichever drawer is shut, so a closed level is
+// hidden rather than absent - which is what lets find-in-page and any future
+// "expand all" reach it, and what keeps the counts honest.
+check(detail.querySelectorAll(".finding").length === 1,
+      "the findings exist in the page regardless of which drawer is open");
+
 check(!detail.querySelector("details.ack-help"),
       "and offers no form to accept it again, being already accepted");
 
