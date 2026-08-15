@@ -561,6 +561,9 @@ function renderFindingGroups(body, warnings, counts, resourceId) {
   tallies.className = "tallies";
   const panels = document.createElement("div");
 
+  // Every level's setter, so opening one can shut the rest.
+  const openers = [];
+
   for (const level of LEVELS) {
     const found = grouped[level];
 
@@ -592,12 +595,22 @@ function renderFindingGroups(body, warnings, counts, resourceId) {
     // control that responds to a click by doing nothing teaches people that
     // clicks here do nothing.
     if (found.length) {
-      tally.onclick = () => show(!panel.classList.contains("open"));
+      tally.onclick = () => {
+        // One level at a time. Two open drawers put a critical and a note on
+        // screen at the same weight and leave the reader to work out where
+        // one list ended, which is the wall this was built to remove - and
+        // the counts stay visible whichever is open, so nothing is lost by
+        // showing one of them.
+        const opening = !panel.classList.contains("open");
+        for (const other of openers) other(false);
+        show(opening);
+      };
     } else {
       tally.disabled = true;
       tally.setAttribute("aria-expanded", "false");
     }
 
+    openers.push(show);
     tallies.append(tally);
     panels.append(panel);
   }

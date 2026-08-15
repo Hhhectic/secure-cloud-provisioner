@@ -700,6 +700,55 @@ check(critPanel.classList.contains("open"), "clicking it again opens it");
 check(detail.querySelectorAll(".finding").length === 1,
       "the findings exist in the page regardless of which drawer is open");
 
+/* One level at a time. Two open drawers put a critical and a note on screen
+   at the same weight and leave the reader to find where one list ended, which
+   is the wall the drawers were added to remove. The counts stay visible
+   whichever is open, so nothing is lost by showing one. */
+
+console.log("\nOne severity open at a time");
+console.log("---------------------------");
+
+const twoLevels = [
+  { level: "critical", message: "Port 22 is open to the entire internet.",
+    rule_id: "sg-1:22", resource_id: "sg-1", rule: {}, fix: null,
+    acknowledged: null },
+  { level: "warning", message: "Versioning is off.",
+    rule_id: "sg-1:versioning", resource_id: "sg-1", rule: {}, fix: null,
+    acknowledged: null },
+];
+
+const { document: accDoc } = await boot({
+  "/resources/security-group/sg-1": () => ({
+    resource_type: "security-group", resource_id: "sg-1", settings: {},
+    warnings: twoLevels,
+    counts: { critical: 1, warning: 1, info: 0, acknowledged: 0 },
+  }),
+  "/resources/security-group": () => ({
+    resource_type: "security-group",
+    resources: [{ id: "sg-1", name: "demo" }],
+  }),
+});
+
+await accDoc.querySelector("#list tr.clickable").click();
+await new Promise((r) => setTimeout(r, 60));
+
+const accBody = $(accDoc, "detail-body");
+const openLevels = () => [...accBody.querySelectorAll(".group.open")]
+  .map((g) => g.id);
+
+check(openLevels().join() === "findings-critical",
+      "critical is the one open on arrival");
+
+accBody.querySelector(".tally.warning").click();
+check(openLevels().join() === "findings-warning",
+      "opening warning closes critical rather than adding to it");
+check(accBody.querySelector(".tally.critical").getAttribute("aria-expanded") === "false",
+      "and the critical handle says so, not just its panel");
+
+accBody.querySelector(".tally.warning").click();
+check(openLevels().length === 0,
+      "clicking the open one closes it, so a compact overview is reachable");
+
 check(!detail.querySelector("details.ack-help"),
       "and offers no form to accept it again, being already accepted");
 
