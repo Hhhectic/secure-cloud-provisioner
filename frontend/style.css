@@ -12,10 +12,27 @@
 
 :root {
   --ink: #17181a;
-  --ink-soft: #3d4145;
-  --muted: #585b5f;
-  --muted-2: #6a6c66;
-  --muted-3: #82847e;
+
+  /* Every one of these was a different grey, and they are all ink now.
+     The names are kept because the *roles* are real - a caption is still
+     secondary to the thing it captions - but the roles are carried by size,
+     weight, case and spacing rather than by fading the words out.
+
+     This is the palette rule this file opens with, applied honestly. Colour
+     is supposed to mean severity here, and five greys competing underneath a
+     critical finding were a second, quieter signal saying "this matters less"
+     about text that had nothing to do with severity. #82847e on white is also
+     3.5:1, which is below the 4.5:1 that ordinary text is meant to clear -
+     so a third of this page's words were failing contrast to communicate a
+     hierarchy that typography was already communicating.
+
+     One exception, further down: input placeholders stay grey. A black
+     placeholder is indistinguishable from a value somebody typed, which
+     turns an empty form into one that looks filled in. */
+  --ink-soft: #17181a;
+  --muted: #17181a;
+  --muted-2: #17181a;
+  --muted-3: #17181a;
   --page: #fcfcfb;
 
   --line: #e2e0da;
@@ -25,7 +42,11 @@
 
   --critical: #b4251d;
   --warning: #92670a;
-  --info: #5b6672;
+  /* Ink, like everything else. This was a slate grey, which was the one
+     "severity colour" that did not signal a problem - because informational
+     is not one. The word INFO and the round marker say which level it is;
+     nothing needs to be faded to say it matters less. */
+  --info: #17181a;
 
   --sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -62,7 +83,7 @@ body {
 }
 
 a { color: var(--ink); }
-a:hover { color: #4a4d51; }
+a:hover { color: var(--accent-deep); }
 
 @keyframes scpIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 @keyframes scpFade { from { opacity: 0; } to { opacity: 1; } }
@@ -183,7 +204,7 @@ body.cloud-azure .toggle .opt[data-cloud="azure"] .dot { background: #2c72c7; }
 .context > label {
   display: inline-flex; align-items: center; gap: 10px;
   font: 11px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase;
-  color: #4f524c;
+  color: var(--ink);
 }
 .context select {
   font: 13px/1 var(--mono); color: var(--ink); padding: 7px 9px;
@@ -229,7 +250,7 @@ body.no-picker main { grid-template-columns: minmax(0, 1fr); }
 }
 .side-head, .side-foot-head {
   font: 10.5px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase;
-  color: #4f524c; padding: 0 0 14px;
+  color: var(--ink); padding: 0 0 14px;
 }
 #types { display: flex; flex-direction: column; gap: 1px; }
 #types button {
@@ -427,7 +448,7 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
 }
 
 .note {
-  color: #71747a; font-size: 12px; line-height: 1.5;
+  color: var(--ink); font-size: 12px; line-height: 1.5;
   margin: 0 0 18px 190px; max-width: 46ch; text-wrap: pretty;
 }
 @media (max-width: 700px) { .note { margin-left: 0; } }
@@ -629,9 +650,27 @@ button.tally:disabled::after { display: none; }
    critical finding and the counts still include it - but the ground goes
    neutral and the whole card recedes, so a list of accepted findings does not
    read as a list of live ones. */
-.finding.acknowledged { opacity: .55; background: #fff; }
-.finding.acknowledged .level { filter: grayscale(.35); }
-.cite { font: 11.5px var(--mono); color: #7a7c76; }
+/* Accepted, and still fully legible.
+
+   This was `opacity: .55` on the whole card, which recedes exactly as
+   intended and does it by turning every word grey - including the reason
+   somebody wrote for accepting it, which is the part a reviewer has come to
+   read. Fading the argument is the wrong half to fade.
+
+   The state moves onto the card instead of into the ink: the ground goes
+   neutral, the severity bar loses its colour, and the badge says
+   "— ACKNOWLEDGED" as it always did. A list of accepted findings still does
+   not read as a list of live ones, and the text is at full contrast. */
+.finding.acknowledged {
+  background: #fff;
+  border-color: var(--line-faint);
+  border-left-color: var(--line);
+}
+.finding.acknowledged .level {
+  color: var(--ink); background: var(--line-faint);
+}
+.finding.acknowledged .level::before { opacity: .45; }
+.cite { font: 11.5px var(--mono); color: var(--ink); }
 /* The finding's own children get their spacing from the rule above, which
    excludes this one so it can sit closer to the message it cites - but not
    touching it, which is what excluding it entirely produced. */
@@ -654,7 +693,7 @@ button.tally:disabled::after { display: none; }
 
 .warn {
   margin: 13px 0 0; padding: 12px 14px; background: #faf9f6;
-  color: #4d5054; font-size: 12.5px; max-width: 62ch; border-radius: 4px;
+  color: var(--ink); font-size: 12.5px; max-width: 62ch; border-radius: 4px;
   border-left: 2px solid var(--accent);
 }
 
@@ -780,7 +819,7 @@ button.tally:disabled::after { display: none; }
 .delete-progress .steps li.failed::before { content: "×"; color: var(--critical); }
 
 .delete-progress .steps li.current {
-  color: #33363a; font-weight: 500;
+  color: var(--ink); font-weight: 500;
 }
 .delete-progress .steps li.current::before {
   content: "→"; color: var(--accent-deep);
@@ -797,7 +836,7 @@ button.tally:disabled::after { display: none; }
 .hidden { display: none !important; }
 
 .mono-block {
-  margin: 0; font: 12.5px/1.6 var(--mono); color: #4a4d51;
+  margin: 0; font: 12.5px/1.6 var(--mono); color: var(--ink);
   background: #faf9f6; border-radius: 4px; padding: 14px 16px;
   overflow-x: auto; white-space: pre-wrap; word-break: break-word;
   max-height: 300px;
@@ -890,3 +929,15 @@ button.tally:disabled::after { display: none; }
 .what-it-is[open] > summary::before { transform: rotate(90deg); }
 .what-it-is > summary:hover { color: var(--ink-soft); }
 .what-it-is .mono-block { margin-top: 8px; }
+
+/* ------------------------------------------------------------- placeholders */
+
+/* The one exception to black text, and it is not a hierarchy exception.
+   A placeholder is not content: it is a description of what should go in an
+   empty box. At full ink it is indistinguishable from a value somebody typed,
+   so an untouched form reads as a filled-in one - and this form's fields
+   decide what gets built in a real account.
+
+   Left as its own rule rather than inherited, because the browser default
+   varies and one of them is nearly invisible. */
+::placeholder { color: #8b8d87; opacity: 1; }
