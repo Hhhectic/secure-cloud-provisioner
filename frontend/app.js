@@ -911,10 +911,24 @@ async function buildCreateForm() {
       const add = document.createElement("button");
       add.type = "button";
       add.textContent = "add rule";
-      add.onclick = () => rules.append(makeRow());
+      add.onclick = () => {
+        rules.append(makeRow());
+        if (kind === "azure-rules") refreshPrecedence(rules);
+      };
       wrap.append(add);
       box.append(wrap, rules);
+
+      // The hint was being dropped for this field. Every other kind uses it
+      // as a placeholder inside its own input, and a list of rows has no such
+      // box - so "in order — the first rule that matches a packet decides"
+      // was written down, never rendered, and the arrows that act on it had
+      // to be guessed at. Somebody did guess, and asked what they were.
+      if (kind === "azure-rules" && hint) {
+        box.append(text("p", hint, "note"));
+      }
+
       rules.append(makeRow());
+      if (kind === "azure-rules") refreshPrecedence(rules);
       inputs[name] = { kind, el: rules };
       continue;
     }
@@ -1067,6 +1081,30 @@ function ruleRow() {
   return row;
 }
 
+/* Keeps the reorder controls honest about what they can do.
+
+   With one rule there is no precedence to arrange, so the whole control is
+   hidden rather than shown doing nothing - a pair of arrows that never move
+   anything is what made somebody ask what they were for. With several, the
+   first row cannot go up and the last cannot go down, and those two are
+   disabled rather than silently ignoring the click.
+
+   Called after every add, remove and move, because all three change which
+   answers are true. */
+function refreshPrecedence(list) {
+  if (!list) return;
+  const rows = [...list.children];
+
+  for (const [at, row] of rows.entries()) {
+    const order = row.querySelector(".rule-actions .labelled");
+    if (order) order.classList.toggle("hidden", rows.length < 2);
+
+    const [up, down] = row.querySelectorAll(".rule-actions button.move");
+    if (up) up.disabled = at === 0;
+    if (down) down.disabled = at === rows.length - 1;
+  }
+}
+
 /* One row of an Azure firewall rule.
 
    Separate from ruleRow() rather than a flag on it, because the two are not
@@ -1110,28 +1148,50 @@ function azureRuleRow(index) {
   // retyping the row. Buttons rather than drag: this page has no drag
   // anywhere else, and a control that only works with a mouse is worse than
   // one that works with a keyboard too.
+  //
+  // Captioned, because two bare arrows in a form full of firewall settings do
+  // not say what they move or why it matters - somebody looking at this asked
+  // what they were, which is the whole answer to whether a title attribute is
+  // enough. It is not: it needs a hover to appear and never appears at all on
+  // a touch screen.
   const up = document.createElement("button");
   up.type = "button";
+  up.className = "move";
   up.textContent = "↑";
-  up.title = "Higher precedence — this rule is considered earlier";
+  up.title = "Move earlier — this rule is checked before the one above it";
   up.onclick = () => {
     const prev = row.previousElementSibling;
     if (prev) row.parentNode.insertBefore(row, prev);
+    refreshPrecedence(row.parentNode);
   };
 
   const down = document.createElement("button");
   down.type = "button";
+  down.className = "move";
   down.textContent = "↓";
-  down.title = "Lower precedence — this rule is considered later";
+  down.title = "Move later — this rule is checked after the one below it";
   down.onclick = () => {
     const next = row.nextElementSibling;
     if (next) row.parentNode.insertBefore(next, row);
+    refreshPrecedence(row.parentNode);
   };
 
   const rm = document.createElement("button");
   rm.type = "button";
   rm.textContent = "remove";
-  rm.onclick = () => row.remove();
+  rm.onclick = () => {
+    const list = row.parentNode;
+    row.remove();
+    refreshPrecedence(list);
+  };
+
+  // One grid cell, not three. The row's grid has four columns and the AWS
+  // row puts six things in it; appending nine made these wrap onto their own
+  // line and stretch to a column's full width, so the up arrow rendered as a
+  // large empty box with a tick in the middle of it.
+  const actions = document.createElement("div");
+  actions.className = "rule-actions";
+  actions.append(labelled("order", up, down), rm);
 
   row.append(
     labelled("name", name),
@@ -1140,7 +1200,7 @@ function azureRuleRow(index) {
     labelled("protocol", protocol),
     labelled("port", port),
     labelled("source", source),
-    up, down, rm,
+    actions,
   );
 
   row.value = () => {

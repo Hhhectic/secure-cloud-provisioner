@@ -433,6 +433,21 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
    sitting outside the border it belongs inside. */
 .rule > * { min-width: 0; }
 .rule select, .rule input { width: 100%; }
+
+/* The three buttons as one grid item.
+   An Azure rule row carries six fields where an AWS one carries three, so
+   appending the buttons individually put them in whatever columns were left -
+   the up arrow landing in a 1fr column and rendering as a wide empty box with
+   an arrow lost in the middle of it. Grouped, they take one cell and size to
+   their own content. */
+.rule-actions { display: flex; gap: 8px; align-items: end; }
+.rule-actions .labelled { flex: 0 0 auto; }
+.rule-actions .labelled > span:last-child { gap: 4px; }
+.rule-actions button.move {
+  padding: 7px 9px; font-size: 13px; line-height: 1.15; min-width: 30px;
+}
+.rule-actions button[disabled] { opacity: .3; cursor: default; }
+.rule-actions button[disabled]:hover { background: inherit; }
 .labelled { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .labelled > span:last-child { display: flex; min-width: 0; }
 .labelled small {

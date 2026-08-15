@@ -1004,6 +1004,82 @@ if (check(Boolean(nsgPost), "pressing Create sends the firewall")) {
         "no rule names a priority, leaving az/nsg to number them in order");
 }
 
+/* The reorder controls, which somebody looked at and asked what they were.
+ *
+ * Two bare arrows in a form full of firewall settings say nothing about what
+ * they move or why it matters, and a title attribute needs a hover to appear
+ * and never appears at all on a touch screen. They are captioned now, grouped
+ * into one grid cell so the up arrow stops rendering as a wide empty box, and
+ * hidden entirely while there is only one rule - because precedence among one
+ * rule is not a thing that exists. */
+
+console.log("\nThe precedence controls on a firewall rule");
+console.log("------------------------------------------");
+
+const { document: ordDoc } = await boot({
+  "/resources": () => ({
+    resources: [{ key: "azure-nsg", label: "Azure network security group",
+                  short_label: "Network security group", provider: "azure",
+                  id_label: "Group name", read_only: false,
+                  only_ours_label: "only ones this tool made" }],
+  }),
+  "/resources/azure-nsg": () => ({ resource_type: "azure-nsg", resources: [] }),
+  "/resources/azure-nsg/options": () => ({ options: AZ_NSG_OPTIONS }),
+});
+
+const ordBody = $(ordDoc, "create-body");
+
+check(Boolean([...ordBody.querySelectorAll("p.note")]
+        .find((p) => /first rule that matches/.test(p.textContent))),
+      "the field explains that order decides, which was written and never shown");
+
+const ordFirstRow = ordBody.querySelector(".rule");
+check(Boolean(ordFirstRow.querySelector(".rule-actions")),
+      "the buttons are one grid cell, not three loose items in a four-column grid");
+check(Boolean([...ordFirstRow.querySelectorAll(".rule-actions small")]
+        .find((s) => s.textContent === "order")),
+      "and the arrows are captioned, rather than left to be guessed at");
+
+const ordSoleOrder = ordFirstRow.querySelector(".rule-actions .labelled");
+check(ordSoleOrder.classList.contains("hidden"),
+      "with one rule there is no order to arrange, so it is not offered");
+
+[...ordBody.querySelectorAll("button")]
+  .find((b) => b.textContent === "add rule").click();
+await new Promise((r) => setTimeout(r, 40));
+
+const ordRows = [...ordBody.querySelectorAll(".rule")];
+check(ordRows.length === 2, "adding a second rule");
+check(!ordRows[0].querySelector(".rule-actions .labelled").classList.contains("hidden"),
+      "makes the order control appear, because now there is an order");
+
+const ordUpFirst = ordRows[0].querySelectorAll(".rule-actions button.move")[0];
+const ordDownFirst = ordRows[0].querySelectorAll(".rule-actions button.move")[1];
+const ordUpLast = ordRows[1].querySelectorAll(".rule-actions button.move")[0];
+const ordDownLast = ordRows[1].querySelectorAll(".rule-actions button.move")[1];
+
+check(ordUpFirst.disabled, "the first rule cannot move earlier");
+check(!ordDownFirst.disabled, "but can move later");
+check(!ordUpLast.disabled, "the last rule can move earlier");
+check(ordDownLast.disabled, "and cannot move later, rather than ignoring the click");
+
+// Name them so the swap is observable.
+ordRows[0].querySelectorAll("input")[0].value = "first";
+ordRows[1].querySelectorAll("input")[0].value = "second";
+
+ordDownFirst.click();
+await new Promise((r) => setTimeout(r, 40));
+
+const ordAfter = [...ordBody.querySelectorAll(".rule")]
+  .map((r) => r.querySelectorAll("input")[0].value);
+check(ordAfter[0] === "second" && ordAfter[1] === "first",
+      "moving a rule later really swaps it, which is what changes precedence");
+
+const ordMovedUp = [...ordBody.querySelectorAll(".rule")][0]
+  .querySelectorAll(".rule-actions button.move")[0];
+check(ordMovedUp.disabled,
+      "and the disabled state follows the rows rather than staying where it was");
+
 
 // -------------------------------------------- deleting, with progress shown
 
