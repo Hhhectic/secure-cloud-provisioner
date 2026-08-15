@@ -767,11 +767,20 @@ async function loadList() {
 
   const scan = state.scans[state.type];
 
+  /* A Name column only where a name is not the id.
+
+     For a bucket, a storage account and every Azure type the id *is* the
+     name, so the table printed "richard-huo-resume-2026" twice across two
+     headed columns and spent a fifth of the width saying the same thing
+     again. Security groups and machines have both and keep both. */
+  const named = body.resources.some((r) => r.name && r.name !== r.id);
+
   const table = document.createElement("table");
   const head = document.createElement("tr");
-  for (const h of [known.id_label, "Name", "Worst", "Findings", ""]) {
-    head.append(text("th", h));
-  }
+  const columns = named
+    ? [known.id_label, "Name", "Worst", "Findings", ""]
+    : [known.id_label, "Worst", "Findings", ""];
+  for (const h of columns) head.append(text("th", h));
   table.append(head);
 
   for (const r of body.resources) {
@@ -780,7 +789,7 @@ async function loadList() {
     tr.onclick = () => showDetail(r.id);
 
     tr.append(text("td", r.id));
-    tr.append(text("td", r.name || ""));
+    if (named) tr.append(text("td", r.name || ""));
 
     // Not scanned is not clean, and that has not changed by moving where the
     // scan is started. counts is the signal, because worst_level is null for
@@ -898,8 +907,19 @@ async function showDetail(id) {
     renderFindingGroups(body, data.warnings, data.counts, id);
   }
 
-  body.append(text("h3", "What it is"));
-  body.append(text("pre", JSON.stringify(data.settings, null, 2), "mono-block"));
+  /* The raw settings, folded away.
+
+     This is what the resource *is*, as opposed to what is wrong with it, and
+     it is worth keeping - the scanner's verdict is only checkable against the
+     thing it judged. But a bucket's settings run to forty lines of JSON, so
+     open by default it was the largest thing on the panel and the findings
+     above it scrolled away beneath it. Findings first; the evidence is one
+     click under them. */
+  const what = document.createElement("details");
+  what.className = "what-it-is";
+  what.append(text("summary", "What it is"));
+  what.append(text("pre", JSON.stringify(data.settings, null, 2), "mono-block"));
+  body.append(what);
 }
 
 /* The severity counts, as tallies rather than a sentence.
@@ -1452,7 +1472,11 @@ async function buildCreateForm() {
   check.textContent = "Check first (creates nothing)";
   check.onclick = () => runLiveCheck(true);
 
+  // The one that builds something is the one that looks like it does. Both
+  // were the same white outlined button, so the pair read as two equal
+  // options and the destructive-by-omission half of that pair is Create.
   const make = document.createElement("button");
+  make.className = "primary";
   make.textContent = "Create";
   make.onclick = () => submitSpec(inputs);
 

@@ -37,9 +37,8 @@
   --accent-hover: #b7681a;
   --tint: #fdf6ee;
   --row-hover: #faf8f4;
-  --blob-1: rgba(217, 130, 43, .26);
-  --blob-2: rgba(226, 163, 80, .22);
-  --blob-3: rgba(184, 96, 26, .14);
+  /* The single tint under the header. Faint on purpose: see .drift. */
+  --wash: rgba(217, 130, 43, .10);
 }
 
 body.cloud-azure {
@@ -48,9 +47,7 @@ body.cloud-azure {
   --accent-hover: #1f5aa6;
   --tint: #f2f7fd;
   --row-hover: #f7fafe;
-  --blob-1: rgba(44, 114, 199, .24);
-  --blob-2: rgba(88, 151, 222, .20);
-  --blob-3: rgba(31, 90, 166, .13);
+  --wash: rgba(44, 114, 199, .09);
 }
 
 * { box-sizing: border-box; }
@@ -69,24 +66,9 @@ a:hover { color: #4a4d51; }
 
 @keyframes scpIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 @keyframes scpFade { from { opacity: 0; } to { opacity: 1; } }
-@keyframes driftA {
-  0%   { transform: translate3d(-4%, -6%, 0) scale(1); }
-  50%  { transform: translate3d(10%, 8%, 0) scale(1.18); }
-  100% { transform: translate3d(-4%, -6%, 0) scale(1); }
-}
-@keyframes driftB {
-  0%   { transform: translate3d(6%, 4%, 0) scale(1.1); }
-  50%  { transform: translate3d(-8%, -6%, 0) scale(.92); }
-  100% { transform: translate3d(6%, 4%, 0) scale(1.1); }
-}
-@keyframes driftC {
-  0%   { transform: translate3d(-2%, 8%, 0) scale(.95); }
-  50%  { transform: translate3d(6%, -10%, 0) scale(1.22); }
-  100% { transform: translate3d(-2%, 8%, 0) scale(.95); }
-}
-
-/* Anyone who has asked not to be moved is not moved. The drift is decorative
-   and the entry animations are not load-bearing, so both simply stop. */
+/* Anyone who has asked not to be moved is not moved. The panel entry
+   animations are not load-bearing, so they simply stop. The three drift
+   keyframes that used to be exempted here went with the blobs. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: .001ms !important;
@@ -97,23 +79,25 @@ a:hover { color: #4a4d51; }
 
 /* --------------------------------------------------------------- background */
 
-.drift { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
-.drift i { position: absolute; border-radius: 50%; display: block; }
-.drift i:nth-child(1) {
-  top: -18%; left: -12%; width: 70vw; height: 70vw;
-  background: radial-gradient(circle at 50% 50%, var(--blob-1), transparent 68%);
-  animation: driftA 34s ease-in-out infinite;
+/* One quiet wash under the header, and nothing else.
+
+   This was three radial gradients drifting across the whole viewport on 34,
+   44 and 56 second loops. Seen on its own it is pleasant; seen behind the
+   thing this tool exists to show, it tinted every panel on the page a
+   different shade of orange depending on where the blobs happened to be, and
+   dropped the contrast of a critical finding to make room for decoration.
+
+   Severity is the only thing colour is allowed to mean here. A background
+   that competes with it is spending the one signal the page has. What is
+   left is a fixed tint below the header, going nowhere: enough that the
+   surface is not a flat sheet of white, not enough to be read as meaning
+   anything. */
+.drift {
+  position: fixed; inset: 0 0 auto; height: 420px; z-index: 0;
+  pointer-events: none; overflow: hidden;
+  background: linear-gradient(to bottom, var(--wash), transparent);
 }
-.drift i:nth-child(2) {
-  bottom: -26%; right: -14%; width: 62vw; height: 62vw;
-  background: radial-gradient(circle at 50% 50%, var(--blob-2), transparent 66%);
-  animation: driftB 44s ease-in-out infinite;
-}
-.drift i:nth-child(3) {
-  top: 24%; right: 16%; width: 38vw; height: 38vw;
-  background: radial-gradient(circle at 50% 50%, var(--blob-3), transparent 70%);
-  animation: driftC 56s ease-in-out infinite;
-}
+.drift i { display: none; }
 
 /* ------------------------------------------------------------------- header */
 
@@ -278,13 +262,22 @@ body.no-picker main { grid-template-columns: minmax(0, 1fr); }
 
 /* ------------------------------------------------------------------- cards */
 
+/* Opaque, and no longer frosted.
+
+   These were 84% white with a 14px backdrop blur, which is the right
+   treatment for a panel floating over something worth seeing through to.
+   What was behind them was the drifting wash, so every panel picked up
+   whatever colour happened to be under it and a finding's own tint - the
+   thing that carries its severity - was mixed with a background that meant
+   nothing. With the wash gone the blur costs a repaint per scroll to
+   composite white over white. */
 section {
   animation: scpIn .5s cubic-bezier(.2, .75, .3, 1) both;
-  background: rgba(255, 255, 255, .84);
-  backdrop-filter: blur(14px);
-  border: 1px solid rgba(228, 226, 220, .9);
+  background: #fff;
+  border: 1px solid var(--line-soft);
   border-radius: 6px;
   padding: 26px 28px;
+  box-shadow: 0 1px 2px rgba(23, 24, 26, .03);
 }
 /* The stagger follows the order they appear in, so it reads top to bottom
    rather than lighting up out of sequence. */
@@ -375,11 +368,17 @@ button.quiet {
   font: 11px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase;
   background: transparent; padding: 8px 12px;
 }
+/* One .link, not two. An earlier rule here made it red with a pink underline
+   for a control that undid something; a later one made it accent-coloured for
+   the scan-note. Two rules for one class means whichever loads last wins and
+   the other is a lie in the file. This is the survivor: a control that reads
+   as part of its sentence. */
 button.link {
-  font: 12px/1 var(--sans); color: var(--critical); background: transparent;
-  border: 0; border-bottom: 1px solid #eedcda; border-radius: 0;
-  padding: 2px 0 4px;
+  font: inherit; color: var(--accent-deep); background: transparent;
+  border: 0; border-radius: 0; padding: 0;
+  text-decoration: underline; text-underline-offset: 2px;
 }
+button.link:hover { color: var(--accent-hover); }
 
 /* --------------------------------------------------------------- form bits */
 
@@ -435,10 +434,14 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
 
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding-top: 6px; }
 
+/* The same right edge as the fields above it. A .field is 170 + 20 + 520, so
+   a rule row running to the full width of the card put a ragged step in the
+   one vertical line the form has. */
 .rule {
   display: grid; grid-template-columns: 1fr 1fr 1.35fr auto; gap: 10px;
   align-items: end; background: #faf9f6; border: 1px solid #f0efea;
   border-radius: 4px; padding: 12px; margin-bottom: 10px;
+  max-width: 710px;
 }
 @media (max-width: 700px) { .rule { grid-template-columns: 1fr; } }
 /* A grid item will not shrink below its content's minimum width, and the
@@ -661,16 +664,23 @@ button.tally:disabled::after { display: none; }
    do them to. The sidebar answers "which resource"; this answers "which job",
    and putting both in one list was what made "Resources" a drawer holding a
    form and an audit report side by side. */
+/* The gutter is 40px everywhere: the header, the context strip and main all
+   use it. This bar was at 28 plus a tab's own 18 of padding, so the word
+   "Dashboard" started 6px right of the wordmark above it and 14px right of
+   the sidebar below - close enough to look like a mistake rather than a
+   choice, which is what it was. 24 + 16 puts the first label on the line
+   everything else starts on. */
 .tabs {
-  display: flex; gap: 2px; max-width: 1180px;
-  margin: 0 auto; padding: 0 28px;
+  display: flex; gap: 2px; max-width: 1240px;
+  margin: 0 auto; padding: 0 24px;
+  border-bottom: 1px solid var(--line-faint);
 }
 
 .tab {
   border: 0; background: transparent; cursor: pointer;
   font: 500 13.5px/1 var(--sans); color: var(--muted);
-  padding: 14px 18px; border-bottom: 2px solid transparent;
-  border-radius: 0;
+  padding: 15px 16px; border-bottom: 2px solid transparent;
+  border-radius: 0; margin-bottom: -1px;
 }
 .tab:hover { color: var(--ink-soft); }
 .tab.active {
@@ -779,16 +789,6 @@ button.tally:disabled::after { display: none; }
 
 /* ------------------------------------------------------------------- misc */
 
-/* A button that reads as part of the sentence it sits in. Not an <a>: it
-   moves you to another tab and starts a scan, and a link that navigates
-   nowhere is a lie told to anyone reading the status bar. */
-button.link {
-  border: 0; background: none; padding: 0; font: inherit; cursor: pointer;
-  color: var(--accent-deep); text-decoration: underline;
-  text-underline-offset: 2px;
-}
-button.link:hover { color: var(--accent-hover); }
-
 .scan-note { margin: 0 0 12px; font-size: 12.5px; }
 
 .muted { color: var(--muted-2); }
@@ -867,3 +867,26 @@ button.link:hover { color: var(--accent-hover); }
   animation: scpIn .3s cubic-bezier(.2, .75, .3, 1) both;
 }
 #toast.err { border-left-color: var(--critical); }
+
+/* ------------------------------------------------- the resource, folded away */
+
+/* What the thing *is*, under what is wrong with it. Worth keeping - a
+   verdict is only checkable against the settings it judged - and worth
+   folding, because a bucket's settings are forty lines of JSON and open by
+   default they were the largest thing on the panel, with the findings
+   scrolled away above them. */
+.what-it-is { margin-top: 26px; }
+.what-it-is > summary {
+  cursor: pointer; list-style: none;
+  display: inline-flex; align-items: center; gap: 8px;
+  font: 600 10.5px/1 var(--mono); letter-spacing: .12em;
+  text-transform: uppercase; color: var(--muted-2);
+  padding: 6px 0;
+}
+.what-it-is > summary::-webkit-details-marker { display: none; }
+.what-it-is > summary::before {
+  content: "▸"; font-size: 9px; transition: transform .12s ease;
+}
+.what-it-is[open] > summary::before { transform: rotate(90deg); }
+.what-it-is > summary:hover { color: var(--ink-soft); }
+.what-it-is .mono-block { margin-top: 8px; }
