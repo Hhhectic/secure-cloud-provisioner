@@ -305,6 +305,99 @@ def test_the_move_step_is_absent_for_keys_that_were_never_downloaded(ec2, keys):
     assert "chmod 600" in joined
 
 
+def test_the_instructions_keep_the_tilde_rather_than_this_machine_s_home(ec2, keys):
+    """The path belongs to whoever runs these, not to whoever generated them.
+
+    `Path("~/.ssh").expanduser()` resolves against the *server's* HOME, and
+    these lines are then shown to whoever is reading the page. That is right
+    only while the two are the same person on the same machine, and wrong the
+    moment the server runs in a container, under a service account, or on a
+    machine somebody reached over the network. It also printed the operator's
+    username into every copy, which is how it was noticed - in a screenshot.
+
+    A tilde is expanded by the shell that runs the command, against the HOME
+    of the person running it, which is correct without this code knowing
+    anything.
+    """
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    joined = "\n".join(bastion.connection_instructions(
+        details, keys_were_downloaded=True))
+
+    assert "~/.ssh/" in joined
+    assert str(Path.home()) not in joined, "the server's home leaked into them"
+
+
+def test_an_explicit_directory_is_still_used_as_given(ec2, keys):
+    """Somebody who names an absolute path meant it. The CLI passes one."""
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    joined = "\n".join(bastion.connection_instructions(details,
+                                                       key_directory=keys))
+
+    assert f"{keys}/" in joined
+
+
+def test_the_script_resolves_the_directory_where_it_runs(ec2, keys):
+    """A tilde inside quotes is four literal characters and a slash.
+
+    So the script cannot simply carry `'~/.ssh'` the way the printed
+    instructions carry `~/.ssh` - quoting it would defeat exactly the property
+    that made keeping it symbolic worth doing. $HOME inside double quotes does
+    expand, and survives a directory with a space in it.
+    """
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    script = bastion.connect_script(details)
+
+    assert 'KEYS="$HOME/.ssh"' in script
+    assert str(Path.home()) not in script
+    # Not the quoted-tilde form, which would look right and expand to nothing.
+    assert "'~/.ssh'" not in script
+
+
+def test_the_default_script_files_keys_under_the_running_user_s_home(ec2, keys,
+                                                                     tmp_path):
+    """The $HOME branch, run rather than inspected.
+
+    The other execution tests pass an absolute directory, so they exercise the
+    quoted path and would pass just as happily if the tilde form expanded to
+    nothing. This one takes the default - the form every caller of
+    POST /blueprints/bastion actually gets - and runs it with HOME set
+    somewhere else, which is exactly the case the expansion was moved for.
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("no bash on this machine")
+
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+
+    home = tmp_path / "someone-else"
+    downloads = home / "Downloads"
+    downloads.mkdir(parents=True)
+    for which in ("bastion_key", "private_key"):
+        (downloads / details[which]).write_text("placeholder\n")
+
+    script = tmp_path / "connect.sh"
+    script.write_text(bastion.connect_script(details))  # the default ~/.ssh
+
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "ssh").write_text("#!/bin/sh\necho stub-ssh-reached\n")
+    (stub / "ssh").chmod(0o755)
+
+    ran = subprocess.run(
+        [bash, str(script)], capture_output=True, text=True, cwd=downloads,
+        env={"PATH": f"{stub}:/usr/bin:/bin", "HOME": str(home)},
+    )
+
+    assert ran.returncode == 0, ran.stderr
+    assert "stub-ssh-reached" in ran.stdout
+
+    # Filed under the *running* user's home, not the one that generated it.
+    for which in ("bastion_key", "private_key"):
+        filed = home / ".ssh" / details[which]
+        assert filed.exists(), f"{which} did not land in $HOME/.ssh"
+        assert filed.stat().st_mode & 0o777 == 0o600
+
+
 def test_the_connect_script_holds_no_key_material(ec2, keys):
     """The property the whole key-pair design exists to protect.
 

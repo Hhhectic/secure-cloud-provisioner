@@ -244,6 +244,43 @@ def connection_details(ec2, created):
     }
 
 
+def _as_typed(key_directory):
+    """The directory as somebody should type it, not as this process resolved it.
+
+    `Path("~/.ssh").expanduser()` expands the tilde using *this* process's
+    HOME, which is the server's. These lines are then handed to whoever is
+    reading the page, so the expansion is right only when the server and the
+    reader are the same person on the same machine - and wrong the moment the
+    server runs in a container, under a service account, or on a machine a
+    teammate reached over the network. It also puts the operator's username
+    into every copy of the instructions, which is how it was noticed: it was
+    sitting in a screenshot.
+
+    A tilde is left alone instead. The shell that runs these commands expands
+    it against the HOME of the person running them, which is correct by
+    construction and needs this code to know nothing. An absolute path given
+    explicitly is passed through, because somebody who named one meant it.
+    """
+    return str(key_directory)
+
+
+def _shell_dir(key_directory):
+    """The same, safe to embed in a generated script.
+
+    A tilde inside quotes is not expanded - `'~/.ssh'` stays four literal
+    characters and a slash - so quoting the directory for the shell would
+    defeat the point of keeping it symbolic. `$HOME` inside double quotes does
+    expand, and survives a directory with a space in it, so the tilde becomes
+    that. Anything else is quoted normally.
+    """
+    text = str(key_directory)
+    if text == "~":
+        return '"$HOME"'
+    if text.startswith("~/"):
+        return f'"$HOME/{text[2:]}"'
+    return shlex.quote(text)
+
+
 def connection_instructions(details, key_directory="~/.ssh",
                             keys_were_downloaded=False):
     """Formats the connection details as commands to paste.
@@ -264,9 +301,11 @@ def connection_instructions(details, key_directory="~/.ssh",
         return ["Addresses are assigned as the machines start. Scan them in a "
                 "moment to see the connection details."]
 
-    folder = Path(key_directory).expanduser()
-    bastion_key = folder / details["bastion_key"]
-    private_key = folder / details["private_key"]
+    # Not expanduser(). See _as_typed: the tilde belongs to whoever runs these,
+    # not to whoever generated them.
+    folder = _as_typed(key_directory).rstrip("/")
+    bastion_key = f"{folder}/{details['bastion_key']}"
+    private_key = f"{folder}/{details['private_key']}"
 
     downloaded = []
     if keys_were_downloaded:
@@ -344,7 +383,10 @@ def connect_script(details, key_directory="~/.ssh", name="scp-bastion"):
     if not details or not details.get("bastion_public_ip"):
         return None
 
-    folder = Path(key_directory).expanduser()
+    # A shell expression rather than a resolved path, for the reason _as_typed
+    # gives: this process's HOME is the server's, and the script runs as
+    # somebody else. "$HOME/.ssh" is correct wherever it is run.
+    folder = _shell_dir(key_directory)
     bastion_name = details["bastion_key"]
     private_name = details["private_key"]
 
@@ -363,7 +405,7 @@ def connect_script(details, key_directory="~/.ssh", name="scp-bastion"):
 
 set -euo pipefail
 
-KEYS={q(str(folder))}
+KEYS={folder}
 BASTION_KEY="$KEYS"/{q(bastion_name)}
 PRIVATE_KEY="$KEYS"/{q(private_name)}
 
