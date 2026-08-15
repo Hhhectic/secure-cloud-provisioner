@@ -385,9 +385,17 @@ input, textarea, select {
 textarea { width: 100%; font: 12.5px/1.55 var(--mono); resize: vertical; }
 label { display: inline-flex; gap: .4rem; align-items: center; }
 
+/* Two gaps, not one.
+   `gap: 20px` set both axes, so a field's hint sat 20px under its own control
+   and 18px above the next field's label - equidistant, bonded to neither, and
+   reading as a stray line between two rows. The column gap is the space
+   between a caption and its control and wants to be wide; the row gap is the
+   space between a control and the sentence explaining it and wants to be
+   narrow. Same family as the note already here about a hint landing in the
+   label column. */
 .field {
   display: grid; grid-template-columns: 170px minmax(0, 520px);
-  gap: 20px; align-items: start; padding: 0 0 18px;
+  column-gap: 20px; row-gap: 5px; align-items: start; padding: 0 0 18px;
 }
 .field > label {
   font: 12px/1.5 var(--sans); color: var(--muted); padding-top: 9px;
