@@ -1441,3 +1441,134 @@ def test_an_azure_spec_does_not_get_an_aws_region_injected(client):
 
     aws = _spec_for_checking(registry_module.get("alarm"), spec, "us-east-1")
     assert aws["region"] == "us-east-1"
+
+
+# ------------------------------------------------------------ Acknowledgements
+#
+# The route that reverses this project's longest-standing refusal. It exists
+# because the demo feedback was that the CLI should be minimal, and the CLI was
+# the only way to record intent. What replaces the old "no endpoint writes
+# these" rule is the set of guards exercised below - most importantly that the
+# server re-scans and refuses a rule id its own scan does not report.
+
+
+@pytest.fixture
+def somewhere_to_write(tmp_path, monkeypatch):
+    """A file per test. Without this the suite writes the real one."""
+    where = tmp_path / "acknowledged.json"
+    monkeypatch.setenv("SCP_ACKNOWLEDGED", str(where))
+    return where
+
+
+def _a_group_with_ssh_open(client, vpc_id, name="ack-test-sg"):
+    """Creates a group with a finding on it, and returns its id and rule id."""
+    spec = _open_ssh_spec(name) | {"vpc_id": vpc_id}
+    made = client.post("/resources/security-group?accept_risk=true", json=spec)
+    assert made.status_code in (200, 201), made.text
+    group_id = made.json()["resource_id"]
+
+    scanned = client.get(f"/resources/security-group/{group_id}")
+    assert scanned.status_code == 200, scanned.text
+    ids = [w["rule_id"] for w in scanned.json()["warnings"] if w.get("rule_id")]
+    assert ids, "the group should report at least one finding with an id"
+    return group_id, ids[0]
+
+
+def _body(group_id, rule_id, **overrides):
+    return {
+        "resource_type": "security-group",
+        "resource_id": group_id,
+        "rule_id": rule_id,
+        "reason": "this host is a deliberate jump box, reviewed in August",
+        "by": "richard",
+        "confirm": rule_id,
+    } | overrides
+
+
+def test_acknowledging_a_finding_marks_it_without_removing_it(
+        client, vpc_id, somewhere_to_write):
+    """The property the whole feature rests on: quieter, never absent."""
+    group_id, rule_id = _a_group_with_ssh_open(client, vpc_id)
+
+    written = client.post("/acknowledgements", json=_body(group_id, rule_id))
+    assert written.status_code == 200, written.text
+    assert written.json()["ok"] is True
+
+    again = client.get(f"/resources/security-group/{group_id}").json()
+    marked = [w for w in again["warnings"] if w.get("rule_id") == rule_id]
+    assert len(marked) == 1, "the finding is still reported"
+    assert marked[0]["acknowledged"]["by"] == "richard"
+    # Still counted at its own severity, which is what stops this being a
+    # suppression list that empties the screen.
+    assert again["counts"]["acknowledged"] == 1
+
+
+def test_a_rule_the_scan_does_not_report_is_refused(
+        client, vpc_id, somewhere_to_write):
+    """The guard with no CLI equivalent, and the strongest one here.
+
+    The server re-scans rather than believing the request, so an entry cannot
+    be written for a finding that does not exist.
+    """
+    group_id, _ = _a_group_with_ssh_open(client, vpc_id, "ack-invented-sg")
+
+    refused = client.post("/acknowledgements",
+                          json=_body(group_id, "security-group:invented"))
+
+    assert refused.status_code == 400
+    assert "Nothing in the current scan" in refused.json()["detail"]
+    assert not somewhere_to_write.exists(), "nothing should have been written"
+
+
+def test_the_rule_id_has_to_be_repeated(client, vpc_id, somewhere_to_write):
+    """The demand every forced delete here already makes."""
+    group_id, rule_id = _a_group_with_ssh_open(client, vpc_id, "ack-confirm-sg")
+
+    refused = client.post("/acknowledgements",
+                          json=_body(group_id, rule_id, confirm="yes"))
+
+    assert refused.status_code == 400
+    assert "confirm" in refused.json()["detail"]
+    assert not somewhere_to_write.exists()
+
+
+def test_a_reason_nobody_could_check_is_refused(
+        client, vpc_id, somewhere_to_write):
+    """A reason is read later by somebody deciding whether it still holds."""
+    group_id, rule_id = _a_group_with_ssh_open(client, vpc_id, "ack-reason-sg")
+
+    refused = client.post("/acknowledgements",
+                          json=_body(group_id, rule_id, reason="fine"))
+
+    assert refused.status_code == 400
+    assert not somewhere_to_write.exists()
+
+
+def test_an_expiry_beyond_the_cap_is_refused(
+        client, vpc_id, somewhere_to_write):
+    """A far-future date turns the expiry off while leaving it looking on."""
+    group_id, rule_id = _a_group_with_ssh_open(client, vpc_id, "ack-expiry-sg")
+
+    refused = client.post("/acknowledgements",
+                          json=_body(group_id, rule_id, until="2100-06-07"))
+
+    assert refused.status_code == 400
+    assert not somewhere_to_write.exists()
+
+
+def test_acknowledging_is_refused_from_another_site(
+        client, vpc_id, somewhere_to_write):
+    """The objection the old design was built around, answered by middleware.
+
+    This is the attack the "no endpoint writes acknowledgements" rule existed
+    to prevent: a page on another origin quietly suppressing a critical
+    finding on a tool with no login. It is refused before the route runs, by
+    the same middleware that guards every destructive path here.
+    """
+    group_id, rule_id = _a_group_with_ssh_open(client, vpc_id, "ack-origin-sg")
+
+    refused = client.post("/acknowledgements", json=_body(group_id, rule_id),
+                          headers={"Origin": "http://evil.example"})
+
+    assert refused.status_code == 403
+    assert not somewhere_to_write.exists()

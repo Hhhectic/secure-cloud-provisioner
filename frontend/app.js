@@ -72,6 +72,43 @@ function text(tag, content, className) {
   return el;
 }
 
+/* A block of commands, with a button that puts them on the clipboard.
+
+   The bastion's connect and teardown steps were rendered as a <pre> and left
+   there, which meant the one path this tool recommends - generate the keys in
+   the browser, build from the page - ended in transcribing six commands by
+   hand from a screen. Every one of them carries a generated key filename or
+   an address, so a typo is silent until ssh fails on something that looks
+   right. */
+function commandBlock(lines) {
+  const wrap = document.createElement("div");
+  const body = lines.join("\n");
+  const pre = text("pre", body, "mono-block");
+
+  const copy = document.createElement("button");
+  copy.className = "quiet";
+  copy.textContent = "Copy";
+  copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(body);
+      toast("Copied.");
+    } catch {
+      // A page served over plain HTTP on a machine without clipboard
+      // permission cannot write to it, and failing silently would look like
+      // the button doing nothing.
+      const range = document.createRange();
+      range.selectNodeContents(pre);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      toast("Clipboard unavailable — the text is selected, copy it.", true);
+    }
+  };
+
+  wrap.append(pre, copy);
+  return wrap;
+}
+
 /* A menu of known answers plus an escape hatch.
 
    Everything the tool already knows becomes a choice, and "Other…" reveals a
@@ -515,76 +552,103 @@ function renderFinding(w, resourceId) {
       "Change this before creating it, or accept it knowingly.", "muted"));
   }
 
-  // The identifier, and a ready-made entry for acknowledged.json.
+  // The identifier, and the form that accepts the finding.
   //
-  // The page could show acknowledgements and could not help you write one:
-  // the rule_id existed only in the API response, so using the feature meant
-  // leaving the page for curl. This closes that without giving the API a
-  // write path - the snippet is produced here and goes on the clipboard, and
-  // the file is still edited and committed by a person. See
-  // scanner/acknowledged.py for why that stays true.
+  // This used to build a JSON snippet and put it on the clipboard, because
+  // the API had no write path by design - the file was edited and committed
+  // by a person. It writes now, through POST /acknowledgements; see the
+  // header of scanner/acknowledged.py for what that trades away and what
+  // replaced it.
   //
   // Gated on resourceId for the same reason the fix button above is: a
-  // pre-flight finding describes something that does not exist, and offering
-  // to acknowledge it would write an entry naming a resource that may never
-  // be created - which the audit would then report as matching nothing.
+  // pre-flight finding describes something that does not exist, and
+  // acknowledging it would write an entry naming a resource that may never be
+  // created - which the audit would then report as matching nothing. The
+  // server refuses that case as well, on the stronger ground that it re-scans
+  // and finds no such rule.
   if (resourceId && w.rule_id && !w.acknowledged) {
-    box.append(acknowledgeHelp(w));
+    box.append(acknowledgeForm(w, resourceId));
   }
 
   return box;
 }
 
-/* Everything needed to acknowledge one finding, without acknowledging it.
+/* Accepting one finding, knowingly.
 
-   `by` is left as a placeholder rather than guessed at: the browser does not
-   know who is sitting in front of it, and a name this file invented would be
-   worse provenance than a blank somebody has to fill in. The CLI does know,
-   and fills it from git. */
-function acknowledgeHelp(w) {
+   Folded shut by default. An acknowledgement is meant to be a deliberate act,
+   and a reason box sitting open under every finding is an invitation to make
+   it a reflex.
+
+   `by` is a blank rather than a guess: the browser does not know who is
+   sitting in front of it, and a name this file invented would be worse
+   provenance than one somebody typed. The CLI could read git config and no
+   longer runs this, which is the one thing the move cost. */
+function acknowledgeForm(w, resourceId) {
   const wrap = document.createElement("details");
   wrap.className = "ack-help";
-
-  const today = new Date().toISOString().slice(0, 10);
-  const entry = {
-    rule_id: w.rule_id,
-    reason: "why this is intended, in a sentence somebody else can check",
-    by: "your name",
-    on: today,
-  };
-  const snippet = JSON.stringify(entry, null, 2);
-
-  wrap.append(text("summary", w.rule_id));
+  wrap.append(text("summary", `Accept this finding — ${w.rule_id}`));
 
   const body = document.createElement("div");
   body.append(text("p",
-    "Paste this into the acknowledgements list in backend/acknowledged.json " +
-    "and commit it. The finding keeps its severity and its place here; it is " +
-    "dimmed and says who accepted it. Nothing is hidden.", "muted"));
+    "The finding keeps its severity and its place in this list. It is dimmed " +
+    "and says who accepted it and why — nothing is hidden, and the counts " +
+    "still include it.", "muted"));
 
-  const pre = text("pre", snippet, "mono-block");
-  body.append(pre);
+  const reason = document.createElement("textarea");
+  reason.rows = 2;
+  reason.placeholder =
+    "why this is intended, in a sentence somebody else can check";
 
-  const copy = document.createElement("button");
-  copy.className = "quiet";
-  copy.textContent = "Copy";
-  copy.onclick = async () => {
+  const by = document.createElement("input");
+  by.placeholder = "your name";
+  by.size = 18;
+
+  // Six months out, which is scanner/acknowledged.DEFAULT_DAYS. Shown rather
+  // than left implicit: an expiry nobody saw is one nobody expects to arrive.
+  const until = document.createElement("input");
+  until.type = "date";
+  const default_until = new Date();
+  default_until.setDate(default_until.getDate() + 180);
+  until.value = default_until.toISOString().slice(0, 10);
+
+  body.append(
+    labelled("reason", reason),
+    labelled("your name", by),
+    labelled("expires", until),
+  );
+
+  const accept = document.createElement("button");
+  accept.className = "quiet";
+  accept.textContent = "Accept this finding";
+  accept.onclick = async () => {
+    accept.disabled = true;
     try {
-      await navigator.clipboard.writeText(snippet);
-      toast("Entry copied. Paste it into backend/acknowledged.json.");
-    } catch {
-      // A page served over plain HTTP on a machine without clipboard
-      // permission cannot write to it, and failing silently would look like
-      // the button doing nothing.
-      const range = document.createRange();
-      range.selectNodeContents(pre);
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
-      toast("Clipboard unavailable — the entry is selected, copy it.", true);
+      const res = await api("/acknowledgements", {
+        method: "POST",
+        body: JSON.stringify({
+          resource_type: state.type,
+          resource_id: resourceId,
+          rule_id: w.rule_id,
+          reason: reason.value.trim(),
+          by: by.value.trim(),
+          until: until.value || null,
+          // Repeating the id is the server's demand, and it is satisfied here
+          // rather than by a second box for somebody to retype it into. The
+          // guard is against a request forged somewhere else, which would
+          // have to know this id; it is not a test of whether the person
+          // meant it, which the reason and the fold already ask.
+          confirm: w.rule_id,
+        }),
+      });
+      toast(res.message);
+      showDetail(resourceId);
+      loadList();
+    } catch (e) {
+      toast(e.message, true);
+      accept.disabled = false;
     }
   };
-  body.append(copy);
+  body.append(accept);
 
   wrap.append(body);
   return wrap;
@@ -1672,11 +1736,11 @@ function renderBlueprintResult(out, body) {
 
   if (body.instructions.length) {
     out.append(text("h3", "How to connect"));
-    out.append(text("pre", body.instructions.join("\n"), "mono-block"));
+    out.append(commandBlock(body.instructions));
   }
   if (body.teardown.length) {
     out.append(text("h3", "How to remove it"));
-    out.append(text("pre", body.teardown.join("\n"), "mono-block"));
+    out.append(commandBlock(body.teardown));
     out.append(teardownControls(body.created));
   }
 }

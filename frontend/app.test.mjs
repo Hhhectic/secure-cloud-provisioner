@@ -645,6 +645,91 @@ check(detail.textContent.includes("a website, on purpose"),
 check(detail.textContent.includes("1 acknowledged"),
       "and the tally says so, rather than quietly subtracting it");
 
+check(!detail.querySelector("details.ack-help"),
+      "and offers no form to accept it again, being already accepted");
+
+// ------------------------------------------- accepting one from the page
+
+/* The path the CLI used to own. `main.py` had option 15 and the page had a
+ * Copy button producing JSON for somebody to paste into a file by hand; the
+ * demo feedback was that the CLI should be minimal, so the write moved to
+ * POST /acknowledgements and the page submits it.
+ *
+ * What is checked here is the request body, for the reason the Azure firewall
+ * widget below exists at all: that form sent `source` where the route reads
+ * `source_address_prefix`, the route accepted the request, and Azure built a
+ * group with no rules in it and reported success. A field name is exactly the
+ * kind of thing both sides can be internally consistent about and still
+ * disagree on. */
+
+console.log("\nAccepting a finding from the page");
+console.log("---------------------------------");
+
+const openWarning = {
+  // No colon, which is what a security group's per-rule finding really looks
+  // like: the id comes straight from AWS as a SecurityGroupRuleId.
+  level: "critical", message: "Anyone on the internet can reach port 22.",
+  rule_id: "sgr-0a1b2c3d", resource_id: "sg-1", rule: {}, fix: null,
+  acknowledged: null,
+};
+
+const { document: newAckDoc, sent: ackSent } = await boot({
+  "/resources/security-group/sg-1": () => ({
+    resource_type: "security-group", resource_id: "sg-1", settings: {},
+    warnings: [openWarning],
+    counts: { critical: 1, warning: 0, info: 0, acknowledged: 0 },
+  }),
+  "/resources/security-group": () => ({
+    resource_type: "security-group",
+    resources: [{ id: "sg-1", name: "demo" }],
+  }),
+  "/acknowledgements": () => ({ ok: true, message: "Recorded." }),
+});
+
+await newAckDoc.querySelector("#list tr.clickable").click();
+await new Promise((r) => setTimeout(r, 60));
+
+const ackForm = $(newAckDoc, "detail-body").querySelector("details.ack-help");
+check(Boolean(ackForm), "an unacknowledged finding offers a form to accept it");
+check(!ackForm.open, "folded shut, so accepting is deliberate rather than reflex");
+
+const ackInputs = ackForm.querySelectorAll("input, textarea");
+const reasonBox = [...ackInputs].find((el) => el.tagName === "TEXTAREA");
+const nameBox = [...ackInputs].find((el) => el.placeholder === "your name");
+const untilBox = [...ackInputs].find((el) => el.type === "date");
+
+check(Boolean(reasonBox && nameBox && untilBox),
+      "asking for a reason, an author and an expiry");
+check(Boolean(untilBox.value),
+      "with the expiry pre-filled, an unseen one being one nobody expects");
+
+reasonBox.value = "this is a deliberate jump box, reviewed in August";
+nameBox.value = "richard";
+
+const ackBefore = ackSent.length;
+[...ackForm.querySelectorAll("button")]
+  .find((b) => b.textContent === "Accept this finding").click();
+await new Promise((r) => setTimeout(r, 80));
+
+const ackPost = ackSent.slice(ackBefore)
+  .find((r) => r.path === "/acknowledgements" && r.options.method === "POST");
+
+check(Boolean(ackPost), "pressing Accept posts to /acknowledgements");
+
+if (ackPost) {
+  const body = JSON.parse(ackPost.options.body);
+  check(body.rule_id === "sgr-0a1b2c3d",
+        "carrying the rule id the finding actually reported");
+  check(body.confirm === body.rule_id,
+        "with confirm repeating it, which the route demands");
+  check(body.resource_type === "security-group" && body.resource_id === "sg-1",
+        "and the resource, so the server can re-scan and check the finding is real");
+  check(body.by === "richard", "the author is sent as typed");
+  check(body.reason.includes("deliberate jump box"), "and the reason");
+  check(/^\d{4}-\d{2}-\d{2}$/.test(body.until),
+        "the expiry is a plain date, which is what check_entry parses");
+}
+
 // -------------------------------------------------- the second cloud
 
 /* The page has never been asked about Azure. It reaches it through the

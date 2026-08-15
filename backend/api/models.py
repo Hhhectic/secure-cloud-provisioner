@@ -170,6 +170,33 @@ class DeleteOptions(BaseModel):
     force: bool = False
 
 
+class AcknowledgementRequest(BaseModel):
+    """Records that somebody looked at a finding and decided to live with it.
+
+    Carries the resource so the server can re-scan it and confirm the finding
+    is real, for the same reason FixRequest carries no action: what the server
+    writes is derived from what the server can see, not from what the caller
+    asserts. A request naming a rule id nothing reports is refused.
+
+    `confirm` repeats rule_id, which is the demand every forced delete here
+    already makes. Suppressing a critical finding is a smaller act than
+    deleting the resource, but it is quieter, and quiet is the direction that
+    needs the guard.
+    """
+
+    resource_type: str = Field(min_length=1)
+    resource_id: str = Field(min_length=1)
+    rule_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    by: str = Field(min_length=1)
+
+    # Optional so the caller can take the default rather than compute a date,
+    # which is what the page does. Bounded on the way in by check_entry.
+    until: Optional[str] = None
+
+    confirm: str = Field(min_length=1)
+
+
 class Warning_(BaseModel):
     level: Literal["critical", "warning", "info"]
     message: str

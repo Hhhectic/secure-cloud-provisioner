@@ -20,6 +20,7 @@ would be theatre. Do not put it on a public interface.
 
 import secrets
 import time
+from datetime import date
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -604,6 +605,89 @@ def scan(resource_type: str, resource_id: str, region: str = "us-east-1"):
     )
 
 
+# ------------------------------------------------------------- Acknowledgement
+
+
+@app.post("/acknowledgements", response_model=models.ActionResponse)
+def acknowledge(request: models.AcknowledgementRequest,
+                region: str = "us-east-1"):
+    """Records that somebody has looked at a finding and decided to live with it.
+
+    This endpoint did not exist until recently, and the argument against it is
+    worth stating because it was a good one: the tool holds credentials and
+    has no login, so a route that quietens a finding is a route an attacker
+    would rather have than one that deletes something. Deletion is loud.
+
+    Two things answer it. The middleware above refuses any write carrying
+    another site's Origin, and any request whose Host is not this machine -
+    which is the cross-site POST the objection described. And this API already
+    exposes forced deletion of live infrastructure under exactly those guards,
+    so trusting them for suppression is not a new position, it is the existing
+    one applied consistently.
+
+    What the CLI had and a browser cannot reproduce is provenance: `by` came
+    from git config, so the name recorded was the one that would be on the
+    commit. The guards below stand in for it. The strongest is that the
+    finding must be real - the resource is re-scanned here, and a rule id the
+    scan does not report is refused, so this cannot write an acknowledgement
+    for something that was never found.
+    """
+    known = _resource(request.resource_type)
+    client = known.get_client(region)
+
+    # Re-read and re-scan rather than believing the request. Same reasoning as
+    # POST /fix, which takes a rule_id and derives the action itself: what the
+    # server writes down is a function of what the server can see.
+    settings, warnings = _describe_and_scan(known, client, request.resource_id)
+    if settings is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(f"No {known.label.lower()} called "
+                    f"'{request.resource_id}' was found."),
+        )
+
+    today = date.today()
+    until = request.until or date.fromordinal(
+        today.toordinal() + acknowledged.DEFAULT_DAYS).isoformat()
+
+    problem = acknowledged.check_entry(
+        rule_id=request.rule_id,
+        reason=request.reason,
+        by=request.by,
+        until=until,
+        confirm=request.confirm,
+        live_rule_ids={w.get("rule_id") for w in warnings if w.get("rule_id")},
+        today=today,
+    )
+    if problem:
+        audit.record(method="POST", path="/acknowledgements",
+                     outcome="refused", why=problem,
+                     rule_id=request.rule_id)
+        raise HTTPException(status_code=400, detail=problem)
+
+    entry = {
+        "rule_id": request.rule_id,
+        "reason": request.reason.strip(),
+        "by": request.by.strip(),
+        "on": today.isoformat(),
+        "until": until,
+    }
+    where = acknowledged.record(entry)
+
+    audit.record(method="POST", path="/acknowledgements", outcome="written",
+                 rule_id=request.rule_id, by=entry["by"], until=until)
+
+    return models.ActionResponse(
+        ok=True,
+        message=(
+            f"Recorded. '{request.rule_id}' stays in every scan at the same "
+            f"severity and is now marked as accepted by {entry['by']}, until "
+            f"{until}. Nothing is hidden. Commit {where.name} so it applies to "
+            "everybody else's scans as well."
+        ),
+    )
+
+
 # ------------------------------------------------------------------------ Fix
 
 
@@ -943,7 +1027,16 @@ def build_bastion(spec: models.BastionSpec):
         problems=problems,
         log=log,
         connection=details,
-        instructions=bastion.connection_instructions(details) if ok else [],
+        # keys_were_downloaded is true for every caller of this route, not
+        # only the page. POST /blueprints/bastion refuses to generate key
+        # pairs at all - it takes public_keys and nothing else - so whoever
+        # called it holds two private halves this server has never seen, and
+        # over HTTP the overwhelmingly likely way they got them is the
+        # browser generator this project recommends. The mv step is a no-op
+        # for anybody who already filed them, and the alternative is what was
+        # here before: paths that are wrong for the tool's own front door.
+        instructions=bastion.connection_instructions(
+            details, keys_were_downloaded=True) if ok else [],
         teardown=bastion.teardown_instructions(created),
     )
 
