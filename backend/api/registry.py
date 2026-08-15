@@ -215,8 +215,9 @@ class ResourceType:
     # The page needs the split to offer one cloud at a time rather than
     # fourteen tabs in a row, and the only other way to get it is to match on
     # the "azure-" key prefix - the page inferring a provider from a naming
-    # convention nothing guarantees. Declared here instead, next to the
-    # adapters that actually talk to that cloud, so a third provider is one
+    # convention nothing guarantees - and one that goes wrong the first time
+    # somebody registers "aks" or "s3-glacier". Declared here instead, next to
+    # the adapters that actually talk to that cloud, so a third provider is one
     # more value rather than another prefix rule in JavaScript.
     #
     # Defaulted to aws because eight of the nine AWS types predate the second
@@ -240,20 +241,6 @@ class ResourceType:
     # to a browser and call it the resource. describe() unwraps where needed
     # and is the identity everywhere else.
     describe: Callable = _as_read
-
-    # Which cloud this type lives in.
-    #
-    # Stated rather than inferred from the key. Every Azure type happens to be
-    # named "azure-something", so a page could split the two clouds by reading
-    # the prefix - and that would be a second copy of a fact this file already
-    # holds, wrong the first time somebody registers "aks" or "s3-glacier".
-    # The registry has refused to let a menu live in JavaScript for the same
-    # reason since the options field was written.
-    #
-    # The default is aws because nine of the fourteen are, and because a type
-    # that forgets to say belongs to the cloud whose credentials the tool has
-    # always assumed.
-    provider: str = "aws"
 
 
 # ------------------------------------------------------------- Security groups
