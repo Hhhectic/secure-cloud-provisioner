@@ -681,6 +681,12 @@ button.tally:disabled::after { display: none; }
 
 /* -------------------------------------------------------------- dashboard */
 
+.dash-head {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+}
+.dash-head h3 { margin-bottom: 0; }
+.scan-when { font-size: 11.5px; }
+
 .dash-grid {
   display: grid; gap: 10px; margin: 0 0 26px;
   grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));

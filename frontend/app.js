@@ -249,7 +249,7 @@ async function checkHealth() {
    server answers, so this only ever reports what the last list call said. An
    Azure without credentials answers 503 with a sentence naming the four
    variables, and that sentence is better than anything invented here. */
-function setCloud(cloud) {
+function setCloud(cloud, { repaint = true } = {}) {
   state.cloud = cloud;
   document.body.classList.toggle("cloud-azure", cloud === "azure");
   if (cloud === "aws") {
@@ -261,6 +261,17 @@ function setCloud(cloud) {
     $("health").className = "pill";
   }
   renderScope();
+
+  /* `repaint` is false exactly once: during boot, where loadTypes calls
+     selectTab immediately afterwards and that repaints anyway.
+
+     Without it the page loaded the current tab twice. On the dashboard, which
+     now scans as it opens, that was eighteen scan requests for nine types -
+     every resource in the account judged twice on every page load, against a
+     real account, for nothing. Found by counting requests in a browser after
+     a test insisted there should be one per type. */
+  if (!repaint) return;
+
   // Switching cloud on the dashboard reloads the dashboard, not the picker.
   // Repainting a hidden sidebar and leaving the visible panel showing the
   // other account's counts is how "which cloud am I looking at" becomes a
@@ -357,7 +368,8 @@ async function loadTypes() {
 
   const clouds = cloudsPresent();
   $("cloud-toggle").classList.toggle("hidden", clouds.length < 2);
-  setCloud(clouds.includes(state.cloud) ? state.cloud : (clouds[0] || "aws"));
+  setCloud(clouds.includes(state.cloud) ? state.cloud : (clouds[0] || "aws"),
+           { repaint: false });
   selectTab(state.tab);
 }
 
@@ -485,19 +497,6 @@ function selectType(key) {
     return;
   }
 
-  // How this list can be narrowed, and what to call it, come from the server
-  // rather than from read_only. They are different questions: a role cannot
-  // be changed by this tool and can still be filtered usefully, and inferring
-  // one from the other left the role list showing AWS's own service roles
-  // with no way to hide them.
-  const filterLabel = state.types.find((t) => t.key === key).only_ours_label;
-  const box = $("only-ours");
-
-  box.disabled = !filterLabel;
-  box.checked = Boolean(filterLabel);
-  $("only-ours-label").textContent =
-    filterLabel || "nothing to narrow this list by";
-
   const known = currentType();
   $("audit-badge").classList.toggle("hidden", !known.read_only);
   $("detail-id").textContent = "";
@@ -546,13 +545,23 @@ async function loadDashboard() {
     card.append(text("div", "counting…", "dash-state"));
     // The dashboard is a way in, not a dead end: a card is the resource it
     // names, so clicking one opens it where it can be acted on.
-    card.onclick = () => { selectTab("audit"); selectType(t.key); };
+    //
+    // The type is set before the tab changes, because selectTab renders the
+    // picker and picks the first entry when the current one is not in it -
+    // so doing it the other way round loaded a type nobody asked for and
+    // then loaded this one on top, two requests for one click.
+    card.onclick = () => { state.type = t.key; selectTab("audit"); };
     cards[t.key] = card;
     grid.append(card);
   }
 
   body.replaceChildren();
-  body.append(text("h3", "What is in this account"));
+
+  const head = document.createElement("div");
+  head.className = "dash-head";
+  head.append(text("h3", "What is in this account"));
+  head.append(text("span", "counting…", "muted scan-when"));
+  body.append(head);
   body.append(grid);
 
   const activity = document.createElement("div");
@@ -581,18 +590,36 @@ async function loadDashboard() {
   }));
 
   reportCloudReach(!Object.values(cards).every((c) => c.classList.contains("unreachable")));
+
+  /* And then judge them, without being asked.
+
+     This was a button on the reasoning that scanning is the slow path - seven
+     AWS calls per bucket, one after another, which this repository records as
+     visibly slow past a demo account. Measured rather than assumed: 3.4
+     seconds for the whole AWS account and 3.6 for the whole subscription,
+     because the types are asked in parallel and only the resources within one
+     type are serial.
+
+     Three seconds is not a reason to make somebody press a button, and the
+     card that says "not scanned" is a card that has not answered the question
+     the page exists to answer. The counts are drawn first and the verdicts
+     land on top of them, so nothing waits on the scan to be readable. */
+  scanEverything();
 }
 
 /* Fills in the posture, per type, as each answer arrives.
 
-   with_scan=true is the slow path by design - the server scans every resource
-   in the list one after another - so this is a button rather than something
-   the page does on its own, and every card updates the moment its own type
-   comes back instead of the grid waiting for the last one. */
+   Run on load and again on demand. Each type is asked in parallel and every
+   card updates the moment its own type comes back, so the grid takes about
+   the time of its slowest type rather than the sum of all of them - which is
+   what makes a whole account three seconds instead of thirty. */
 async function scanEverything() {
   const button = $("scan-all");
   button.disabled = true;
   button.textContent = "Scanning…";
+
+  const when = $("dash-body").querySelector(".scan-when");
+  if (when) when.textContent = "scanning…";
 
   const mine = state.types.filter((t) => providerOf(t) === state.cloud);
   const cards = [...$("dash-body").querySelectorAll(".dash-card")];
@@ -621,10 +648,17 @@ async function scanEverything() {
         warning += r.counts.warning || 0;
       }
       state.scans[t.key] = { at: new Date(), byId };
+
+      // Both numbers where there are both. "2 critical" alone on a type that
+      // also has nine warnings is a true sentence that hides the larger half,
+      // and the point of the card is to be read without opening it.
+      const parts = [];
+      if (critical) parts.push(`${critical} critical`);
+      if (warning) parts.push(`${warning} warning`);
+
       const where = card.querySelector(".dash-state");
       where.textContent = rows.length === 0 ? "none"
-        : critical ? `${critical} critical`
-        : warning ? `${warning} warning`
+        : parts.length ? parts.join(", ")
         : "clean";
       card.classList.toggle("has-critical", critical > 0);
       card.classList.toggle("has-warning", !critical && warning > 0);
@@ -635,8 +669,12 @@ async function scanEverything() {
     }
   }));
 
+  if (when) {
+    when.textContent =
+      `since last scan, ${new Date().toLocaleTimeString()}`;
+  }
   button.disabled = false;
-  button.textContent = "Scan everything";
+  button.textContent = "Scan again";
 }
 
 async function loadActivity(into) {
@@ -679,24 +717,46 @@ async function loadList() {
   const known = currentType();
   $("listing-title").textContent = known.short_label || known.label;
 
+  /* Which type this call is about, remembered before the first await.
+
+     Two loads can be in flight at once - opening the Audit tab selects the
+     first type and a dashboard card then selects a different one - and the
+     slower answer used to render whatever came back against whichever type
+     was current by then. That produced a list of one type's resources under
+     another type's cached verdicts, so every row read "not scanned" beneath
+     a note saying when the scan had been taken. Both halves were true and
+     they were about different things. */
+  const forType = state.type;
+
   const list = $("list");
   list.replaceChildren(text("p", "Loading…", "muted"));
 
-  const onlyOurs = $("only-ours").checked;
+  /* Everything in the account, and never a scan.
 
-  // Never with_scan. This tab reads; the Dashboard is where a scan is set
-  // going, and asking for one here as a side effect of opening a list is how
-  // it became a checkbox nobody ticked - so the column it filled in sat empty
-  // and the page looked like it had nothing to say.
+     only_ours is false rather than a checkbox. It defaulted to true, so this
+     tab quietly answered a narrower question than the Dashboard beside it -
+     whose counts have always been every resource - and the same account read
+     as two different accounts depending which tab you were on. An audit that
+     hides what this tool did not create is also the wrong default outright:
+     the resources somebody else made are the ones nobody has looked at.
+
+     with_scan is false because this tab reads and the Dashboard scans. The
+     verdicts come from state.scans; a list that scanned on open was a minute
+     of waiting nobody asked for. */
   let body;
   try {
-    body = await api(`/resources/${state.type}?only_ours=${onlyOurs}&with_scan=false`);
+    body = await api(`/resources/${forType}?only_ours=false&with_scan=false`);
     reportCloudReach(true);
   } catch (e) {
+    if (state.type !== forType) return;
     reportCloudReach(false, e);
     list.replaceChildren(text("p", e.message, "bad"));
     return;
   }
+
+  // Somebody has moved on since this was asked for. Rendering it now would
+  // overwrite the list they are actually looking at.
+  if (state.type !== forType) return;
 
   renderCleanup(known);
 
@@ -2444,7 +2504,6 @@ for (const event of ["input", "change"]) {
 
 $("modal-cancel").onclick = closeModal;
 $("refresh").onclick = loadList;
-$("only-ours").onchange = loadList;
 
 $("cloud-toggle").onclick = () =>
   setCloud(state.cloud === "aws" ? "azure" : "aws");

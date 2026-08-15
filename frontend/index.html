@@ -70,12 +70,18 @@
         <h2 id="listing-title">Resources</h2>
         <span class="controls">
           <span id="audit-badge" class="audit-badge hidden">audit only</span>
-          <label><input type="checkbox" id="only-ours" checked>
-            <span id="only-ours-label">only ones this tool made</span></label>
-          <!-- "scan each (slow)" was here and has moved to the Dashboard.
-               Starting a scan and reading its answers are different acts, and
-               a checkbox that silently made opening a list take a minute was
-               the wrong place for the first of them. -->
+          <!-- Two checkboxes stood here and both have gone.
+               "scan each (slow)" moved to the Dashboard: starting a scan and
+               reading its answers are different acts, and a box that silently
+               made opening a list take a minute was the wrong place for the
+               first of them.
+               "only ones this tool made" was on by default, which meant this
+               tab quietly answered a narrower question than the Dashboard
+               beside it - the counts there have always been every resource -
+               so the same account read as two different accounts depending on
+               which tab you were looking at. An audit that hides what it did
+               not create is the wrong default for a tool whose whole job is
+               finding what is wrong in an account. -->
           <button id="refresh" class="quiet">Refresh</button>
         </span>
       </div>
