@@ -463,18 +463,115 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
 
 /* ---------------------------------------------------------------- findings */
 
+/* The tallies above the findings.
+
+   A zero and a two used to take the same amount of the eye, because the
+   whole thing was one sentence at one weight. The number carries the size
+   now and the level carries the colour, so "2 critical" is found by looking
+   rather than by reading. An empty level stays on screen, flat and grey:
+   nothing found is an answer, and a row that omits the level somebody was
+   looking for cannot be told from one that never ran. */
+
+.tallies { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 4px; }
+
+.tally {
+  display: flex; align-items: baseline; gap: 7px;
+  padding: 8px 12px; border-radius: 4px; min-width: 92px;
+  border: 1px solid var(--line-faint); background: #fff;
+}
+.tally .n { font: 600 19px/1 var(--sans); letter-spacing: -.01em; }
+.tally .what {
+  font: 600 9.5px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase;
+  color: var(--muted-2);
+}
+
+.tally.critical { border-color: #f0d8d6; background: #fefaf9; }
+.tally.critical .n { color: var(--critical); }
+.tally.warning { border-color: #efe4cb; background: #fefcf7; }
+.tally.warning .n { color: var(--warning); }
+.tally.info .n { color: var(--info); }
+.tally.accepted .n { color: var(--muted-2); }
+
+/* Nothing at this level. Kept, and drawn as the non-event it is. */
+.tally.empty { background: #fff; border-color: var(--line-faint); }
+.tally.empty .n { color: var(--muted-3); font-weight: 400; }
+
+/* Severity has to be felt before it is read.
+
+   It used to be a line of small coloured capitals above the message, and the
+   three levels differed only in hue - so a critical finding and a note about
+   a machine being idle were the same object on the page, one of them slightly
+   redder. Somebody scanning a list saw a wall of identical grey cards.
+
+   What is spent here is weight, not just colour. A critical finding gets a
+   solid bar, a tinted ground and a filled badge; a warning gets a thinner bar
+   and a soft badge; a note gets almost nothing. The steepness is the point -
+   this file has said from the first commit that if everything is critical
+   nothing is, and the way to keep that true is to make the quiet levels
+   genuinely quiet rather than to make every level loud.
+
+   Colour is never the only carrier. The word CRITICAL is in the badge, and
+   the glyph in front of it differs per level, so the ranking survives being
+   read by somebody who cannot tell the two hues apart. */
+
 .finding {
-  border-top: 1px solid var(--line-faint); margin-top: 20px; padding-top: 18px;
+  border: 1px solid var(--line-faint);
+  border-left: 3px solid var(--line);
+  border-radius: 4px;
+  margin-top: 14px; padding: 14px 16px;
+  background: #fff;
 }
+
 .finding .level {
+  display: inline-flex; align-items: center; gap: 6px;
   font: 600 10.5px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase;
+  padding: 5px 9px; border-radius: 3px;
+  color: var(--muted-2); background: var(--line-faint);
 }
-.finding.critical .level { color: var(--critical); }
-.finding.warning .level { color: var(--warning); }
-.finding.info .level { color: var(--info); }
+
+/* The glyph, so the level is not carried by hue alone. */
+.finding .level::before { font-size: 11px; letter-spacing: 0; }
+.finding.critical .level::before { content: "▲"; }
+.finding.warning .level::before { content: "▲"; }
+.finding.info .level::before { content: "●"; font-size: 7px; }
+
+.finding.critical {
+  border-left-color: var(--critical);
+  border-color: #f0d8d6; border-left-color: var(--critical);
+  background: #fefaf9;
+}
+.finding.critical .level { color: #fff; background: var(--critical); }
+
+.finding.warning {
+  border-color: #efe4cb; border-left-color: var(--warning);
+  background: #fefcf7;
+}
+.finding.warning .level { color: #6d4d07; background: #f6e7c4; }
+
+/* Deliberately the plainest of the three. A note is true and not urgent, and
+   giving it a bar and a ground of its own is how the other two stop meaning
+   anything. */
+.finding.info { border-left-color: var(--line); }
+.finding.info .level { color: var(--info); background: var(--line-faint); }
+
+.finding > div:not(.level):not(.ack):not(.cite) {
+  margin-top: 10px; max-width: 62ch; text-wrap: pretty; color: var(--ink-soft);
+}
+.finding.critical > div:not(.level):not(.ack):not(.cite) { color: var(--ink); }
 .finding p { margin: 11px 0 0; max-width: 60ch; text-wrap: pretty; }
-.finding.acknowledged { opacity: .62; }
+
+/* Accepted, not hidden. It keeps its bar and its badge - it is still a
+   critical finding and the counts still include it - but the ground goes
+   neutral and the whole card recedes, so a list of accepted findings does not
+   read as a list of live ones. */
+.finding.acknowledged { opacity: .55; background: #fff; }
+.finding.acknowledged .level { filter: grayscale(.35); }
 .cite { font: 11.5px var(--mono); color: #7a7c76; }
+/* The finding's own children get their spacing from the rule above, which
+   excludes this one so it can sit closer to the message it cites - but not
+   touching it, which is what excluding it entirely produced. */
+.finding .cite { display: block; margin-top: 8px; }
+.finding .ack { margin-top: 9px; }
 
 /* Folded away by default. The rule id is needed by anyone writing an
    acknowledgement and is noise to everyone else, so it is one click rather

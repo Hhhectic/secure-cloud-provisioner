@@ -642,8 +642,23 @@ check(detail.textContent.includes("richard"),
       "naming who accepted it");
 check(detail.textContent.includes("a website, on purpose"),
       "and why");
-check(detail.textContent.includes("1 acknowledged"),
+/* The counts used to be one sentence - "1 critical, 0 warning, 0
+   informational — 1 acknowledged" - and are four tallies now, so this asserts
+   the structure rather than the wording. What has to stay true is the same
+   thing it always was: the acknowledged count sits beside the severities and
+   is never subtracted from them. */
+const accepted = detail.querySelector(".tally.accepted");
+check(Boolean(accepted) && accepted.querySelector(".n").textContent === "1",
       "and the tally says so, rather than quietly subtracting it");
+check(detail.querySelector(".tally.critical .n").textContent === "1",
+      "the critical it was still counts as critical");
+
+/* A level with nothing in it stays on screen. A row that silently omits the
+   level somebody was looking for cannot be told from one that never checked,
+   which is the way this tool can actively mislead. */
+const emptyWarning = detail.querySelector(".tally.warning");
+check(Boolean(emptyWarning) && emptyWarning.classList.contains("empty"),
+      "a level with nothing in it is drawn as the non-event it is, not dropped");
 
 check(!detail.querySelector("details.ack-help"),
       "and offers no form to accept it again, being already accepted");

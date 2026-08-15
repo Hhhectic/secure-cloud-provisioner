@@ -536,10 +536,12 @@ async function showDetail(id) {
   // The acknowledged tally sits beside the severities, never subtracted from
   // them. A reader who cannot see that two of these criticals were already
   // decided on will either act on them again or stop reading the list.
-  body.append(text("p",
-    `${counts.critical} critical, ${counts.warning} warning, ` +
-    `${counts.info} informational` +
-    (counts.acknowledged ? ` — ${counts.acknowledged} acknowledged` : "")));
+  //
+  // Tallies rather than a sentence. "2 critical, 0 warning, 3 informational"
+  // reads at one weight whichever number is which, so the number that matters
+  // is found by parsing rather than by looking - and a zero took exactly as
+  // much of the eye as a two.
+  body.append(countTally(counts));
 
   body.append(text("h3", "Findings"));
   if (!data.warnings.length) {
@@ -551,6 +553,38 @@ async function showDetail(id) {
 
   body.append(text("h3", "What it is"));
   body.append(text("pre", JSON.stringify(data.settings, null, 2), "mono-block"));
+}
+
+/* The severity counts, as tallies rather than a sentence.
+
+   A level with nothing in it is drawn flat and grey rather than dropped. The
+   absence of criticals is a finding in itself, and a row that silently omits
+   the level you were looking for cannot be told from one that never checked -
+   which is the failure this project names as the only way the tool can
+   actively mislead. */
+function countTally(counts) {
+  const row = document.createElement("div");
+  row.className = "tallies";
+
+  for (const level of ["critical", "warning", "info"]) {
+    const n = counts[level] || 0;
+    const tally = document.createElement("div");
+    tally.className = `tally ${level}` + (n ? "" : " empty");
+    tally.append(text("span", String(n), "n"));
+    tally.append(text("span",
+      level === "info" ? "informational" : level, "what"));
+    row.append(tally);
+  }
+
+  if (counts.acknowledged) {
+    const ack = document.createElement("div");
+    ack.className = "tally accepted";
+    ack.append(text("span", String(counts.acknowledged), "n"));
+    ack.append(text("span", "accepted", "what"));
+    row.append(ack);
+  }
+
+  return row;
 }
 
 function renderFinding(w, resourceId) {
