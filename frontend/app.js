@@ -13,7 +13,21 @@
 const API = "..";
 
 const state = { types: [], type: null, tab: "dashboard", cloud: "aws",
-                region: "us-east-1", options: {}, createInputs: null };
+                region: "us-east-1", options: {}, createInputs: null,
+                /* What the last dashboard scan found, per type.
+                   `{ [typeKey]: { at: Date, byId: Map<id, counts> } }`
+
+                   Scanning is something you set going, and the tab you read
+                   the answers on is a different place from the button that
+                   starts it. So the Audit list no longer scans: it shows what
+                   the dashboard found, and says plainly when that is nothing
+                   yet rather than printing a verdict nobody asked for.
+
+                   Cleared per type whenever something in that type is
+                   created, fixed or deleted, because a cached verdict about a
+                   resource that has since changed is worse than no verdict -
+                   it is a wrong one with a timestamp on it. */
+                scans: {} };
 
 // The blueprint's sidebar key. Deliberately not a resource type: it composes
 // six of them and the registry has no entry for it, so nothing must ever ask
@@ -594,11 +608,19 @@ async function scanEverything() {
       const found = await api(`/resources/${t.key}?only_ours=false&with_scan=true`);
       const rows = found.resources || [];
       let critical = 0, warning = 0;
+
+      // Kept per resource, not just totalled. This is the only scan the page
+      // runs over a whole type, so the Audit tab reads its answers rather
+      // than asking for them again - which is what lets that tab be a place
+      // findings are read instead of a place they are fetched.
+      const byId = new Map();
       for (const r of rows) {
         if (!r.counts) continue;
+        byId.set(r.id, r.counts);
         critical += r.counts.critical || 0;
         warning += r.counts.warning || 0;
       }
+      state.scans[t.key] = { at: new Date(), byId };
       const where = card.querySelector(".dash-state");
       where.textContent = rows.length === 0 ? "none"
         : critical ? `${critical} critical`
@@ -661,13 +683,14 @@ async function loadList() {
   list.replaceChildren(text("p", "Loading…", "muted"));
 
   const onlyOurs = $("only-ours").checked;
-  const withScan = $("with-scan").checked;
 
+  // Never with_scan. This tab reads; the Dashboard is where a scan is set
+  // going, and asking for one here as a side effect of opening a list is how
+  // it became a checkbox nobody ticked - so the column it filled in sat empty
+  // and the page looked like it had nothing to say.
   let body;
   try {
-    body = await api(
-      `/resources/${state.type}?only_ours=${onlyOurs}&with_scan=${withScan}`
-    );
+    body = await api(`/resources/${state.type}?only_ours=${onlyOurs}&with_scan=false`);
     reportCloudReach(true);
   } catch (e) {
     reportCloudReach(false, e);
@@ -681,6 +704,8 @@ async function loadList() {
     list.replaceChildren(text("p", "Nothing here.", "muted"));
     return;
   }
+
+  const scan = state.scans[state.type];
 
   const table = document.createElement("table");
   const head = document.createElement("tr");
@@ -696,17 +721,25 @@ async function loadList() {
 
     tr.append(text("td", r.id));
     tr.append(text("td", r.name || ""));
-    // Not scanned is not clean. counts is the signal, because worst_level is
-    // null for both "nothing was found" and "nothing was looked for" - and
-    // "scan each" is off by default, so the second is what the page shows on
-    // first load. Printing a verdict there labelled a storage account with two
-    // critical findings clean until somebody happened to tick a box. The
-    // Findings column beside this one has always said "—" for the same case.
-    tr.append(text("td", r.unreachable ? "?"
-      : !r.counts ? "not scanned"
-      : (r.worst_level || "clean")));
-    tr.append(text("td", r.counts
-      ? `${r.counts.critical} critical, ${r.counts.warning} warning, ${r.counts.info} info`
+
+    // Not scanned is not clean, and that has not changed by moving where the
+    // scan is started. counts is the signal, because worst_level is null for
+    // both "nothing was found" and "nothing was looked for"; printing a
+    // verdict on the second labelled a storage account with two critical
+    // findings clean.
+    const counts = scan && scan.byId.get(r.id);
+    const worst = counts && (counts.critical ? "critical"
+      : counts.warning ? "warning"
+      : counts.info ? "info" : "clean");
+
+    const verdict = text("td", r.unreachable ? "?"
+      : !counts ? "not scanned"
+      : worst);
+    if (counts && worst !== "clean") verdict.className = `worst ${worst}`;
+    tr.append(verdict);
+
+    tr.append(text("td", counts
+      ? `${counts.critical} critical, ${counts.warning} warning, ${counts.info} info`
       : (r.unreachable || "—")));
 
     const actions = document.createElement("td");
@@ -721,7 +754,42 @@ async function loadList() {
     table.append(tr);
   }
 
-  list.replaceChildren(table);
+  list.replaceChildren();
+
+  /* Where the verdicts came from, and when.
+
+     Without this the Worst column is an assertion with no provenance: a row
+     saying "clean" cannot be told from one scanned before somebody changed
+     the thing. Saying when is what makes an unscanned list obviously
+     unanswered rather than quietly reassuring - which is the one way this
+     tool can actively mislead, and the reason a scan is never implied. */
+  const provenance = document.createElement("p");
+  provenance.className = "muted scan-note";
+  if (!scan) {
+    provenance.append(document.createTextNode(
+      "These have not been scanned. Findings load when you open one; to judge "
+      + "them all at once, "));
+    const go = document.createElement("button");
+    go.className = "link";
+    go.textContent = "scan from the Dashboard";
+    go.onclick = () => { selectTab("dashboard"); scanEverything(); };
+    provenance.append(go, document.createTextNode("."));
+  } else {
+    provenance.textContent =
+      `Verdicts from the scan at ${scan.at.toLocaleTimeString()}. Anything ` +
+      "changed since is judged again when you open it.";
+  }
+  list.append(provenance, table);
+}
+
+/* Forgets a type's cached verdicts.
+
+   Called wherever this tool changes something. A verdict about a resource
+   that has since been fixed, created or destroyed is not merely old - it is
+   wrong, and it is wrong while carrying a timestamp that makes it look
+   checked. */
+function forgetScan(typeKey) {
+  delete state.scans[typeKey || state.type];
 }
 
 function renderCleanup(known) {
@@ -919,6 +987,8 @@ function renderFinding(w, resourceId) {
         );
         toast(res.message);
         showDetail(resourceId);
+        // What this just changed is no longer what the last scan judged.
+        forgetScan();
         loadList();
       } catch (e) {
         toast(e.message, true);
@@ -1023,6 +1093,8 @@ function acknowledgeForm(w, resourceId) {
       });
       toast(res.message);
       showDetail(resourceId);
+      // What this just changed is no longer what the last scan judged.
+      forgetScan();
       loadList();
     } catch (e) {
       toast(e.message, true);
@@ -1816,6 +1888,10 @@ async function submitSpec(inputs, acceptRisk = false) {
 
   out.append(text("p", `Created ${body.resource_id}`));
   for (const p of body.problems || []) out.append(text("p", p, "muted"));
+  // A new resource the last scan never saw, so that scan no longer describes
+  // this type. The create response carries its own findings, which is what
+  // the counts below are.
+  forgetScan();
   loadList();
 
   const counts = body.counts;
@@ -1838,6 +1914,8 @@ async function startDelete(id) {
     const res = await api(`/resources/${state.type}/${encodeURIComponent(id)}`,
                           { method: "DELETE" });
     toast(res.message);
+    // What this just changed is no longer what the last scan judged.
+    forgetScan();
     loadList();
     $("detail-body").replaceChildren(text("p", "Pick something from the list.", "muted"));
     return;
@@ -1931,6 +2009,8 @@ async function showCascade(id, refusal, andThen) {
       progress.finish();
       toast(res.message);
       closeModal();
+      // What this just changed is no longer what the last scan judged.
+      forgetScan();
       loadList();
       $("detail-body").replaceChildren(text("p", "Pick something from the list.", "muted"));
       // The blueprint teardown continues here: the key pairs are not in the
@@ -2006,6 +2086,8 @@ async function startCleanup(known) {
       toast(`${res.results.length - failed.length} removed, ${failed.length} failed`,
             failed.length > 0);
       closeModal();
+      // What this just changed is no longer what the last scan judged.
+      forgetScan();
       loadList();
     } catch (e) {
       toast(e.message, true);
@@ -2363,7 +2445,6 @@ for (const event of ["input", "change"]) {
 $("modal-cancel").onclick = closeModal;
 $("refresh").onclick = loadList;
 $("only-ours").onchange = loadList;
-$("with-scan").onchange = loadList;
 
 $("cloud-toggle").onclick = () =>
   setCloud(state.cloud === "aws" ? "azure" : "aws");

@@ -72,7 +72,10 @@
           <span id="audit-badge" class="audit-badge hidden">audit only</span>
           <label><input type="checkbox" id="only-ours" checked>
             <span id="only-ours-label">only ones this tool made</span></label>
-          <label><input type="checkbox" id="with-scan"> <span>scan each (slow)</span></label>
+          <!-- "scan each (slow)" was here and has moved to the Dashboard.
+               Starting a scan and reading its answers are different acts, and
+               a checkbox that silently made opening a list take a minute was
+               the wrong place for the first of them. -->
           <button id="refresh" class="quiet">Refresh</button>
         </span>
       </div>

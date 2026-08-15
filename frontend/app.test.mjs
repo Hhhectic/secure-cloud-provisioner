@@ -137,8 +137,12 @@ function fakeApi(overrides = {}) {
     const path = String(url).replace("..", "").split("?")[0];
     sent.push({ path, options, url: String(url) });
 
+    // The full url as well as the options, because with_scan travels in the
+    // query string and a stub that cannot see it cannot model the one
+    // difference that matters: a list answers with counts when it was asked
+    // to scan and without them when it was not.
     const handler = overrides[path] || routes[path];
-    const body = handler ? handler(options) : {};
+    const body = handler ? handler(options, String(url)) : {};
 
     // A handler returning __status is modelling a refusal. The page has a
     // path that only runs on a non-200 - the server declining to build
@@ -273,28 +277,66 @@ check($(auditDoc, "create").classList.contains("hidden"),
 console.log("\nA row that was never scanned");
 console.log("----------------------------");
 
-const { document: scanDoc } = await boot({
-  "/resources/security-group": () => ({
-    resource_type: "security-group",
-    resources: [
-      { id: "sg-1", name: "never-scanned", worst_level: null, counts: null },
-      { id: "sg-2", name: "scanned-clean", worst_level: null,
-        counts: { critical: 0, warning: 0, info: 0 } },
-      { id: "sg-3", name: "scanned-bad", worst_level: "critical",
-        counts: { critical: 2, warning: 1, info: 0 } },
-    ],
-  }),
-});
+/* Starting a scan and reading its answers are different acts in different
+   places now: the Dashboard runs it, the Audit list shows what it found. So
+   this drives the real path - list, scan, list again - rather than handing
+   the page counts in a list response it no longer reads. */
+const scanStub = {
+  // An unforced delete that succeeds, so the invalidation below is reached.
+  "/resources/security-group/sg-2": () => ({ ok: true, message: "Deleted sg-2." }),
+  "/resources/security-group": (options, url) => {
+    const scanned = url.includes("with_scan=true");
+    const row = (id, name, counts) =>
+      ({ id, name, worst_level: null, counts: scanned ? counts : null });
+    return {
+      resource_type: "security-group",
+      resources: [
+        row("sg-2", "scanned-clean", { critical: 0, warning: 0, info: 0 }),
+        row("sg-3", "scanned-bad", { critical: 2, warning: 1, info: 0 }),
+      ],
+    };
+  },
+};
 
-const verdicts = [...scanDoc.querySelectorAll("#list tr.clickable")]
+const { document: scanDoc, sent: scanSent } = await boot(scanStub, "audit");
+
+const verdictsNow = () => [...scanDoc.querySelectorAll("#list tr.clickable")]
   .map((tr) => tr.children[2].textContent);
 
-check(verdicts[0] === "not scanned",
+check(verdictsNow().every((v) => v === "not scanned"),
       "a row nobody scanned says so, instead of reporting a verdict");
-check(verdicts[1] === "clean",
+check(!scanSent.some((r) => r.url.includes("with_scan=true")),
+      "and opening the list did not quietly start one");
+check(Boolean(scanDoc.querySelector(".scan-note button.link")),
+      "the list says where a scan is started rather than leaving it to be found");
+
+// The Dashboard runs it, and the Audit list reads what it found.
+scanDoc.querySelector(".scan-note button.link").click();
+await new Promise((r) => setTimeout(r, 120));
+check(scanSent.some((r) => r.url.includes("with_scan=true")),
+      "pressing it scans, which is the one place that happens");
+
+scanDoc.querySelector('.tab[data-tab="audit"]').click();
+await new Promise((r) => setTimeout(r, 120));
+
+check(verdictsNow()[0] === "clean",
       "a row that was scanned and came back empty is the one that says clean");
-check(verdicts[2] === "critical",
+check(verdictsNow()[1] === "critical",
       "and a row with findings says the worst of them");
+check(scanDoc.querySelector(".scan-note").textContent.includes("Verdicts from the scan at"),
+      "with the time it was taken, so a verdict carries its own provenance");
+
+/* A verdict about a resource that has since changed is not merely old: it is
+   wrong, and wrong while carrying a timestamp that makes it look checked. So
+   anything that changes a type throws that type's verdicts away rather than
+   showing them next to a resource they no longer describe. */
+scanDoc.querySelector("#list tr.clickable button.danger").click();
+await new Promise((r) => setTimeout(r, 150));
+
+check(verdictsNow().every((v) => v === "not scanned"),
+      "deleting something forgets that type's verdicts rather than ageing them");
+check(!scanDoc.querySelector(".scan-note").textContent.includes("Verdicts from"),
+      "and the list stops claiming a scan it can no longer stand behind");
 
 // ------------------------------------------------------------ the menus
 
