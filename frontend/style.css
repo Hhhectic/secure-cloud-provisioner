@@ -389,7 +389,7 @@ tr.foreign { background: #fdf7f6; }
 /* ----------------------------------------------------------------- buttons */
 
 button {
-  font: 12.5px/1 var(--sans); padding: 11px 15px; cursor: pointer;
+  font: 13px/1 var(--sans); padding: 11px 16px; cursor: pointer;
   color: var(--ink); background: #fff;
   border: 1px solid var(--line); border-radius: 4px;
   transition: border-color .18s ease, background .18s ease;
@@ -423,8 +423,14 @@ button.link:hover { color: var(--accent-hover); }
 
 /* --------------------------------------------------------------- form bits */
 
+/* Nothing in a form is smaller than the page's own text.
+
+   These ran 9.5 to 13px against a 14px body, so every part of the one panel
+   somebody has to read carefully and type into was set *below* the size of
+   the prose around it. A form that decides what gets built in a real account
+   is the last place to save space. */
 input, textarea, select {
-  font: 13px var(--sans); padding: 9px 11px;
+  font: 14px var(--sans); padding: 10px 12px;
   border: 1px solid var(--line); border-radius: 4px;
   background: #fff; color: var(--ink);
 }
@@ -443,10 +449,19 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
   display: grid; grid-template-columns: 170px minmax(0, 520px);
   column-gap: 20px; row-gap: 5px; align-items: start; padding: 0 0 18px;
 }
+/* Sentence case, from CSS rather than from the strings.
+
+   The captions are also the keys the API takes - "resource group", "public
+   key" - so capitalising them in JavaScript would mean either a second
+   spelling of every field name to keep in step with the first, or
+   text-transform: capitalize, which gives "Resource Group" and reads as a
+   heading rather than a label. ::first-letter does exactly the one thing
+   wanted and leaves the string alone. */
 .field > label {
-  font: 12px/1.5 var(--sans); color: var(--muted); padding-top: 9px;
+  font: 13.5px/1.5 var(--sans); color: var(--ink); padding-top: 10px;
   display: block;
 }
+.field > label::first-letter { text-transform: uppercase; }
 /* Everything that is not the caption belongs in the second column and stacks
    there. Without this a field's hint became the first cell of the next
    implicit row, so "which network it belongs to" appeared underneath the word
@@ -461,7 +476,7 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
 .field input[type="checkbox"] {
   width: 15px; height: 15px; accent-color: var(--accent); margin: 0;
 }
-.field .hint { color: var(--muted-2); font-size: 12px; }
+.field .hint { color: var(--ink); font-size: 12.5px; }
 @media (max-width: 700px) {
   .field { grid-template-columns: 1fr; gap: 6px; }
   .field > label { padding-top: 0; }
@@ -508,11 +523,19 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
 .rule-actions button[disabled]:hover { background: inherit; }
 .labelled { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .labelled > span:last-child { display: flex; min-width: 0; }
+/* The same caption as a field's, because it is the same thing.
+
+   A rule row said PROTOCOL, PORT, SOURCE in 9.5px uppercase mono while the
+   fields three lines above said "name" and "network" in 12px lowercase sans.
+   Both are a word naming the control under it, and one form was using two
+   unrelated systems to write them - which is the honest answer to "why is
+   everything lowercase": it was not, and that was the problem. */
 .labelled small {
-  font: 9.5px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase;
-  color: var(--muted-2);
+  font: 13px/1.4 var(--sans); letter-spacing: 0; text-transform: none;
+  color: var(--ink);
 }
-.labelled select, .labelled input { font: 12.5px var(--sans); padding: 7px 8px; }
+.labelled small::first-letter { text-transform: uppercase; }
+.labelled select, .labelled input { font: 13.5px var(--sans); padding: 8px 10px; }
 
 .keygen {
   border: 1px dashed #ddd9d0; border-radius: 4px; padding: 16px; margin: 0 0 20px;
