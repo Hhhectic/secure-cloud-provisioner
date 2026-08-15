@@ -270,6 +270,39 @@ def test_the_instructions_start_by_making_the_keys_private(ec2, keys):
     assert joined.index("chmod 600") < joined.index("ssh-add")
 
 
+def test_downloaded_keys_are_filed_before_anything_expects_them_there(ec2, keys):
+    """The step before the chmod, and the same shape of gap.
+
+    Every command in these instructions names ~/.ssh, and a browser cannot put
+    anything there - it downloads to wherever downloads go. So somebody
+    generating key pairs with frontend/keygen.js and building from the page
+    got a chmod and two ssh-adds aimed at a directory the files were not in.
+
+    Ordered rather than merely present, for the reason the chmod test gives:
+    a move that happens after the chmod is a chmod against nothing.
+    """
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    joined = "\n".join(bastion.connection_instructions(
+        details, key_directory=keys, keys_were_downloaded=True))
+
+    assert "mv ~/Downloads/" in joined
+    assert joined.index("mv ~/Downloads/") < joined.index("chmod 600")
+    # Both key filenames travel with the move, not just the bastion's.
+    assert details["bastion_key"] in joined
+    assert details["private_key"] in joined
+
+
+def test_the_move_step_is_absent_for_keys_that_were_never_downloaded(ec2, keys):
+    """The CLI writes its pairs straight to disk with ssh-keygen, so telling it
+    to move them out of ~/Downloads would name a path that does not exist."""
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    joined = "\n".join(bastion.connection_instructions(details,
+                                                       key_directory=keys))
+
+    assert "~/Downloads" not in joined
+    assert "chmod 600" in joined
+
+
 def test_instructions_are_honest_when_addresses_are_not_ready():
     lines = bastion.connection_instructions(
         {"bastion_public_ip": None, "private_ip": None,

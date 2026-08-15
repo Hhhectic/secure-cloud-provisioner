@@ -149,8 +149,23 @@ vault provisioning, the first live Azure run, and then network security group,
 virtual network and virtual machine provisioning, and then telling a resource
 group you may not see apart from one that is not there, took it to 794 from
 `backend/`. Then five bugs found by driving the page in a real browser — see
-*What driving the page found* — and the redesign, take it to **824 from
+*What driving the page found* — and the redesign, take it to 824 from
+`backend/`.
+
+Then the `claude/smoke-test-suite-7c34eb` branch merged: the Azure firewall
+rules widget, the first Prowler run against Azure, a fifth instance of the
+403-vs-404 mistake in all five Azure readers, and the `chmod` the bastion
+instructions were missing — 863. Reviewing that merge found one defect, a
+`provider` field declared twice in `ResourceType` because the merge kept both
+sides' version of it. Then moving acknowledgement writing out of the CLI and
+into the page, and the bastion instructions' second gap, take it to **878 from
 `backend/`**, 0 skipped, plus the two Node suites in `frontend/`.
+
+**The virtualenv on this machine is `/home/huori/scp-venv`.** This file says
+`/home/user/scp-venv` throughout, which is a different machine — there is no
+`/home/user` here, so every documented activation line fails before anything
+runs. Built with `python3 -m venv` and both requirements files plus `pytest`
+and `moto`, exactly as the setup block near the bottom describes.
 
 **Both smoke tests have now been re-run and both are green.** The live AWS one
 is **116 passed, 0 failed** against account 679140927523 with no flags; the
@@ -210,7 +225,7 @@ source /home/user/scp-venv/bin/activate      # not ../.venv: see below
 pytest -v                                   # offline, moto, no credentials
                                             # run from backend/, not the root:
                                             # see the note above about ebdb579
-python main.py                              # the CLI, both clouds, 11 options
+python main.py                              # the CLI, both clouds, 14 options
 uvicorn api.app:app --reload --host 127.0.0.1   # API, /docs and the page at /ui
 python scripts/smoke_test.py                # live AWS, free
 python scripts/smoke_test.py --with-instances   # live, launches a t3.micro
@@ -439,6 +454,26 @@ a terminal is the user's and over HTTP is the server's, and
 `POST /blueprints/bastion` refuses rather than defaulting when they are
 missing. The OpenSSH byte layouts in `keygen.js` were verified by mirroring
 them in Python and having `ssh-keygen -y` derive the same public key.
+
+**The connection instructions are written for the route the page offers, and
+twice they were not.** `bastion.connection_instructions` is rendered by both
+the CLI and the page, and both gaps were the same shape: correct for somebody
+who ran `ssh-keygen` into `~/.ssh`, unusable for somebody who followed the
+browser generator this project recommends. First the missing `chmod 600` —
+ssh refuses a key others on the machine could read, a download is 0644 every
+time, and the keygen panel said so while these did not. Then the paths: every
+command named `~/.ssh` and a browser puts nothing there, so the chmod and both
+`ssh-add`s pointed at a directory the files were not in.
+`keys_were_downloaded=True` prefixes the move, and `POST /blueprints/bastion`
+passes it for every caller — that route refuses to generate key pairs at all,
+so whoever called it holds two private halves this server has never seen. Both
+tests assert *order*, not presence: a move after the chmod is a chmod against
+nothing, which is the same failure with more words in it.
+
+The page renders both blocks through `commandBlock`, which adds a Copy button.
+They were a bare `<pre>` before, so the recommended path ended in transcribing
+six commands carrying generated filenames and addresses, where a typo is
+silent until ssh fails on something that looks right.
 
 **Key pairs are import-only.** `create_key_pair` returns private key material
 in the response body, so `aws/key_pairs.py` never calls it and the IAM policy
@@ -704,10 +739,44 @@ fourth tally of its own; the page dims it and says who accepted it and why. A
 suppression that empties the screen is how people stop reading the screen.
 There are no wildcards, entries expire, and the acknowledgements are
 themselves audited — one that has lapsed or that matches nothing is reported.
-Nothing in the tool writes the file: an endpoint that created acknowledgements
+
+**The page writes them now, and this paragraph used to say nothing could.**
+The old rule was that no endpoint may create an acknowledgement, because it
 would be a remote "stop reporting this" API on a service holding credentials
-with no login, and one cross-site POST from being the thing the middleware in
-`api/app.py` exists to stop.
+with no login. `main.py` had option 15 and the page had a Copy button
+producing JSON to paste into a file by hand. A practice demo returned the
+feedback that CLI functions should be minimal to nonexistent, which made the
+only route to a documented feature the one nobody would use, so
+`POST /acknowledgements` writes and the CLI option is gone.
+
+What answers the original objection is that it was never specific to
+acknowledgements. The same API already exposes `DELETE /resources/{type}/{id}`
+with force; if the guards are trusted for destroying a VPC they are trusted
+for dimming a finding. The cross-site POST the rule was written against is
+refused by the middleware, on `Origin` and on `Host` —
+`test_acknowledging_is_refused_from_another_site` pins exactly that request.
+
+What it did cost is provenance. `by` came from git config, so the name
+recorded was the one that would be on the commit; a browser cannot reproduce
+that. The guards standing in for it are in `scanner/acknowledged.check_entry`:
+`confirm` must repeat the rule id, a reason under fifteen characters and a
+blank author are refused, no wildcards, and — new, with no CLI equivalent —
+**the route re-scans the resource and refuses a rule id its own scan does not
+report**, so an acknowledgement cannot be written for a finding that does not
+exist. Newly written entries also expire within a year (`MAX_DAYS`), enforced
+on write only: a committed entry with a longer date keeps it, because
+re-interpreting somebody's recorded decision is worse than the date is. That
+cap exists because a working tree here carried `"until": "2100-06-07"`.
+
+**A rule id does not necessarily contain a colon.** The first version of
+`check_entry` required one, on the belief that they are all
+`<resource>:<setting>`. A security group's per-rule findings carry the
+`SecurityGroupRuleId` straight from AWS — a bare `sgr-…` — so the check
+refused acknowledging an administration port open to the internet, which is
+this tool's flagship finding and the one most likely to be deliberate on a
+jump box. The real guard against an invented id is the re-scan, not the shape.
+`test_the_committed_file_parses_and_names_real_rule_ids` asserted the colon
+too and had the same fix.
 
 **Fixes are re-derived server-side.** `POST /fix` takes a `rule_id` and nothing
 else. The server re-reads the resource, re-runs the scanner, and finds the

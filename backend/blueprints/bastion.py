@@ -243,8 +243,22 @@ def connection_details(ec2, created):
     }
 
 
-def connection_instructions(details, key_directory="~/.ssh"):
-    """Formats the connection details as commands to paste."""
+def connection_instructions(details, key_directory="~/.ssh",
+                            keys_were_downloaded=False):
+    """Formats the connection details as commands to paste.
+
+    `keys_were_downloaded` says the caller generated its key pairs in a
+    browser, which is what `frontend/keygen.js` does and what
+    `POST /blueprints/bastion` therefore always means. It matters because the
+    rest of these commands name `~/.ssh`, and a browser does not put anything
+    there - it puts them wherever downloads go. Somebody following this from
+    the page got a chmod and two ssh-adds pointed at a directory the files
+    were not in, and ssh's answer to that names the path but not the reason.
+
+    The same failure as the missing chmod, one step earlier: instructions that
+    are correct for the way the CLI produces keys and wrong for the way the
+    page does, in a project where the page is the recommended route.
+    """
     if not details or not details.get("bastion_public_ip"):
         return ["Addresses are assigned as the machines start. Scan them in a "
                 "moment to see the connection details."]
@@ -253,7 +267,20 @@ def connection_instructions(details, key_directory="~/.ssh"):
     bastion_key = folder / details["bastion_key"]
     private_key = folder / details["private_key"]
 
-    return [
+    downloaded = []
+    if keys_were_downloaded:
+        downloaded = [
+            "Move the two keys your browser just downloaded into place. Every",
+            "command below expects them there, and a browser cannot put them",
+            f"there itself:",
+            "",
+            f"    mkdir -p {folder}",
+            f"    mv ~/Downloads/{details['bastion_key']} "
+            f"~/Downloads/{details['private_key']} {folder}/",
+            "",
+        ]
+
+    return downloaded + [
         # First, and it was missing.
         #
         # ssh refuses any private key that other people on the machine could
