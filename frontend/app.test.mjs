@@ -262,9 +262,15 @@ const { document: auditDoc } = await boot(undefined, "audit");
 check($(auditDoc, "types").children.length === awsTypes.length,
       "Audit lists every type, because looking at one you made and one you " +
       "did not is the same activity");
-check([...$(auditDoc, "types").children]
+/* The sidebar used to tag audited types with the word "audit". It said the
+   same thing as the heading above it and the tab above that, and the fact it
+   was really carrying - "this one cannot be created" - is now said by the
+   type's absence from Create. What being read-only actually costs you here is
+   a Delete button and a cleanup, and the badge in the listing header says so
+   where that applies; it is checked in the audited-types block below. */
+check(![...$(auditDoc, "types").children]
         .some((b) => b.textContent.includes("audit")),
-      "an audited type is labelled as one");
+      "the sidebar does not repeat what the tab and the heading already say");
 check(![...$(auditDoc, "types").children]
         .some((b) => b.dataset.key === "blueprint"),
       "and the blueprint is not there, being a way of making things");

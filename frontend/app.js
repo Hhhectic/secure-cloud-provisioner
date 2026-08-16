@@ -453,7 +453,15 @@ function renderTypes() {
     const b = document.createElement("button");
     b.dataset.key = t.key;
     b.append(text("span", t.short_label || t.label));
-    if (t.read_only) b.append(text("span", "audit", "tag"));
+    // No "audit" tag. It earned its place when one sidebar held every type
+    // and the tag was the only thing saying which could not be created; the
+    // tab split says that better, by not offering those types on Create at
+    // all. What was left was the word "audit" tagged onto three entries in a
+    // list headed "Inspect" inside a tab called "Audit" - the same fact three
+    // times, none of which was the one that matters here. The consequence of
+    // being read-only is no Delete button and no cleanup, and the "audit
+    // only" badge in the listing header says so at the moment you are looking
+    // at the list it applies to.
     b.onclick = () => selectType(t.key);
     nav.append(b);
   }
