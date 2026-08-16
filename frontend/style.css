@@ -307,8 +307,21 @@ body.no-picker main { grid-template-columns: minmax(0, 1fr); }
   font-weight: 400; white-space: nowrap;
 }
 /* The blueprint is not a resource type and is set apart from the ones that
-   are, because building it makes six things at once. */
-#types button.set-apart { margin-top: 14px; }
+   are, because building it makes six things at once rather than one.
+
+   It was set apart with 14px of nothing, and a bare gap in an evenly spaced
+   list does not read as grouping - it reads as a spacing bug, which is what
+   somebody looking at it asked about. A rule says the same thing on purpose.
+
+   The name also gets its own line here. Every other entry is one or two short
+   words beside a tag; "Bastion architecture" plus "six pieces" does not fit
+   the 212px column, so it wrapped mid-phrase and made the row look broken as
+   well as oddly spaced. */
+#types button.set-apart {
+  margin-top: 14px; padding-top: 15px;
+  border-top: 1px solid var(--line-soft);
+  flex-direction: column; align-items: flex-start; gap: 3px;
+}
 
 #side-foot {
   margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line-soft);
