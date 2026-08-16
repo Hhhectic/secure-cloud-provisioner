@@ -1475,5 +1475,92 @@ if (check(activityRows.length === 1, "recent activity is listed")) {
         "and why, where the log says");
 }
 
+
+// ------------------------------------------------- the account, in one line
+
+/* The grid answers "how many of each", which took nine cards to add up into
+ * the thing somebody came to find out. The headline says it once.
+ *
+ * Its wording is the part that can go wrong quietly, so these drive the
+ * cases rather than the happy one. The rule underneath all of them is the one
+ * this repository states about the IAM scanner and then shipped wrong on the
+ * front page once already: a partial scan that reads as a pass is the single
+ * way this tool can actively mislead. */
+
+console.log("\nThe account in one line");
+console.log("-----------------------");
+
+const verdictStub = (perType) => ({
+  "/resources": () => ({ resources: [
+    { key: "security-group", label: "Security group", short_label: "Security group",
+      provider: "aws", id_label: "Group ID", read_only: false },
+    { key: "bucket", label: "Storage bucket", short_label: "Storage bucket",
+      provider: "aws", id_label: "Bucket name", read_only: false },
+  ] }),
+  "/activity": () => ({ activity: [] }),
+  ...perType,
+});
+
+const oneRow = (counts) => ({ resources: [{ id: "a", name: "a", counts }] });
+const readVerdict = (doc) => doc.querySelector(".verdict").textContent
+  .replace(/\s+/g, " ").trim();
+
+// Criticals lead, and the warnings are still said.
+const { document: vA } = await boot(verdictStub({
+  "/resources/security-group": () => oneRow({ critical: 2, warning: 3, info: 0 }),
+  "/resources/bucket": () => oneRow({ critical: 1, warning: 4, info: 0 }),
+}), "dashboard");
+await new Promise((r) => setTimeout(r, 120));
+check(readVerdict(vA).startsWith("3 critical findings"),
+      "criticals across every type are totalled and lead the sentence");
+check(readVerdict(vA).includes("7 warnings"),
+      "and the warnings are still reported, not hidden behind them");
+check(vA.querySelector(".verdict").classList.contains("is-critical"),
+      "with the severity on the rule, so one glance is enough");
+
+// No criticals is good news and unfinished news.
+const { document: vB } = await boot(verdictStub({
+  "/resources/security-group": () => oneRow({ critical: 0, warning: 2, info: 0 }),
+  "/resources/bucket": () => oneRow({ critical: 0, warning: 0, info: 1 }),
+}), "dashboard");
+await new Promise((r) => setTimeout(r, 120));
+check(readVerdict(vB) === "No critical findings, 2 warnings",
+      "no criticals says so, and says what is left rather than \"clean\"");
+
+// A type that could not be read is not a type with nothing wrong in it.
+const { document: vC } = await boot(verdictStub({
+  "/resources/security-group": () => oneRow({ critical: 0, warning: 0, info: 0 }),
+  "/resources/bucket": () => ({ __status: 503, detail: "Azure is not configured" }),
+}), "dashboard");
+await new Promise((r) => setTimeout(r, 150));
+check(!/clean|nothing critical/i.test(readVerdict(vC)),
+      "an unreadable type is never rounded down to a clean account");
+check(readVerdict(vC).includes("Scan incomplete"),
+      "it says the scan did not finish");
+check(readVerdict(vC).includes("Storage bucket"),
+      "and names which type it could not read");
+
+// An empty account is empty, not safe.
+const { document: vD } = await boot(verdictStub({
+  "/resources/security-group": () => ({ resources: [] }),
+  "/resources/bucket": () => ({ resources: [] }),
+}), "dashboard");
+await new Promise((r) => setTimeout(r, 120));
+check(readVerdict(vD).includes("Nothing in this account yet"),
+      "an account with no resources says that, rather than passing them");
+check(!vD.querySelector(".verdict").classList.contains("is-clean"),
+      "and is not dressed as a clean bill of health for things that do not exist");
+
+// The genuinely clean case still exists and is allowed to say so.
+const { document: vE } = await boot(verdictStub({
+  "/resources/security-group": () => oneRow({ critical: 0, warning: 0, info: 0 }),
+  "/resources/bucket": () => oneRow({ critical: 0, warning: 0, info: 2 }),
+}), "dashboard");
+await new Promise((r) => setTimeout(r, 120));
+check(vE.querySelector(".verdict").classList.contains("is-clean"),
+      "everything read and nothing found is the one case that reads as clean");
+check(readVerdict(vE).includes("2 resources"),
+      "and says how much was looked at, so the claim carries its own scope");
+
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");
 process.exit(failures ? 1 : 0);

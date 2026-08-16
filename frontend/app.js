@@ -557,6 +557,20 @@ async function loadDashboard() {
 
   body.replaceChildren();
 
+  /* One sentence saying how the account stands.
+
+     The grid answers "how many of each", which took nine cards to add up into
+     the thing somebody actually came to find out. This says it once, at the
+     top, and the cards below it are the breakdown.
+
+     It is filled in by the scan, not by the count, and says so until then -
+     the whole panel turns on never printing a verdict before the question has
+     been asked. */
+  const verdict = document.createElement("div");
+  verdict.className = "verdict";
+  verdict.append(text("p", "Reading this account…", "verdict-line"));
+  body.append(verdict);
+
   body.append(text("h3", "What is in this account"));
   body.append(grid);
 
@@ -622,12 +636,20 @@ async function scanEverything() {
   const when = $("dash-body").querySelector(".scan-when");
   if (when) when.textContent = "scanning…";
 
+  const headline = $("dash-body").querySelector(".verdict-line");
+  if (headline) headline.textContent = "Scanning…";
+
   const mine = state.types.filter((t) => providerOf(t) === state.cloud);
   const cards = [...$("dash-body").querySelectorAll(".dash-card")];
   const byName = new Map(cards.map((c) =>
     [c.querySelector(".dash-name").textContent, c]));
 
   for (const card of cards) card.querySelector(".dash-state").textContent = "scanning…";
+
+  // What the headline is made of. Unreachable is counted separately and on
+  // purpose: a type that could not be read is not a type with nothing wrong
+  // in it, and the difference is the one this tool must never blur.
+  const total = { critical: 0, warning: 0, resources: 0, unreachable: [] };
 
   await Promise.all(mine.map(async (t) => {
     const card = byName.get(t.short_label || t.label);
@@ -650,6 +672,10 @@ async function scanEverything() {
       }
       state.scans[t.key] = { at: new Date(), byId };
 
+      total.critical += critical;
+      total.warning += warning;
+      total.resources += rows.length;
+
       // Both numbers where there are both. "2 critical" alone on a type that
       // also has nine warnings is a true sentence that hides the larger half,
       // and the point of the card is to be read without opening it.
@@ -665,10 +691,13 @@ async function scanEverything() {
       card.classList.toggle("has-warning", !critical && warning > 0);
       card.classList.toggle("clean", rows.length > 0 && !critical && !warning);
     } catch (e) {
+      total.unreachable.push(t.short_label || t.label);
       card.querySelector(".dash-state").textContent = "unreachable";
       card.classList.add("unreachable");
     }
   }));
+
+  if (headline) renderVerdict(headline, total);
 
   if (when) {
     when.textContent =
@@ -676,6 +705,73 @@ async function scanEverything() {
   }
   button.disabled = false;
   button.textContent = "Scan again";
+}
+
+/* How the account stands, in one sentence.
+
+   The wording is the whole of this function and it is the part that can go
+   wrong quietly. Three rules it must not break:
+
+   A type that could not be read is not a type with nothing wrong in it. If
+   anything was unreachable the headline says so and never claims the account
+   is clean, because a partial scan that reads as a pass is the one way this
+   tool can actively mislead - the same rule the IAM scanner states and the
+   list learned the hard way.
+
+   An empty account is not a safe one, it is an empty one. "Nothing to report"
+   where there is nothing to report at all would be read as a verdict on
+   resources that do not exist.
+
+   And warnings are not hidden behind a clean bill on criticals. No criticals
+   with fourteen warnings is good news and unfinished news, so it says both. */
+function renderVerdict(into, total) {
+  const parent = into.parentElement;
+  parent.classList.remove("is-critical", "is-warning", "is-clean");
+  into.replaceChildren();
+
+  const say = (main, level, note) => {
+    into.textContent = main;
+    if (level) parent.classList.add(level);
+    if (note) {
+      const p = text("p", note, "verdict-note");
+      parent.append(p);
+    }
+  };
+
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const missed = total.unreachable.length
+    ? `${plural(total.unreachable.length, "type")} could not be read `
+      + `(${total.unreachable.join(", ")}), so this is not the whole account.`
+    : null;
+
+  if (total.critical) {
+    say(plural(total.critical, "critical finding"), "is-critical",
+        [total.warning ? `${plural(total.warning, "warning")} as well.` : null,
+         missed].filter(Boolean).join(" "));
+    return;
+  }
+
+  if (total.warning) {
+    say(`No critical findings, ${plural(total.warning, "warning")}`,
+        "is-warning", missed);
+    return;
+  }
+
+  if (total.unreachable.length) {
+    // Nothing found, and not everything looked at. That is not a clean
+    // account; it is an unfinished scan, and it says the second thing.
+    say("Scan incomplete", null, missed);
+    return;
+  }
+
+  if (!total.resources) {
+    say("Nothing in this account yet", null,
+        "No resources of any type, so there is nothing to judge.");
+    return;
+  }
+
+  say("Nothing critical or warning", "is-clean",
+      `Across ${plural(total.resources, "resource")}.`);
 }
 
 async function loadActivity(into) {

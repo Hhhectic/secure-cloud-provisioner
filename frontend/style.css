@@ -145,11 +145,26 @@ header {
   flex-wrap: wrap;
 }
 
-.brand { display: flex; flex-direction: column; gap: 5px; }
-.wordmark { font: 600 26px/1.1 var(--sans); letter-spacing: -.02em; }
+/* The wordmark, as a lockup rather than two stacked strings.
+
+   It was 26px semibold Helvetica with the tagline loose underneath, which is
+   the default any text gets and read as a placeholder for branding rather
+   than as branding. What is different: tighter tracking so the letterforms
+   sit as one shape, and a short accent rule tying the name to the tagline -
+   the same accent as the stripe above it, so the mark says which cloud you
+   are in as well as what the tool is called. */
+.brand { display: flex; flex-direction: column; gap: 7px; }
+.wordmark {
+  font: 700 27px/1 var(--sans); letter-spacing: -.045em;
+}
 .tagline {
-  font: 11px/1.2 var(--mono); letter-spacing: .09em; text-transform: uppercase;
+  display: flex; align-items: center; gap: 9px;
+  font: 10.5px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase;
   color: var(--ink);
+}
+.tagline::before {
+  content: ""; width: 18px; height: 2px; flex: 0 0 auto;
+  background: var(--accent); transition: background .5s ease;
 }
 
 .head-right { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
@@ -777,6 +792,31 @@ button.tally:disabled::after { display: none; }
 .scan-when {
   margin: -14px 0 26px; font-size: 11.5px;
 }
+
+/* The one sentence the page is for.
+
+   A dashboard made only of tiles has no focal point: every number is the same
+   size, so the eye has nowhere to land and the reader adds nine cards up
+   themselves to reach the thing they came for. This is that sum, said once,
+   and the grid underneath becomes the breakdown of it rather than the whole
+   answer.
+
+   The rule on the left is the only place the severity colour appears at this
+   size, which is what makes one glance enough. */
+.verdict {
+  margin: 0 0 26px; padding: 2px 0 2px 16px;
+  border-left: 3px solid var(--line);
+}
+.verdict-line {
+  margin: 0; font: 600 22px/1.25 var(--sans); letter-spacing: -.02em;
+}
+.verdict-note {
+  margin: 5px 0 0; font-size: 12.5px; max-width: 66ch; text-wrap: pretty;
+}
+.verdict.is-critical { border-left-color: var(--critical); }
+.verdict.is-critical .verdict-line { color: var(--critical); }
+.verdict.is-warning { border-left-color: var(--warning); }
+.verdict.is-clean { border-left-color: #3f7d54; }
 
 .dash-grid {
   display: grid; gap: 10px; margin: 0 0 26px;
