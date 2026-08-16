@@ -416,6 +416,136 @@ def logging_enabled(s3, bucket_name):
 
 
 # Each setting the scanner expects, paired with the reader that fetches it.
+# How many keys to ask for. One page, and the count is reported as "at least"
+# past it: the question a finding needs answered is "is there anything in
+# here, and roughly how much", and nobody's judgement changes between nine
+# hundred objects and nine thousand. Paging a bucket to the end would make a
+# scan take as long as the bucket is large.
+OBJECT_SAMPLE = 1000
+
+# How many keys travel back for a person to look at. A name is often the whole
+# story - "payroll-2026.xlsx" in a world-readable bucket needs no further
+# investigation - but a list of a thousand of them is not a finding, it is a
+# file browser, and this tool is not one.
+OBJECT_NAMES = 10
+
+
+def list_objects(s3, bucket_name):
+    """What is in the bucket: how many, how big, and the first few names.
+
+    The scanner has never been able to see inside a bucket, which left every
+    exposure finding unable to say how much was exposed. A world-readable
+    empty bucket is a misconfiguration; a world-readable bucket with two
+    hundred objects in it is an incident, and the two were reported in
+    identical words.
+
+    Deliberately a read. This module can create a bucket, empty one and delete
+    one, and it cannot put an object into one - `s3:PutObject` is not in this
+    tool's IAM policy at all. Combining "make this readable by the world" and
+    "put a file in it" in one interface is the one thing scripts/make_vulnerable
+    is careful never to do.
+    """
+    found = s3.list_objects_v2(Bucket=bucket_name, MaxKeys=OBJECT_SAMPLE)
+    contents = found.get("Contents", [])
+
+    return {
+        "count": len(contents),
+        # Whether the count is the whole story. IsTruncated says another page
+        # exists, so the number above becomes a floor rather than a total.
+        "at_least": bool(found.get("IsTruncated")),
+        "bytes": sum(o.get("Size", 0) for o in contents),
+        "names": [o["Key"] for o in contents[:OBJECT_NAMES]],
+    }
+
+
+def reachable_by_anyone(s3, bucket_name):
+    """Whether this bucket is readable by people outside the account.
+
+    Any of three things makes it so, and they fail independently: a policy
+    that grants the world, an ACL that does, or the four public access blocks
+    being off so that either could be added without resistance.
+
+    A read that cannot be made counts as public. This is the one place in this
+    module where an unanswered question is resolved *against* proceeding,
+    because the caller is `put_objects` and the cost of being wrong is one
+    direction only: a file nobody meant to publish, published.
+    """
+    reasons = []
+    try:
+        if policy_is_public(s3, bucket_name):
+            reasons.append("its permissions policy grants the public")
+    except PermissionDenied:
+        reasons.append("its permissions policy could not be read")
+
+    try:
+        if get_public_acl_grants(s3, bucket_name):
+            reasons.append("its access list grants a public group")
+    except PermissionDenied:
+        reasons.append("its access list could not be read")
+
+    try:
+        blocks = get_public_access_block(s3, bucket_name)
+        # None means never configured, which is the *unprotected* state - and
+        # `all({})` is True, so folding None into an empty dict read an
+        # unconfigured bucket as fully blocked. Exactly backwards, and it
+        # silently let an upload into the buckets least protected from one.
+        if blocks is None:
+            reasons.append("it has no public access block configuration at all")
+        elif not all(blocks.values()):
+            reasons.append("the four public access blocks are not all on")
+    except PermissionDenied:
+        reasons.append("its public access blocks could not be read")
+
+    return reasons
+
+
+def put_objects(s3, bucket_name, files):
+    """Uploads objects, and refuses if the bucket is open to the world.
+
+    `files` is [(key, bytes)].
+
+    **The refusal is the point of this function.** Everything else in this
+    tool is careful never to put data behind an exposure: make_vulnerable
+    weakens a bucket and deliberately stops, and publishes a snapshot only
+    after proving the volume it came from was never written to. An upload
+    button in the same interface that can turn Block Public Access off would
+    put both halves one click apart, and the half that goes wrong is silent -
+    a file lands somewhere it can be read and nothing says so.
+
+    So the bucket is checked at the moment of writing, not at the moment the
+    form was drawn. A bucket created secure ten minutes ago may not be secure
+    now, and the only reading that matters is the one taken against the state
+    the object would actually land in.
+
+    This does not stop the exposure being demonstrated. Upload first, open the
+    bucket afterwards, and the scan then reports a public bucket with
+    something in it - which is a sharper demonstration than an empty one, and
+    it is the order that never leaves data somewhere by accident.
+    """
+    open_to = reachable_by_anyone(s3, bucket_name)
+    if open_to:
+        return False, (
+            f"Refused: {bucket_name} can be read by people outside this "
+            f"account, because {', and '.join(open_to)}. This tool will not "
+            "put a file into a bucket that is already open - close it first, "
+            "or upload to it before opening it."
+        ), []
+
+    written = []
+    for key, body in files:
+        try:
+            s3.put_object(Bucket=bucket_name, Key=key, Body=body)
+            written.append(key)
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "AccessDenied":
+                return False, (
+                    "This login lacks s3:PutObject. See docs/iam-policy.json."
+                ), written
+            return False, e.response["Error"]["Message"], written
+
+    return True, f"Uploaded {len(written)} to {bucket_name}.", written
+
+
 _READERS = {
     "public_access_block": get_public_access_block,
     "encryption": get_encryption,
@@ -424,6 +554,7 @@ _READERS = {
     "policy_is_public": policy_is_public,
     "policy_denies_http": policy_denies_http,
     "logging_enabled": logging_enabled,
+    "objects": list_objects,
 }
 
 

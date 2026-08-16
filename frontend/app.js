@@ -1370,6 +1370,12 @@ const FIELDS = {
   "bucket": [
     ["name", "text", "globally unique across all of AWS"],
     ["secure_by_default", "checkbox", true],
+    // Uploaded after the bucket exists, by a second request, not carried in
+    // the spec. See submitSpec: a file is multipart and the spec is JSON.
+    ["files", "files", null,
+     "Uploaded once the bucket exists. This tool refuses to put a file into "
+     + "a bucket that is already readable by the world — upload first and "
+     + "open it afterwards if you are demonstrating an exposure."],
   ],
   "key-pair": [
     ["name", "text", "a name for this key"],
@@ -1545,7 +1551,11 @@ async function buildCreateForm() {
     }
 
     let el;
-    if (kind === "checkbox") {
+    if (kind === "files") {
+      el = document.createElement("input");
+      el.type = "file";
+      el.multiple = true;
+    } else if (kind === "checkbox") {
       el = document.createElement("input");
       el.type = "checkbox";
       el.checked = Boolean(hint);
@@ -1921,6 +1931,12 @@ function labelled(caption, ...controls) {
 function collectSpec(inputs) {
   const spec = {};
   for (const [name, { kind, el }] of Object.entries(inputs)) {
+    // Files never enter the spec. The spec is JSON and goes to a route that
+    // creates a resource; a file is multipart and goes to a second, separate
+    // route once the bucket exists. Carrying one inside the other would mean
+    // base64 and a third more bytes, for a request that is already the one
+    // this tool most wants to keep readable in a log.
+    if (kind === "files") continue;
     if (kind === "checkbox") { spec[name] = el.checked; continue; }
 
     if (kind === "rules" || kind === "azure-rules") {
@@ -2067,6 +2083,53 @@ async function runLiveCheck(explicit = false) {
   }
 }
 
+/* Sends whatever was attached to the form, once the bucket exists.
+
+   Its own request, and its own line in the audit log. The server refuses to
+   write into a bucket anyone outside the account can read, and that refusal
+   is shown here in full rather than as a toast - it is the interesting thing
+   this feature does, and somebody who hits it should be told why rather than
+   left thinking the upload silently failed.
+
+   A failed upload does not undo the bucket. Nothing in this tool rolls back;
+   partial results report exactly what exists, and a bucket that was created
+   was created. */
+async function uploadAttached(inputs, resourceId, out) {
+  const attached = Object.values(inputs)
+    .find((i) => i.kind === "files");
+  const chosen = attached && attached.el.files;
+  if (!chosen || !chosen.length) return;
+
+  const line = text("p", `Uploading ${chosen.length} file${chosen.length === 1 ? "" : "s"}…`, "muted");
+  out.append(line);
+
+  const form = new FormData();
+  for (const f of chosen) form.append("files", f, f.name);
+
+  try {
+    // Not api(): that sets a JSON content type, and multipart needs the
+    // browser to set its own with the boundary in it.
+    const res = await fetch(
+      `${API}/resources/bucket/${encodeURIComponent(resourceId)}/objects`,
+      { method: "POST", body: form });
+    const answered = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      const detail = answered.detail;
+      line.textContent = typeof detail === "string" ? detail
+        : (detail && detail.message) || `Upload failed (HTTP ${res.status})`;
+      line.className = "bad";
+      return;
+    }
+    line.textContent = answered.message;
+    line.className = "";
+    showDetail(resourceId);
+  } catch (e) {
+    line.textContent = e.message;
+    line.className = "bad";
+  }
+}
+
 async function submitSpec(inputs, acceptRisk = false) {
   const out = $("create-out");
   out.replaceChildren(text("p", "Creating…", "muted"));
@@ -2119,6 +2182,11 @@ async function submitSpec(inputs, acceptRisk = false) {
   // the counts below are.
   forgetScan();
   loadList();
+
+  // Files go up only after the thing that holds them exists, and only if the
+  // create really succeeded - so a refused create never leaves an upload
+  // looking for a bucket that was never made.
+  await uploadAttached(inputs, body.resource_id, out);
 
   const counts = body.counts;
   out.append(text("p",

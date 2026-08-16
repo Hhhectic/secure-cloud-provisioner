@@ -87,6 +87,12 @@
       "Resource": "arn:aws:s3:::*/*"
     },
     {
+      "Sid": "UploadObjectsToBucketsThatAreNotPublic",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::*/*"
+    },
+    {
       "Sid": "ChangeNetworkAndCompute",
       "Effect": "Allow",
       "Action": [

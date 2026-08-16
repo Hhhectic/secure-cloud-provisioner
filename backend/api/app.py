@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse,
                                StreamingResponse)
@@ -43,6 +43,7 @@ environment.load()
 
 from api import audit, models, registry
 from aws.common import AwsNotConfigured
+from aws import s3_buckets
 from aws.s3_buckets import PermissionDenied
 from az.common import AzureNotConfigured, AzureRefused
 from blueprints import bastion
@@ -621,6 +622,101 @@ def scan(resource_type: str, resource_id: str, region: str = "us-east-1"):
         counts=summarize(warnings),
         fixable_count=len(fixable(warnings)),
     )
+
+
+# -------------------------------------------------------------- Bucket objects
+
+# The most a single upload may carry. Not a technical limit - S3 takes five
+# gigabytes in one PUT - but this route holds every byte in memory to hand to
+# boto3, and a tool whose job is auditing configuration has no business being
+# a file transfer service. Enough for the demo material somebody would put in
+# a bucket to show what an exposure means.
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+def _multipart_is_installed():
+    """Whether fastapi can parse an uploaded file.
+
+    fastapi needs python-multipart to accept one and does not depend on it, so
+    declaring the route without it raises at *import* time - which would stop
+    the whole application starting, both clouds and every other route, over a
+    dependency belonging to one feature. That is precisely the failure
+    aws/common.py and az/common.py exist to avoid for boto3 and the Azure SDK,
+    and it would be a poor thing to reintroduce for a file upload.
+    """
+    try:
+        # python_multipart, not multipart. The package renamed its import in
+        # 0.0.12 and the old spelling still works while warning, so importing
+        # it the old way is a deprecation notice printed on every test run.
+        import python_multipart  # noqa: F401
+        return True
+    except ImportError:
+        try:
+            import multipart  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+
+if not _multipart_is_installed():
+    # The feature is unavailable and says so, rather than the page failing to
+    # start. Same shape as an absent SDK: one thing does not work, and the
+    # message names what to install.
+    @app.post("/resources/bucket/{bucket_name}/objects",
+              response_model=models.ActionResponse)
+    def upload_objects_unavailable(bucket_name: str):
+        raise HTTPException(
+            status_code=503,
+            detail=("Uploading needs python-multipart, which is not installed. "
+                    "pip install python-multipart, then restart. Everything "
+                    "else on this page works without it."),
+        )
+
+
+if _multipart_is_installed():
+    @app.post("/resources/bucket/{bucket_name}/objects",
+              response_model=models.ActionResponse)
+    async def upload_objects(bucket_name: str, files: list[UploadFile] = File(...)):
+        """Puts files into a bucket, unless the bucket is open to the world.
+
+        Its own route rather than a field on ResourceSpec, for three reasons. A
+        file is multipart and the spec is JSON, so carrying one in the other means
+        base64 and a third more bytes. It works on a bucket that already exists
+        rather than only at creation. And it is a separate line in the audit log,
+        which matters for the one action here that puts data somewhere.
+
+        The refusal lives in `aws/s3_buckets.put_objects` and is checked against
+        the bucket's state at the moment of writing - see the reasoning there.
+        """
+        known = _resource("bucket")
+        client = known.get_client("us-east-1")
+
+        payload = []
+        total = 0
+        for f in files:
+            body = await f.read()
+            total += len(body)
+            if total > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(f"That is more than {MAX_UPLOAD_BYTES // (1024 * 1024)}MB "
+                            "in one upload. This tool audits configuration; it is "
+                            "not a way to move files."),
+                )
+            # basename only. A browser sends what the file was called and a key
+            # containing "../" is a key containing "../" rather than a traversal,
+            # but a bucket full of keys shaped like paths somebody did not choose
+            # is its own small mess.
+            payload.append((Path(f.filename or "unnamed").name, body))
+
+        ok, message, written = s3_buckets.put_objects(client, bucket_name, payload)
+        if not ok:
+            raise HTTPException(
+                status_code=400,
+                detail={"message": message, "written": written},
+            )
+
+        return models.ActionResponse(ok=True, message=message)
 
 
 # ------------------------------------------------------------- Acknowledgement

@@ -46,6 +46,35 @@ SETTING_LABELS = {
 }
 
 
+def _how_much_is_inside(settings):
+    """A clause saying how much is behind an exposure, or nothing.
+
+    An exposure finding could not previously say how much was exposed, so a
+    world-readable empty bucket and a world-readable bucket holding two
+    hundred files were reported in identical words. They are not the same
+    event: one is a misconfiguration and the other is an incident.
+
+    Returns "" when the contents could not be read, because a clause is
+    added to a sentence that is already true and a missing one must not be
+    read as "nothing in it". The unreadable list carries that separately, as
+    it does for every other setting here.
+    """
+    if "objects" in (settings.get("unreadable") or {}):
+        return ""
+
+    inside = settings.get("objects")
+    if not inside:
+        return ""
+
+    count = inside.get("count", 0)
+    if not count:
+        return ", though there is nothing in it at the moment"
+
+    at_least = "at least " if inside.get("at_least") else ""
+    thing = "object" if count == 1 else "objects"
+    return f", and there {'is' if count == 1 else 'are'} {at_least}{count} {thing} in it"
+
+
 def check_bucket_settings(settings):
     """Evaluates a bucket settings snapshot and returns detected risks.
 
@@ -167,7 +196,8 @@ def check_bucket_settings(settings):
         warnings.append(_warning(
             CRITICAL,
             "The permissions policy attached to this bucket makes it public. "
-            "Anyone who knows the address can reach the files inside.",
+            "Anyone who knows the address can reach the files inside"
+            + _how_much_is_inside(settings) + ".",
             _target(bucket, "public_policy"),
             fix={
                 "action": "block_public_access",
