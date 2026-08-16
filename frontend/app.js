@@ -500,7 +500,7 @@ function selectType(key) {
   const known = currentType();
   $("audit-badge").classList.toggle("hidden", !known.read_only);
   $("detail-id").textContent = "";
-  $("detail-body").replaceChildren(text("p", "Pick something from the list.", "muted"));
+  resetDetail();
 
   // Only the work this tab actually shows. Building the form while the Audit
   // tab is open fetches that type's option menus - every machine size the
@@ -810,6 +810,22 @@ async function loadActivity(into) {
 
 // ----------------------------------------------------------------- listing
 
+/* The detail panel with nothing chosen.
+
+   Written three times as a bare "Pick something from the list." - which is
+   an instruction with no information in it, on the largest empty area of the
+   page. It says what the panel is for now, which is the thing somebody who
+   has not clicked a row yet does not know. */
+function resetDetail() {
+  const waiting = document.createElement("div");
+  waiting.className = "nothing";
+  waiting.append(text("p", "Nothing selected.", "nothing-line"));
+  waiting.append(text("p",
+    "Pick a row above to see what it is, what is wrong with it, and what "
+    + "this tool can fix without being told how.", "nothing-note"));
+  $("detail-body").replaceChildren(waiting);
+}
+
 async function loadList() {
   const known = currentType();
   $("listing-title").textContent = known.short_label || known.label;
@@ -857,8 +873,26 @@ async function loadList() {
 
   renderCleanup(known);
 
+  /* An empty list says what is empty, and what that does not mean.
+
+     "Nothing here." sat under a heading naming one resource type, in a tool
+     whose whole job is finding what is wrong, and read as a clean bill on the
+     account. It is not one: it says this account holds no resources of this
+     one kind, which for eleven of the fourteen types is the ordinary state of
+     a demo account and says nothing at all about the other thirteen. */
   if (!body.resources.length) {
-    list.replaceChildren(text("p", "Nothing here.", "muted"));
+    const nothing = document.createElement("div");
+    nothing.className = "nothing";
+    nothing.append(text("p",
+      `No ${(known.short_label || known.label).toLowerCase()} in this ` +
+      `${state.cloud === "azure" ? "subscription" : "account"}.`, "nothing-line"));
+    nothing.append(text("p",
+      known.read_only
+        ? "Nothing to audit here. The other types are unaffected — this is "
+          + "about this one kind of resource, not about the account."
+        : "That is a fact about this one kind of resource, not a verdict on "
+          + "the account. The Create tab makes one.", "nothing-note"));
+    list.replaceChildren(nothing);
     return;
   }
 
@@ -999,7 +1033,18 @@ async function showDetail(id) {
 
   body.append(text("h3", "Findings"));
   if (!data.warnings.length) {
-    body.append(text("p", "Nothing found.", "muted"));
+    /* The one empty state here that *is* a verdict, and it has been earned:
+       this resource was read just now and every rule ran over it. Saying so
+       is the difference between this and the list above, where nothing found
+       means nothing of that kind exists. */
+    const clean = document.createElement("div");
+    clean.className = "nothing is-clean";
+    clean.append(text("p", "Nothing to report.", "nothing-line"));
+    clean.append(text("p",
+      `Every rule this tool has for a ${(known.short_label || known.label)
+        .toLowerCase()} ran over this one and none of them fired. What it is `
+      + "made of is below.", "nothing-note"));
+    body.append(clean);
   } else {
     renderFindingGroups(body, data.warnings, data.counts, id);
   }
@@ -2098,7 +2143,7 @@ async function startDelete(id) {
     // What this just changed is no longer what the last scan judged.
     forgetScan();
     loadList();
-    $("detail-body").replaceChildren(text("p", "Pick something from the list.", "muted"));
+    resetDetail();
     return;
   } catch (e) {
     if (e.status !== 400) { toast(e.message, true); return; }
@@ -2193,7 +2238,7 @@ async function showCascade(id, refusal, andThen) {
       // What this just changed is no longer what the last scan judged.
       forgetScan();
       loadList();
-      $("detail-body").replaceChildren(text("p", "Pick something from the list.", "muted"));
+      resetDetail();
       // The blueprint teardown continues here: the key pairs are not in the
       // network and are still there once the cascade has finished.
       if (andThen) await andThen();

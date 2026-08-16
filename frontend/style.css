@@ -1030,3 +1030,28 @@ button.tally:disabled::after { display: none; }
    Left as its own rule rather than inherited, because the browser default
    varies and one of them is nearly invisible. */
 ::placeholder { color: #8b8d87; opacity: 1; }
+
+/* -------------------------------------------------------------- empty states */
+
+/* What is empty, and what that does not mean.
+
+   These were four bare sentences in grey - "Nothing here.", "Nothing found.",
+   "Pick something from the list." - and the first two are dangerous rather
+   than merely thin. In a tool whose job is finding what is wrong, a short
+   "nothing" under a heading reads as a clean bill on the account, and for a
+   resource list it means only that this one kind of resource does not exist
+   here. The second line is where that distinction goes. */
+.nothing {
+  padding: 22px 20px; border: 1px dashed var(--line);
+  border-radius: 5px; background: #fdfdfc;
+}
+.nothing-line { margin: 0; font: 600 15px/1.3 var(--sans); }
+.nothing-note {
+  margin: 7px 0 0; font-size: 12.5px; max-width: 62ch; text-wrap: pretty;
+}
+
+/* The one empty state that is a verdict, because the scan really ran. */
+.nothing.is-clean {
+  border-style: solid; border-color: #dbe9e0; background: #fbfdfc;
+}
+.nothing.is-clean .nothing-line { color: #3f7d54; }

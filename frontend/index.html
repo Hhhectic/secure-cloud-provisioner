@@ -114,7 +114,16 @@
         <h2>Detail</h2>
         <span id="detail-id" class="muted"></span>
       </div>
-      <div id="detail-body" class="muted">Pick something from the list.</div>
+      <!-- Replaced by resetDetail() as soon as app.js runs. Kept as plain
+           text so the panel is not empty in the half-second before it does,
+           and so it says something if the script fails to load at all. -->
+      <div id="detail-body">
+        <div class="nothing">
+          <p class="nothing-line">Nothing selected.</p>
+          <p class="nothing-note">Pick a row above to see what it is and what
+            is wrong with it.</p>
+        </div>
+      </div>
     </section>
 
     <section id="blueprint" class="hidden">

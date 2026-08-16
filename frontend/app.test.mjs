@@ -1562,5 +1562,62 @@ check(vE.querySelector(".verdict").classList.contains("is-clean"),
 check(readVerdict(vE).includes("2 resources"),
       "and says how much was looked at, so the claim carries its own scope");
 
+
+// ------------------------------------------------------------ empty states
+
+/* Two of these are dangerous rather than merely thin. "Nothing here." under a
+ * heading naming one resource type, in a tool whose job is finding what is
+ * wrong, reads as a clean bill on the account - and means only that this one
+ * kind of resource does not exist. The distinction is the whole point of the
+ * second line, so it is what these check. */
+
+console.log("\nEmpty states");
+console.log("------------");
+
+const { document: emptyDoc } = await boot({
+  "/resources/security-group": () => ({
+    resource_type: "security-group", resources: [],
+  }),
+}, "audit");
+
+const emptyPanel = $(emptyDoc, "list").querySelector(".nothing");
+if (check(Boolean(emptyPanel), "an empty list gets a panel rather than a sentence")) {
+  const said = emptyPanel.textContent.replace(/\s+/g, " ");
+  check(said.includes("No security group in this account"),
+        "naming what is empty, which is one kind of resource");
+  check(/not a verdict on the account/i.test(said),
+        "and saying what it does not mean, because a bare \"nothing here\" in "
+        + "this tool reads as a clean account");
+  check(!emptyPanel.classList.contains("is-clean"),
+        "so it is not dressed as a pass");
+}
+
+const waiting = $(emptyDoc, "detail-body").querySelector(".nothing");
+check(Boolean(waiting) && /Nothing selected/.test(waiting.textContent),
+      "the detail panel says it is waiting rather than issuing an instruction");
+
+/* The one empty state that is a verdict, and has earned it: this resource was
+ * read just now and every rule ran over it. */
+const { document: cleanDoc } = await boot({
+  "/resources/security-group": () => ({
+    resource_type: "security-group", resources: [{ id: "sg-1", name: "demo" }],
+  }),
+  "/resources/security-group/sg-1": () => ({
+    resource_type: "security-group", resource_id: "sg-1", settings: {},
+    warnings: [], counts: { critical: 0, warning: 0, info: 0 },
+  }),
+}, "audit");
+await cleanDoc.querySelector("#list tr.clickable").click();
+await new Promise((r) => setTimeout(r, 80));
+
+const verdictPanel = $(cleanDoc, "detail-body").querySelector(".nothing");
+if (check(Boolean(verdictPanel), "a resource with no findings says so")) {
+  check(verdictPanel.classList.contains("is-clean"),
+        "and this one *is* a verdict, because the scan really ran over it");
+  check(/every rule/i.test(verdictPanel.textContent),
+        "saying that every rule ran, which is what separates it from the "
+        + "empty list above");
+}
+
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");
 process.exit(failures ? 1 : 0);
