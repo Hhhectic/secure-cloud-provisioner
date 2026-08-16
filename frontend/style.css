@@ -522,11 +522,21 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
    a rule row running to the full width of the card put a ragged step in the
    one vertical line the form has. */
 .rule {
-  display: grid; grid-template-columns: 1fr 1fr 1.35fr auto; gap: 10px;
+  display: grid; grid-template-columns: 1fr 1.15fr 1.35fr auto; gap: 10px;
   align-items: end; background: #faf9f6; border: 1px solid #f0efea;
   border-radius: 4px; padding: 12px; margin-bottom: 10px;
   max-width: 710px;
 }
+
+/* Three columns, not four.
+
+   An Azure rule carries six fields where a security group's carries three,
+   and it was laid out on the widths meant for three - so each control was
+   about 133px and the option labels truncated inside them. A menu that cuts
+   off its own selection is worse than a tall row: you cannot read back what
+   you chose, which on a firewall is the one thing that has to be checkable.
+   Seven items over three columns is one row taller and every label fits. */
+.rule.azure { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 @media (max-width: 700px) { .rule { grid-template-columns: 1fr; } }
 /* A grid item will not shrink below its content's minimum width, and the
    source menu's longest option is "0.0.0.0/0 — the entire internet, IPv6".

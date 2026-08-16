@@ -75,16 +75,37 @@ DEFAULT_AZURE_LOCATION = "eastus"
 # user picks from are the words the warning will use back at them.
 FORM_PORTS = [22, 80, 443, 3389, 3306, 5432, 6379, 9200, 27017, 5900]
 
-EXTRA_PORT_LABELS = {
-    80: "HTTP, an unencrypted web server",
-    443: "HTTPS, an encrypted web server",
+# What a port is, in a few words, for a menu.
+#
+# Deliberately not RISKY_PORTS. That is the scanner's prose and it belongs in
+# a finding, where there is a whole sentence to be read and "the remote login
+# door for Windows servers" is exactly the right amount of explanation for
+# somebody who does not know what 3389 is. In a dropdown it is 63 characters
+# in a 133px control: measured, the longest of them overflowed by 280px, so
+# the closed menu showed "3389 — Remote Desktop, the remo…" and a chosen port
+# could not be read back at all.
+#
+# Short enough to fit, long enough to still answer "what is this port". The
+# names people actually say - SSH, RDP, MySQL - rather than a description of
+# them.
+PORT_MENU_LABELS = {
+    22: "SSH",
+    80: "HTTP",
+    443: "HTTPS",
+    3389: "Remote Desktop",
+    3306: "MySQL",
+    5432: "PostgreSQL",
+    6379: "Redis",
+    9200: "Elasticsearch",
+    27017: "MongoDB",
+    5900: "VNC",
 }
 
 
 def _port_choices():
     choices = []
     for port in FORM_PORTS:
-        what = RISKY_PORTS.get(port) or EXTRA_PORT_LABELS.get(port, "")
+        what = PORT_MENU_LABELS.get(port, "")
         choices.append({"value": str(port),
                         "label": f"{port} — {what}" if what else str(port)})
     return choices
@@ -100,14 +121,18 @@ def _protocol_choices():
 
 
 def _source_choices():
+    # "the entire internet" stays: an address is jargon by this project's own
+    # style rule, and 0.0.0.0/0 is the one entry here where the words are the
+    # whole warning. "private networks only" shortens to "private" without
+    # losing anything - the address beside it already says which.
     return [
         {"value": OPEN_TO_WORLD_V4,
          "label": f"{OPEN_TO_WORLD_V4} — the entire internet"},
         {"value": OPEN_TO_WORLD_V6,
-         "label": f"{OPEN_TO_WORLD_V6} — the entire internet, IPv6"},
-        {"value": "10.0.0.0/8", "label": "10.0.0.0/8 — private networks only"},
-        {"value": "172.16.0.0/12", "label": "172.16.0.0/12 — private networks only"},
-        {"value": "192.168.0.0/16", "label": "192.168.0.0/16 — private networks only"},
+         "label": f"{OPEN_TO_WORLD_V6} — all of it, IPv6"},
+        {"value": "10.0.0.0/8", "label": "10.0.0.0/8 — private"},
+        {"value": "172.16.0.0/12", "label": "172.16.0.0/12 — private"},
+        {"value": "192.168.0.0/16", "label": "192.168.0.0/16 — private"},
     ]
 
 
@@ -1163,10 +1188,19 @@ def _az_nsg_options(client):
     and nobody notices. The list is the precedence, and that is the only
     arrangement where what was typed and what Azure does are the same thing.
     """
+    # Every label here has to fit a control about 133px wide, because an Azure
+    # rule row carries six fields where a security group's carries three. A
+    # label that overflows is not merely untidy: the closed menu truncates it,
+    # so the thing somebody just chose cannot be read back.
+    #
+    # What survives shortening is whatever the bare value does not already
+    # say. "Inbound" and "Allow" are ordinary words under captions that read
+    # "direction" and "allow or deny", so the explanation was the same word
+    # twice; "*" and "VirtualNetwork" say nothing on their own and keep theirs.
     return {
         "rule_direction": [
-            {"value": "Inbound", "label": "Inbound — traffic coming in"},
-            {"value": "Outbound", "label": "Outbound — traffic going out"},
+            {"value": "Inbound", "label": "Inbound"},
+            {"value": "Outbound", "label": "Outbound"},
         ],
         # The field with no AWS counterpart, and the reason the AWS rules
         # widget cannot be reused as it stands. A security group has no deny;
@@ -1175,8 +1209,8 @@ def _az_nsg_options(client):
         # port the Allow below would open - and a form that submitted
         # everything as Allow would silently build a different firewall.
         "rule_access": [
-            {"value": "Allow", "label": "Allow — let it through"},
-            {"value": "Deny", "label": "Deny — block it"},
+            {"value": "Allow", "label": "Allow"},
+            {"value": "Deny", "label": "Deny"},
         ],
         "rule_protocol": [
             {"value": "Tcp", "label": "TCP"},
@@ -1186,14 +1220,11 @@ def _az_nsg_options(client):
         ],
         "rule_port": _port_choices(),
         "rule_source": [
-            {"value": "*", "label": "* — the entire internet"},
-            {"value": "VirtualNetwork",
-             "label": "VirtualNetwork — only this network"},
-            {"value": "AzureLoadBalancer",
-             "label": "AzureLoadBalancer — Azure's own load balancer"},
-            {"value": "10.0.0.0/8", "label": "10.0.0.0/8 — private networks only"},
-            {"value": "192.168.0.0/16",
-             "label": "192.168.0.0/16 — private networks only"},
+            {"value": "*", "label": "* — everywhere"},
+            {"value": "VirtualNetwork", "label": "This network"},
+            {"value": "AzureLoadBalancer", "label": "Azure load balancer"},
+            {"value": "10.0.0.0/8", "label": "10.0.0.0/8 — private"},
+            {"value": "192.168.0.0/16", "label": "192.168.0.0/16 — private"},
         ],
     }
 

@@ -1755,7 +1755,9 @@ function refreshPrecedence(list) {
    arrows below move a row, and moving a row is what changes precedence. */
 function azureRuleRow(index) {
   const row = document.createElement("div");
-  row.className = "rule";
+  // Its own class as well as .rule: six fields where a security group's row
+  // has three, so it cannot share that row's column widths.
+  row.className = "rule azure";
 
   const name = Object.assign(document.createElement("input"),
                              { size: 16, placeholder: "allow-ssh" });

@@ -776,15 +776,33 @@ def test_the_form_is_offered_the_instance_types_the_tool_will_accept(client):
     assert offered == set(ec2i.ALLOWED_INSTANCE_TYPES)
 
 
-def test_the_port_menu_uses_the_scanners_own_words(client):
-    """So the phrase someone picks is the phrase the warning uses back."""
+def test_the_port_menu_names_a_port_the_way_the_warning_will(client):
+    """The phrase someone picks has to appear in the warning they get back.
+
+    This used to demand the scanner's *whole* phrase - "3389 — Remote Desktop,
+    the remote login door for Windows servers" - which is right in a finding,
+    where there is a sentence to read, and 63 characters in a 133px dropdown.
+    Measured, it overflowed by 280px, so the closed menu read "3389 — Remote
+    Desktop, the remo…" and the port somebody had just chosen could not be read
+    back at all.
+
+    What has to hold is that the two agree, not that they are identical. Every
+    menu label is contained in the scanner's phrase for that port, so picking
+    "Remote Desktop" and then reading "Remote Desktop, the remote login door
+    for Windows servers" is recognisably the same thing.
+    """
+    from api.registry import PORT_MENU_LABELS
     from scanner.rules import RISKY_PORTS
 
     body = client.get("/resources/security-group/options").json()
     labels = {o["value"]: o["label"] for o in body["options"]["port"]}
 
-    assert RISKY_PORTS[22] in labels["22"]
-    assert RISKY_PORTS[3389] in labels["3389"]
+    for port, prose in RISKY_PORTS.items():
+        short = PORT_MENU_LABELS[port]
+        assert short in prose, f"the menu calls {port} something the warning does not"
+        assert short in labels[str(port)]
+        assert str(port) in labels[str(port)]
+
     # 80 and 443 belong in a form but must never be in RISKY_PORTS, since
     # everything there produces a finding.
     assert "443" in labels
