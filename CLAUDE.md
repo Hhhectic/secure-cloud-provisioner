@@ -158,8 +158,23 @@ rules widget, the first Prowler run against Azure, a fifth instance of the
 instructions were missing — 863. Reviewing that merge found one defect, a
 `provider` field declared twice in `ResourceType` because the merge kept both
 sides' version of it. Then moving acknowledgement writing out of the CLI and
-into the page, and the bastion instructions' second gap, take it to **878 from
-`backend/`**, 0 skipped, plus the two Node suites in `frontend/`.
+into the page, and the bastion instructions' second gap, take it to 878.
+
+Then twenty-five commits rebuilding the page — see *The page is three tabs
+now* — plus bucket contents, take it to **915 from `backend/`**, 0 skipped,
+plus 212 checks across the two Node suites in `frontend/`. Everything is
+pushed to `origin` and `group` on `aws-provisioner-and-web-interface`, both at
+`73e5f78`.
+
+**Nothing in that stretch was found by a test.** Every one of those defects
+came from opening the page and looking at it, or from measuring something in
+a browser: a dashboard that scanned the whole account twice on every load, a
+list rendering one type's rows against another type's cached verdicts, a menu
+truncating the port somebody had just chosen, a bare "Nothing here." that read
+as a clean account. The suites cover behaviour and cannot see any of that.
+Whoever picks this up should assume the same is still true of whatever they
+change: `frontend/browse.mjs` and a real browser are the instrument, and the
+green tick is not.
 
 **The virtualenv on this machine is `/home/huori/scp-venv`.** This file says
 `/home/user/scp-venv` throughout, which is a different machine — there is no
@@ -368,7 +383,12 @@ security_messages.py    Azure's warning text. Orphaned: azure_scanner.py is the
                         only thing that reads it and nothing reads that
 test_azure_scanner.py   six tests, no cloud calls. Does not currently import
 requirements.txt        the Azure SDK, not boto3. backend/requirements.txt is
-                        the AWS one
+                        the AWS one, and now also python-multipart — needed
+                        only to accept an uploaded file, and the upload route
+                        is registered only when it imports, because a
+                        dependency belonging to one feature must not stop the
+                        whole page starting. Without it that one endpoint
+                        answers 503 naming what to install
 
 archive/       two Streamlit frontends, kept and not used. See their READMEs
 backend/
@@ -383,8 +403,11 @@ backend/
   blueprints/  compositions of several resources into a correct architecture
   scripts/     live smoke test and demo helpers, plus the CloudWatch harness
 frontend/      the page, served at /ui. Plain HTML and two scripts, no build
-               step, no shipped deps. One cloud at a time behind a toggle;
-               browse.mjs drives it in a real browser and is not in npm test
+               step, no shipped deps. Three tabs — Dashboard, Create, Audit —
+               and one cloud at a time behind a toggle. browse.mjs and
+               azure-lifecycle.mjs drive it in a real browser and are not in
+               npm test. Assets are served with ?v=<mtime>, so a stale page is
+               a bug rather than caching
 docs/          IAM policy (three files, see iam-setup.md), bastion walkthrough,
                benchmark.md: what Prowler finds that this does not
 ```
@@ -492,6 +515,44 @@ those before the permission changes, because the failure it prevents is
 publishing somebody's actual disk. It is behind `--with-public-snapshot`, asks
 a second time, and `--clean` removes snapshots unconditionally regardless of
 which flags made them.
+
+**And the page can now put files in a bucket, under the same rule.** Files
+can be attached on bucket creation; `aws/s3_buckets.put_objects` **refuses to
+write into a bucket anyone outside the account can read** — policy, ACL or the
+four blocks — and refuses if it cannot tell. That refusal is the feature, not
+a safety rail bolted on: an upload button in the same interface that turns
+Block Public Access off puts "make an exposure" and "put data behind it" one
+click apart, and the half that goes wrong is silent. It does not prevent the
+demo, it orders it: upload first, open the bucket after, and the scan then
+reports a public bucket *with something in it*, which is the sharper
+demonstration and the order that never strands data by accident. The check is
+made at the moment of writing, because a bucket created secure ten minutes ago
+may not be secure now.
+
+Writing that turned up a bug of exactly the shape this file keeps recording.
+`reachable_by_anyone` folded an absent public-access-block configuration into
+`{}`, and `all({})` is True — so a bucket with *no* block configuration at
+all, which is the least protected state there is, read as fully blocked and
+was accepted for upload. Exactly backwards, and only ever wrong in the
+direction that publishes something.
+
+**A scan can see inside a bucket now.** It could not, so a world-readable
+empty bucket and a world-readable bucket holding two hundred files were
+reported in identical words — "anyone who knows the address can reach the
+files inside", with no idea whether there were any. One is a misconfiguration
+and the other is an incident. `list_objects` reads one page and the public
+finding gains a clause: "and there are 12 objects in it". Silent when the
+contents could not be read, because a missing clause must not be read as
+"nothing in it"; `unreadable` carries that as it does for every other setting.
+
+`s3:PutObject` is in `docs/iam-policy-account-audit.json` rather than the
+inline policy, and measuring said why: **`docs/iam-policy.json` is 2,379
+non-whitespace characters against the 2,048 inline limit, and was already 331
+over before any of this**. So the documented inline policy has not been
+pasteable as one for some time, which quietly undoes the fix recorded below
+about the 2,048-character budget — the audit reads were moved out
+*specifically* to get under it, and the remainder has since grown back past
+it. The managed policy is at 1,104 of 6,144.
 
 **One finding is about money rather than exposure.** `_check_workload` in
 `scanner/instance_rules.py` reads a machine's processor use and says whether it
@@ -871,6 +932,15 @@ the code was correct and an assumption was not.
   Assertions about *how AWS behaves* belong in the smoke test or in a stub that
   models AWS explicitly; the offline suite is for *does this logic do what I
   meant*.
+- **And once, moto was stricter than AWS**, which is the reverse of every
+  other entry here and cost an hour. `secure_by_default` installs a bucket
+  policy denying any request where `aws:SecureTransport` is false. moto
+  **evaluates that policy**, against its own test client, which speaks plain
+  HTTP — so a bucket created the secure way refuses every upload in the
+  offline suite and accepts them perfectly against AWS, where boto3 has always
+  used HTTPS. A test taking the refusal at face value would conclude uploads
+  do not work. `_writable` in `test_s3_reuse.py` explains it; the claim that
+  uploads work belongs to the smoke test, against a bucket created normally.
 - **moto ignores the tag filter on `DescribeTags`, which hides the one thing
   `not_ours` exists to show.** It answers with every tag it holds, so any
   resource carrying any tag at all — a machine somebody merely gave a `Name` —
@@ -1208,13 +1278,20 @@ They are worth reading as a set, because four of the five share one shape:
 of the seam agreed with its own side.**
 
 - **"Not scanned" was rendered as "clean".** `worst_level` is null both when
-  nothing was found and when nothing was looked for, and *scan each (slow)* is
-  off by default — so every row on first load carried a verdict nobody had
+  nothing was found and when nothing was looked for, and *scan each (slow)*
+  was off by default — so every row on first load carried a verdict nobody had
   asked for. A storage account with two critical findings sat in the list
   labelled clean. This is the failure this project warns about in the IAM
   scanner and then shipped on the front page: *a partial scan that looks clean
   is the one way this tool can actively mislead.* `counts` is the signal,
   because it is set only when a scan ran.
+
+  That checkbox is gone — scanning moved to the Dashboard — but the rule it
+  taught is now enforced in four more places: the list's "not scanned"
+  verdict, the dashboard cards, the account headline, and the empty states.
+  Every one of them had to be written twice to get it right, so it is worth
+  saying plainly: **nothing on this page may print a verdict it did not earn
+  by scanning.**
 
 - **An Azure row was keyed by something that cannot survive a URL.** The list
   returned the full ARM path, which carries eight slashes; a route takes its id
@@ -1287,6 +1364,106 @@ behaviour being protected. Warning messages are aimed at someone who does not
 know the jargon: acronyms and IP addresses are jargon, ordinary words are not.
 Severity means something — if everything is critical, nothing is.
 
+## The page is three tabs now
+
+The sidebar used to be one list called RESOURCES holding all fourteen types,
+and the panel under it held the form you fill in to make something *and* the
+report you read to find out what is wrong with it. Those are different jobs
+done at different times. The page is **Dashboard, Create, Audit**.
+
+**Create** offers only the eleven types that can be created, plus the bastion
+blueprint. The three audit-only ones are absent: a form whose create route
+always answers 405 is an advertised endpoint that can never work, which is
+what `read_only` has always meant on the server. It used to be drawn and then
+explained away by a panel saying so.
+
+**Audit** lists every type, because scanning a bucket made a minute ago and
+auditing a role somebody else made are the same activity. It reads and does
+not scan — see below.
+
+**Dashboard** is new. It counts what is in the account (one list call per
+type, in parallel, about a second) and then scans it (`with_scan=true` per
+type, also in parallel) without being asked. That second part was a button
+until it was measured: **3.4 seconds for a whole AWS account and 3.6 for a
+whole subscription**, because only the resources *inside* one type are
+scanned serially. Three seconds is not a reason to make somebody press a
+button, and a card reading "not scanned" has not answered the question the
+page exists to answer.
+
+**Scanning happens in one place and its answers are read in another.**
+`state.scans` holds what the dashboard found, keyed by type and then by
+resource id, with the time it was taken. The Audit list renders from that and
+never scans on open — a list that scanned as a side effect of being opened
+was a minute of waiting nobody asked for, which is why the old "scan each
+(slow)" checkbox was never ticked and the column it filled sat empty.
+
+Two things the cache has to do to stay honest. It shows when it was taken, so
+a verdict carries its own age. And it is thrown away for a type the moment
+anything in that type is created, fixed, acknowledged, deleted or cleaned up:
+a verdict about a resource that has since changed is not merely old, it is
+wrong while carrying a timestamp that makes it look checked.
+
+**One sentence says how the account stands**, above the grid. Its wording is
+the part that goes wrong quietly, and three rules hold it:
+
+- A type that could not be read is not a type with nothing wrong in it. If
+  anything was unreachable it says "Scan incomplete" and names which type, and
+  can never reach the clean wording.
+- An empty account is empty, not safe.
+- No criticals with fourteen warnings is good news *and* unfinished news, so
+  it says both rather than hiding the second behind the first.
+
+**Findings are grouped behind their own counts.** Each severity is a drawer
+and its count is the handle; one is open at a time; criticals arrive open and
+nothing else does. Empty levels stay on screen, disabled, because a level
+silently missing cannot be told from one that was never checked. `accepted` is
+a count and not a drawer — those findings are still listed under their own
+severity, so a fourth drawer would either list them twice or subtract them
+from the level they belong to.
+
+**A delete says what it is doing while it does it.** `DELETE …?stream=true`
+answers newline-delimited JSON, one object per step, then the outcome.
+`aws/vpcs.delete_vpc` takes a `report` callback — the steps were always named
+and the names were thrown away, so a cascade gave one answer four or five
+minutes after asking and nothing in between, which is indistinguishable from a
+hang. Nearly all of that time is `wait_for_interfaces_to_clear`; it reports
+when the count *changes*, not once per poll, because fifty identical lines
+scroll the earlier steps off the screen. The page runs a clock, which is what
+says the thing is alive; the log says what it is doing. Two different
+questions, two different elements.
+
+**The visual rules, which are load-bearing rather than taste.**
+
+- **Colour means severity and nothing else.** A drifting three-blob gradient
+  used to cover the viewport, tinting every panel a different shade depending
+  on where it had drifted to, and the panels were 84% white with a backdrop
+  blur so they picked it up. Both are gone. What is left is a fixed wash under
+  the header and one accent stripe naming the cloud.
+- **No grey text.** Five greys carried hierarchy; they are all ink now, and
+  the hierarchy is carried by size, weight, case and spacing. `#82847e` on
+  white was also 3.5:1, under the 4.5:1 ordinary text should clear. Two
+  exceptions, neither of them hierarchy: input placeholders stay grey, because
+  a black placeholder is indistinguishable from a typed value; and an
+  acknowledged finding no longer fades, because `opacity: .55` greyed the
+  reason somebody wrote for accepting it, which is the part a reviewer is
+  there to read.
+- **Nothing in a form is smaller than the page's own prose.** Measured at 9.5
+  to 13px against a 14px body before it was fixed.
+- **A menu label has to fit its closed control.** The scanner's prose and a
+  dropdown are different jobs: `RISKY_PORTS` says "the remote login door for
+  Windows servers" in a finding, and `PORT_MENU_LABELS` says "Remote Desktop"
+  in a menu. Every menu label is *contained in* the scanner's phrase, which is
+  what a test asserts — the two have to agree, not be identical.
+
+**Assets are versioned, and this is worth knowing before debugging a stale
+page.** `Cache-Control: no-cache` was added and did not help, because a header
+only governs responses fetched *after* it exists: a browser holding an old
+`style.css` from a response with no cache header gives it a heuristic
+freshness lifetime and uses it without asking. The page is served from its own
+route with every asset stamped `?v=<mtime>`, so the URL changes exactly when
+the file does. If a change does not appear, that is now a real bug rather than
+caching.
+
 ## Not done
 
 - **The page shows one cloud at a time, and builds firewalls with rules in
@@ -1297,6 +1474,10 @@ Severity means something — if everything is critical, nothing is.
   subscription that has never heard of `us-east-1`, and the bastion blueprint
   rendered as a panel under every one of them. Each now lives in its own
   branch, and the blueprint is a sidebar entry rather than a panel.
+
+  The rest of this entry described a single page with one RESOURCES sidebar.
+  That is no longer the shape — see *The page is three tabs now*. The two
+  smaller gaps below are still open.
 
   `azure-nsg` used to be the exception, creating an empty group because the
   AWS `rules` widget emits AWS-shaped rules. It has its own widget now —
@@ -1412,9 +1593,12 @@ Severity means something — if everything is critical, nothing is.
 - **Five of CIS section 1 is unimplemented, on purpose.** 1.1, 1.2, 1.10, 1.17
   and 1.20 have no API that answers them; the reasoning per control is at the
   foot of `scanner/controls.py`. Sixteen of twenty-one are covered.
-- **`GET /resources/{type}` with `with_scan=true` is serial.** Seven AWS calls
-  per bucket, one after another. Fine for a demo account, visibly slow past
-  that. Either concurrency or default the flag off and load findings per row.
+- **`GET /resources/{type}` with `with_scan=true` is still serial inside one
+  type.** Seven AWS calls per bucket, one after another. The dashboard works
+  around it rather than fixing it, by asking every *type* at once — which is
+  what makes a whole account 3.4 seconds rather than thirty, and why
+  auto-scanning on arrival is affordable. A single type holding a few hundred
+  resources would still be slow, and no account here has one.
 - **`_sg_create` still falls back to the default VPC** when a spec omits
   `vpc_id`. The CLI always passes one now, so only API callers can place a
   group somewhere they did not choose.
@@ -1454,8 +1638,12 @@ forms and flags unsecure configurations before deployment.*
 Done: the AWS provisioning and scanning, well past KAN-8 — seven resource
 types, CIS citations across sections 1, 2, 3 and 5, a blueprint, guarded
 destructive paths, a live smoke test, and a browser key generator that cannot
-reach the network. The guided form exists at `/ui`. Pre-deployment scanning
-exists on both halves; `POST /resources/{type}/check` creates nothing.
+reach the network. The guided form exists at `/ui`, on a **Create** tab beside
+a **Dashboard** that scans the whole account on arrival and an **Audit** tab
+that reads what it found. Pre-deployment scanning exists on both halves;
+`POST /resources/{type}/check` creates nothing. A bucket can be given files at
+creation, and the tool refuses to put one into a bucket the world can already
+read.
 
 Azure is now met rather than claimed, and on the same terms as AWS. Five types
 — storage accounts, key vaults, security groups, virtual networks and virtual
@@ -1487,6 +1675,23 @@ refinement, and the largest is that monitor and defender have no rules at all
 — which Prowler covers and this does not.
 
 ## Next
+
+**Two small things first, both known and both one-line.**
+
+0. **`pytest` from the repository root still does not collect.**
+   `test_azure_scanner.py` imports `run_azure_security_scan`;
+   `azure_scanner_engine.py` renamed it to `scan_azure_payload`. Anyone who
+   clones this and runs `pytest` gets an error instead of 915 passing tests,
+   which is the first thing a marker or a new teammate will do. This file has
+   said for a while that it resolves when `group/feature/key-vault` lands;
+   that branch is dated 2026-08-10 and is still not an ancestor of
+   `group/main`, so waiting is no longer a plan. Run from `backend/` meanwhile.
+
+   There is also a live bug nobody has hit yet: `sg.list_security_groups`
+   returns raw AWS keys (`GroupId`), and `read_group_for_scanning` expects a
+   lowercase `group_id`, so feeding one straight to the other raises
+   `ParamValidationError`. The page does not hit it because the list adapter
+   reshapes first; a script using the two together will.
 
 1. **Follow a chain, not one identity at a time.** The CloudGoat re-run is
    done and `docs/benchmark.md` has it: six of twelve scenarios named, one
