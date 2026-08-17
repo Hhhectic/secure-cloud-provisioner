@@ -173,11 +173,13 @@ here is re-run rather than carried forward, which is how two of them were once
 found to be one low — and re-running is also how the 977 that sat here was
 found to be two short of what the suite actually reports.
 
-Everything through `cb0be20` is pushed on `aws-provisioner-and-web-interface`
-to `origin` (Hhhectic) and `group` (gavingonzo). **Everything after it is
-uncommitted and lives only in this working tree** — the surface audit, the
-three Prowler rules, the placement refusal and the threshold evidence are all
-sitting there unpushed, so a fresh clone has none of it.
+All of it is committed and pushed on `aws-provisioner-and-web-interface`, to
+`origin` (Hhhectic) and `group` (gavingonzo), both at `55ce458`. The working
+tree is clean and a fresh clone gets everything this file describes — the
+surface audit, the three Prowler rules, the placement refusal, the threshold
+evidence, the CLI fixes and the tests behind them. The paragraph that used to
+sit here said the opposite at some length, because for a stretch the most
+recent work existed on one machine only.
 
 The junk acknowledgement is gone. `backend/acknowledged.json` carried an entry
 for `richard-huo-resume-2026:deny_http` whose reason and author were keyboard
