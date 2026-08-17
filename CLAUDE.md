@@ -169,6 +169,15 @@ plus **234 checks** across the two Node suites in `frontend/`. Every figure
 here is re-run rather than carried forward, which is how two of them were once
 found to be one low.
 
+All of it is pushed, on `aws-provisioner-and-web-interface`, to `origin`
+(Hhhectic) and `group` (gavingonzo), both at `5058d92`. One thing is
+deliberately not in it: `backend/acknowledged.json` carries an entry for
+`richard-huo-resume-2026:deny_http` whose reason and author are keyboard
+mash, written while trying the feature out. Committing it would suppress a
+real finding for a year on the strength of nothing, so it stays in the working
+tree until somebody either writes it properly or takes it back — which the
+page can now do.
+
 **Nothing in that stretch was found by a test.** Every one of those defects
 came from opening the page and looking at it, or from measuring something in
 a browser: a dashboard that scanned the whole account twice on every load, a
