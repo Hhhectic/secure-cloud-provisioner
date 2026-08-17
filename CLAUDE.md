@@ -42,20 +42,34 @@ account, and cleanup deletes by *tag*, not by author: `make_vulnerable.py
 resources a teammate created. `--region` is supported everywhere, so a region
 each is free isolation.
 
-## The two halves are merged
+## There is one application now
 
-This section used to say the opposite, at length. It is worth knowing that it
-did, because the merge is recent and anything else describing this repository
-as two applications is out of date.
+This section has said three things in its life: that the repository held two
+applications, then that they were merged but both still existed, and now this.
+Anything describing this repository as two programs is out of date.
 
 ```
-main.py                 the Azure app. Still a separate FastAPI instance
 backend/api/app.py      the tool. /resources/..., /blueprints/..., /ui, /docs
 ```
 
-`main.py` still exists and still runs on its own, and nothing depends on it any
-more — and as of the Azure provisioning work it can no longer do anything
-`backend/` cannot. Azure is reached through `backend/api/app.py` like
+**The root Azure application has been deleted.** `main.py`, `azure_crud.py`,
+`azure_scanner.py`, `azure_scanner_engine.py`, `security_messages.py` and
+`test_azure_scanner.py` are gone, with the CI job that ran the last of them.
+They were a closed loop — each imported the next and nothing outside imported
+any of them — and every capability they had exists in `backend/` with a guard
+they did not have. This file had said for a long time that the root app "can
+retire whenever somebody decides to delete it"; somebody decided. It is
+recoverable from git history, and it still exists on `group/main`, which is
+where the provenance comments throughout `backend/az/` and `backend/scanner/`
+point when they say "ported from".
+
+`requirements.txt` stayed. It reads like part of that application and is not:
+it is the only declaration of the Azure SDK in the repository, and the modules
+its own comments name — `az/nsg.py`, `az/keyvault.py`, `az/vm.py` — are
+`backend/` ones. Deleting it alongside its neighbours would have left the
+working Azure half with no dependencies declared anywhere.
+
+Azure is reached through `backend/api/app.py` like
 everything else: `azure-nsg`, `azure-storage`, `azure-keyvault`, `azure-vnet`
 and `azure-vm` are `ResourceType` entries in `api/registry.py`, their rules
 live in `scanner/azure_*_rules.py` and return the same warning shape as every
@@ -167,7 +181,8 @@ below — see *What reading the scanner found that driving it could not* — tak
 it to 964 from `backend/` and 970 from the repository root. Then the pass over
 the four surfaces nobody had audited — see *What comparing the two surfaces
 found* — and the instance-size gap a second look at the CLI turned up, take it
-to **979 from `backend/`** and **985 from the repository root**, 0 skipped,
+to **979 from `backend/`**, 0 skipped — and 979 from the repository root too,
+now that retiring the root application took its six tests with it,
 plus **244 checks** across the two Node suites in `frontend/`. Every figure
 here is re-run rather than carried forward, which is how two of them were once
 found to be one low — and re-running is also how the 977 that sat here was
@@ -281,9 +296,14 @@ machines. What that found is the section below, and it is the reason the
 Node suites are not the whole story: `app.test.mjs` answers a stub, and a stub
 written to match the code cannot disagree with it.
 
-**The root suite collects now, and `pytest` from the repository root is 985
-passed** — the 979 from `backend/` plus the six Azure tests at the root, which
-had not run since `ebdb579`.
+**There is one suite now: `pytest` answers 979 from the root and 979 from
+`backend/`, because they are the same tests.** The six that used to make the
+root figure larger were `test_azure_scanner.py`, which went with the
+application it covered.
+
+The rest of this entry is history rather than instruction, and is kept because
+the mistake in it is one this project keeps making. For a long time the root
+suite did not collect at all, and this file recorded the cause wrongly twice.
 
 The entry that used to sit here said the breakage was a rename and that it
 would resolve when `group/feature/key-vault` landed. Both halves were wrong.
@@ -307,11 +327,12 @@ branch is a divergent design rather than a later version: its `main.py` imports
 `run_azure_security_scan` and has no `scan_azure_payload` at all, so the flat
 payload shape is the whole root app there, while `ebdb579` moved this side to
 the ARM-shaped one. It is dated 2026-08-10 and is still not an ancestor of
-`group/main`. When it lands, expect a real conflict in `azure_scanner_engine.py`,
-`main.py` and `azure_scanner.py` — not one this patch created, and one worth
-resolving deliberately, because the branch's version also carries
-`check_key_vault_governance`, a fourth rule that does not exist in this
-checkout.
+`group/main`. When it lands, expect a real conflict — and note that this side
+has since deleted all three files, so the conflict is now "deleted by us,
+modified by them" rather than two versions of a function. Resolving it means
+deciding whether the root application comes back, not merging it. The branch
+also carries `check_key_vault_governance`, a fourth rule that never existed
+here; if any of that work is wanted, it belongs in `backend/scanner/`.
 
 **Two things were changed in AWS by hand and are not in any file here.** The
 `iam-audit` customer managed policy was extended twice, first with the six role
@@ -345,8 +366,8 @@ cd backend
 source /home/huori/scp-venv/bin/activate     # not ../.venv: see below
 
 pytest -v                                   # offline, moto, no credentials
-                                            # 979 here; 985 from the repository
-                                            # root, which collects again
+                                            # 979, and the same 979 from the
+                                            # repository root: one suite now
 python main.py                              # the CLI, both clouds, 14 options
 uvicorn api.app:app --reload --host 127.0.0.1   # API, /docs and the page at /ui
 python scripts/smoke_test.py                # live AWS, free
@@ -427,16 +448,15 @@ tool's own policy denies. Use the separate `cloudgoat` AWS profile for
 deploying and the default profile for scanning. `docs/benchmark.md` records
 what both found, and the two hazards that cost an hour each.
 
-Azure itself is reached through `backend/` like everything else — option 10 in
-the CLI, and `/resources/azure-storage` over HTTP. What still runs from the
-repository root is the *older* Azure app, which is a separate process and needs
-a different set of dependencies:
+Azure is reached through `backend/` like everything else — option 10 in the
+CLI, and `/resources/azure-storage` over HTTP. There is nothing to run from the
+repository root any more: the older Azure app that lived there has been
+deleted, so the three commands that used to sit here — `uvicorn main:app` on
+port 8001, and `pytest test_azure_scanner.py` — no longer refer to anything.
+Both still work against `group/main`, where those modules remain.
 
-```bash
-pip install -r requirements.txt          # on group/main: the Azure SDK
-uvicorn main:app --reload --port 8001    # Azure scan and deploy
-python -m pytest test_azure_scanner.py   # on group/main: six tests
-```
+`requirements.txt` at the root is still installed, and still holds the Azure
+SDK. It was never part of that application, whatever its position suggested.
 
 **The virtualenv is `/home/huori/scp-venv`, and this file has twice named one
 that does not exist** — first `../.venv`, then `/home/user/scp-venv`. There is
@@ -461,44 +481,37 @@ worktree needs its own copy or a symlink to one.
 That virtualenv holds both SDKs, so `/ui` scans Azure as well as AWS. It did not
 until recently, and the reason for the change is worth knowing: the page is one
 process, so whether it can reach Azure is decided by the interpreter running
-uvicorn. A second virtualenv beside it does not help — `main.py` and the
-archived Streamlit page are separate processes and can have their own, but
-`/ui` cannot.
+uvicorn. A second virtualenv beside it does not help — the archived Streamlit
+page is a separate process and can have its own, but `/ui` cannot.
 
 What that costs is nothing, now that `test_the_page_starts_without` blocks the
 imports in a subprocess rather than relying on `.venv` being a machine that
 lacks one. Before that, installing the Azure SDK made two tests fail, and the
 obvious reaction to a test that fails on your machine is to delete it.
 
-`main.py` still imports `azure_crud` at module scope, which pulls the Azure SDK
-in before anything runs — so `/api/v1/azure/scan`, which needs neither
-credentials nor the SDK, cannot start without them either. That one is
-unchanged; only `backend/` is symmetric.
-
-It has no `/ui`, and shares nothing with `backend/` but the repository.
-Nothing below this line applies to it.
+The root app used to spoil that symmetry: `main.py` imported `azure_crud` at
+module scope, pulling the Azure SDK in before anything ran, so
+`/api/v1/azure/scan` — which needed neither credentials nor the SDK — could not
+start without them. It was the one place the lazy-import discipline did not
+hold, and it left with the rest of that application. `backend/` is now the
+whole program and is symmetric throughout.
 
 ## Layout
 
 ```
-main.py                 the Azure app. Separate FastAPI instance, root of repo
-azure_scanner*.py       the Azure scanner, separate from backend/scanner/
-azure_crud.py           Azure provisioning, reached only by main.py. Fully
-                        superseded now: every create in it exists in backend/az/
-                        with a guard it does not have (it replaces an existing
-                        group's whole rule list and reports success)
-security_messages.py    Azure's warning text, read by azure_scanner.py, which
-                        azure_scanner_engine.run_azure_security_scan reads in
-                        turn. Both were orphaned between ebdb579 and the fix
-test_azure_scanner.py   six tests, no cloud calls. Collects again; they cover
-                        azure_scanner.py through the aggregator
 requirements.txt        the Azure SDK, not boto3. backend/requirements.txt is
                         the AWS one, and now also python-multipart — needed
                         only to accept an uploaded file, and the upload route
                         is registered only when it imports, because a
                         dependency belonging to one feature must not stop the
                         whole page starting. Without it that one endpoint
-                        answers 503 naming what to install
+                        answers 503 naming what to install. It stays at the
+                        root, and is the one thing there that did NOT go with
+                        the Azure app: it is the only declaration of the Azure
+                        SDK anywhere, and its own comments name az/nsg.py,
+                        az/keyvault.py and az/vm.py — backend/ code. Deleting
+                        it with its neighbours would have left the working
+                        Azure half with no declared dependencies at all
 
 archive/       two Streamlit frontends, kept and not used. See their READMEs
 backend/
@@ -2221,18 +2234,20 @@ caching.
     installed and adding it just to ask was not worth it — so "the writes
     worked" is what is known, rather than which grant made them work. It
     demonstrably cannot register a resource provider.
-- **`main.py` is still a second application, and now a second copy of
-  provisioning.** `backend/` is one program serving both clouds; the Azure app
-  at the repository root is not part of it and shares nothing but the
-  directory. Nothing depends on it any more, so the open question is whether it
-  is deleted or kept as the Azure-only deployment `/ui` cannot be — see *The
-  two halves are merged*. What decides it is no longer only taste: storage is
-  now built in both places, which is the duplication the scanner had before the
-  merge, and the root app is the only thing that can still create an Azure NSG.
-  It cannot retire until `az/nsg.py` can. The two entries that used to sit
-  here, saying the halves had never met and that the frontend covered AWS only,
-  were made false by that merge and by Azure becoming a `ResourceType`; the
-  page grows Azure tabs without being told they exist.
+- **The second application is gone.** This entry has been rewritten four times
+  and each version was overtaken rather than wrong: first the two halves had
+  never met, then they had merged but both still ran, then the only thing
+  keeping the root app alive was that it could create an Azure NSG and
+  `az/nsg.py` could not. `az/nsg.py` can, so the last reason went, and the
+  application went after it — see *There is one application now*.
+
+  What that leaves is a genuine loss worth naming rather than glossing:
+  `backend/` has no Azure-only deployment. The root app could be run by
+  somebody holding Azure credentials and no AWS ones, as a separate process
+  with its own dependencies. `/ui` cannot be, because it is one process serving
+  both clouds. Nothing needed that and nobody was using it, but it was a
+  capability and it is not one any more. `--azure-only` on the smoke test is
+  the nearest thing left.
 
 ## Where this stands against the scope
 
@@ -2282,10 +2297,11 @@ refinement, and the largest is that monitor and defender have no rules at all
 
 **One small thing first, and it is known and one-line.**
 
-0. **Root collection is fixed — `pytest` from the repository root is 985
-   passed.** See *The root suite collects now*. It was not the rename this
-   file called it, and the branch it was waiting on would have conflicted
-   rather than resolved it.
+0. **Root collection is no longer a question — there is one suite, and
+   `pytest` answers 979 from either directory.** It was fixed first and then
+   made moot: the six tests that only the root run collected belonged to the
+   application that has since been deleted. Worth keeping only for the
+   diagnosis, which this file twice recorded wrongly before getting it right.
 
    **The `GroupId`/`group_id` composition bug is fixed, and this entry was the
    last thing here still calling it open.** `sg.group_id_of` normalises all
