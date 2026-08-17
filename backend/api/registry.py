@@ -67,6 +67,41 @@ DEFAULT_REGION = "us-east-1"
 # DEFAULT_REGION because "us-east-1" is not a place Azure has heard of.
 DEFAULT_AZURE_LOCATION = "eastus"
 
+
+def _az_location(spec):
+    """Where an Azure resource goes, in one place for all five types.
+
+    Two spellings because two callers: the CLI and the smoke test have always
+    sent `region`, and the page's forms ask for `location`, which is the word
+    Azure uses. Three adapters already tried both and two read only `region`,
+    so the same form field worked or did not depending on which type it was -
+    except that `location` reached none of them, because ResourceSpec did not
+    declare it until now and pydantic drops what it does not declare.
+    """
+    return spec.get("region") or spec.get("location") or DEFAULT_AZURE_LOCATION
+
+
+def _az_created(result):
+    """Reduces a created Azure resource's id to the name the routes accept.
+
+    Azure answers a create with the full ARM path, which carries eight slashes;
+    a route takes an id as ONE path segment. So every follow-up call on the id
+    a create had just handed back - read, scan, fix, the deletion plan, delete -
+    matched no route and 404'd before any Azure code ran. A resource built from
+    the page could not then be deleted from the page, which is how three live
+    resources were stranded in a real subscription and had to be removed by
+    typing their names in by hand.
+
+    The list adapters were fixed for this and the create adapters were not,
+    which is why nothing caught it: a list-then-act flow works and a
+    create-then-act flow does not. `A row's id is whatever the routes accept`
+    is the rule, and for Azure that is the name.
+    """
+    ok, value, problems = result
+    if ok and isinstance(value, str) and "/" in value:
+        value = value.rsplit("/", 1)[-1]
+    return ok, value, problems
+
 # Ports a form should offer, which is not the same list as the ports the
 # scanner warns about. RISKY_PORTS exists to describe what is dangerous;
 # 80 and 443 belong in a menu of things people open on purpose and would be
@@ -960,12 +995,53 @@ SNAPSHOT = ResourceType(
 # --------------------------------------------------------------------- Alarms
 
 
+def _metric_for(namespace):
+    """The metric that goes with a namespace, since the menu chooses both.
+
+    The form offers one control - "Account spending ($)" or "CPU usage (%)" -
+    whose value is a namespace. The metric was then read from the spec with an
+    unconditional `or BILLING_METRIC` fallback, and no caller of the web form
+    can send a metric because there is no field for one. So picking CPU built
+    an alarm on AWS/EC2 + EstimatedCharges: a pair that has no data, which
+    CloudWatch accepts without complaint and which then sits in
+    INSUFFICIENT_DATA forever.
+
+    That is exactly the silence `scanner/alarm_rules.py` exists to catch, and
+    it could not: no rule reads metric_name, so the pre-flight and the
+    read-back scan both called it clean. backend/main.py has always paired the
+    two correctly; this is the same pairing, in the half the page uses.
+
+    A mapping and not an `if`, returning None for anything unlisted. The first
+    version of this fix ended `return alarms.BILLING_METRIC`, which pairs any
+    third namespace with EstimatedCharges and rebuilds the same
+    never-fires-forever alarm the moment one is added - the defect reproduced
+    by its own repair. The caller refuses instead, because a wrong pairing is
+    silent and a refusal is not.
+    """
+    return {
+        alarms.BILLING_NAMESPACE: alarms.BILLING_METRIC,
+        alarms.CPU_NAMESPACE: alarms.CPU_METRIC,
+    }.get(namespace)
+
+
 def _alarm_create(client, spec):
+    namespace = spec.get("namespace") or alarms.BILLING_NAMESPACE
+    # An explicit metric still wins: the CLI and the smoke test send one.
+    metric_name = spec.get("metric_name") or _metric_for(namespace)
+    if not metric_name:
+        return False, (
+            f"'{namespace}' is not a namespace this tool knows the metric for, "
+            f"and none was named. Send metric_name as well, or use one of "
+            f"{alarms.BILLING_NAMESPACE} or {alarms.CPU_NAMESPACE}. Guessing "
+            f"here builds an alarm on a pair with no data, which CloudWatch "
+            f"accepts and then leaves silent forever."
+        ), []
+
     return alarms.create_alarm(
         client,
         name=spec["name"],
-        namespace=spec.get("namespace") or alarms.BILLING_NAMESPACE,
-        metric_name=spec.get("metric_name") or alarms.BILLING_METRIC,
+        namespace=namespace,
+        metric_name=metric_name,
         threshold=spec.get("threshold"),
         region=spec.get("region"),
         period=spec.get("period"),
@@ -1149,15 +1225,15 @@ def _az_nsg_create(client, spec):
             "already exist."
         ), []
 
-    return az_nsg.create_nsg(
+    return _az_created(az_nsg.create_nsg(
         client,
         spec.get("name"),
         group,
-        location=spec.get("region") or spec.get("location") or "eastus",
+        location=_az_location(spec),
         # azure_rules, not rules: the AWS field carries a different shape, and
         # check_nsg_spec reads the same key for the same reason.
         rules=spec.get("azure_rules") or [],
-    )
+    ))
 
 
 def _az_nsg_delete(client, resource_id, options):
@@ -1283,13 +1359,13 @@ def _az_storage_create(client, spec):
             "already exist."
         ), []
 
-    return az_storage.create_account(
+    return _az_created(az_storage.create_account(
         client,
         spec["name"],
         group,
-        location=spec.get("region") or DEFAULT_AZURE_LOCATION,
+        location=_az_location(spec),
         secure_by_default=spec.get("secure_by_default", True),
-    )
+    ))
 
 
 def _az_storage_delete(client, resource_id, options):
@@ -1350,13 +1426,13 @@ def _az_keyvault_create(client, spec):
             "already exist."
         ), []
 
-    return az_keyvault.create_vault(
+    return _az_created(az_keyvault.create_vault(
         client,
         spec["name"],
         group,
-        location=spec.get("region") or DEFAULT_AZURE_LOCATION,
+        location=_az_location(spec),
         secure_by_default=spec.get("secure_by_default", True),
-    )
+    ))
 
 
 def _az_keyvault_delete(client, resource_id, options):
@@ -1412,14 +1488,14 @@ def _az_vnet_create(client, spec):
             "already exist."
         ), []
 
-    return az_vnet.create_vnet(
+    return _az_created(az_vnet.create_vnet(
         client,
         spec.get("name"),
         group,
-        location=spec.get("region") or spec.get("location") or "eastus",
+        location=_az_location(spec),
         address_prefixes=spec.get("address_prefixes"),
         subnets=spec.get("subnets"),
-    )
+    ))
 
 
 def _az_vnet_delete(client, resource_id, options):
@@ -1473,11 +1549,11 @@ def _az_vm_create(client, spec):
             "already exist."
         ), []
 
-    return az_vm.create_vm(
+    return _az_created(az_vm.create_vm(
         client,
         spec.get("name"),
         group,
-        location=spec.get("region") or spec.get("location") or "eastus",
+        location=_az_location(spec),
         vm_size=spec.get("vm_size"),
         admin_username=spec.get("admin_username") or "azureuser",
         # public_key, matching the AWS key-pair field. There is deliberately no
@@ -1490,7 +1566,7 @@ def _az_vm_create(client, spec):
         open_ports=spec.get("open_ports"),
         allowed_source=spec.get("allowed_source"),
         encryption_at_host=bool(spec.get("encryption_at_host")),
-    )
+    ))
 
 
 def _az_vm_delete(client, resource_id, options):

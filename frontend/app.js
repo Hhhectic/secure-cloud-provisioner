@@ -225,7 +225,20 @@ function multiChoice(options) {
   select.multiple = true;
   select.size = Math.min(Math.max(options.length, 2), 5);
   for (const o of options) select.append(new Option(o.label, o.value));
-  select.value = () => [...select.selectedOptions].map((o) => o.value);
+  // No `select.value = () => …` here, which is what this used to do and which
+  // silently threw away every choice after the first.
+  //
+  // `value` is an accessor on HTMLSelectElement.prototype, so assigning to it
+  // goes through the SETTER and never creates an own property. `typeof
+  // el.value` therefore stayed "string", collectSpec took its plain-<input>
+  // branch and split that string on commas - and a multi-select's value getter
+  // returns only the first selected option and never contains a comma. Picking
+  // 22, 80 and 443 submitted ["22"].
+  //
+  // The same idiom works a few lines up on a <span> and on the rule rows,
+  // because those elements have no `value` accessor to collide with, which is
+  // why this looked like a working pattern. collectSpec reads selectedOptions
+  // directly now, so there is nothing to attach.
   return select;
 }
 
@@ -344,6 +357,15 @@ function renderScope() {
     // networks.
     select.onchange = () => {
       state.region = select.value;
+      // Every cached verdict was taken in the region it was taken in, and the
+      // cache is keyed by type alone. Selecting the dashboard rebuilds it, so
+      // nothing stale is on screen today - but the Audit list reads this cache
+      // immediately below, and it matches on a resource's id. Most AWS ids are
+      // region-unique and simply miss, which shows honestly as "not scanned";
+      // an id that is not - an alarm is named, not numbered - would match the
+      // other region's row and print its verdict. Dropped rather than reasoned
+      // about per type, for the reason forgetScan already gives.
+      state.scans = {};
       buildCreateForm();
       loadList();
     };
@@ -657,7 +679,25 @@ async function scanEverything() {
   // What the headline is made of. Unreachable is counted separately and on
   // purpose: a type that could not be read is not a type with nothing wrong
   // in it, and the difference is the one this tool must never blur.
-  const total = { critical: 0, warning: 0, resources: 0, unreachable: [] };
+  // The dashboard leads with what is still outstanding, and puts what has been
+  // accepted in brackets after it.
+  //
+  // This panel used to count an accepted critical as a critical here, on the
+  // grounds that anything else was the suppression scanner/acknowledged.py
+  // exists to refuse. That reasoning does not survive contact with what an
+  // acknowledgement is for: somebody has already looked at the finding and
+  // written down why they are living with it, so repeating it at full volume
+  // on the landing page is telling them something they went to the trouble of
+  // recording that they know. A dashboard that never gets quieter as you work
+  // through it makes the mechanism pointless.
+  //
+  // Nothing is hidden by this, which is the line that matters. The accepted
+  // counts are on the card, the headline says they are not counted above, and
+  // the detail panel still lists every one of them at its own severity with
+  // the reason attached - see summarize() and the tallies, which are unchanged.
+  const total = { critical: 0, warning: 0, accepted: 0,
+                  acceptedCritical: 0, acceptedWarning: 0,
+                  resources: 0, unreachable: [] };
 
   await Promise.all(mine.map(async (t) => {
     const card = byName.get(t.short_label || t.label);
@@ -665,39 +705,104 @@ async function scanEverything() {
     try {
       const found = await api(`/resources/${t.key}?only_ours=false&with_scan=true`);
       const rows = found.resources || [];
-      let critical = 0, warning = 0;
+      let critical = 0, warning = 0, accepted = 0;
+      let acceptedCritical = 0, acceptedWarning = 0;
 
       // Kept per resource, not just totalled. This is the only scan the page
       // runs over a whole type, so the Audit tab reads its answers rather
       // than asking for them again - which is what lets that tab be a place
       // findings are read instead of a place they are fetched.
       const byId = new Map();
+      let unreadable = 0;
       for (const r of rows) {
-        if (!r.counts) continue;
+        if (!r.counts) {
+          // A row the server could scan nothing of. It arrives with counts
+          // null and `unreachable` naming the permission, because api/app.py
+          // returns it rather than dropping it - a resource you cannot audit
+          // is exactly the one worth knowing about.
+          //
+          // Skipping it silently folded it into the clean total: two storage
+          // accounts, one unreadable, rendered as "clean" under the headline
+          // "Nothing critical or warning". That is the one thing this page
+          // must never do, and it is the same failure as the "not scanned"
+          // verdict this file already learned - counted here so the card and
+          // the headline can both say the scan is short.
+          unreadable += 1;
+          continue;
+        }
         byId.set(r.id, r.counts);
         critical += r.counts.critical || 0;
         warning += r.counts.warning || 0;
+        accepted += r.counts.acknowledged || 0;
+        acceptedCritical += (r.counts.accepted || {}).critical || 0;
+        acceptedWarning += (r.counts.accepted || {}).warning || 0;
       }
       state.scans[t.key] = { at: new Date(), byId };
 
+      // Named in the headline's own vocabulary. renderVerdict already refuses
+      // the clean wording when anything is in here; what was missing was ever
+      // putting a partly-read type into it, which only whole-type failures did.
+      if (unreadable) total.unreachable.push(t.short_label || t.label);
+
       total.critical += critical;
       total.warning += warning;
+      total.accepted += accepted;
+      total.acceptedCritical += acceptedCritical;
+      total.acceptedWarning += acceptedWarning;
       total.resources += rows.length;
 
       // Both numbers where there are both. "2 critical" alone on a type that
       // also has nine warnings is a true sentence that hides the larger half,
       // and the point of the card is to be read without opening it.
+      // What is left to do, then what has been decided about, in brackets.
+      //
+      // "2 critical, 2 warning, 3 accepted" was the first attempt and read as
+      // seven findings without saying which three were spoken for. Attaching
+      // them per severity fixed the ambiguity and still made you subtract in
+      // your head to find the one thing outstanding. Leading with the
+      // outstanding count answers the question the card is actually asked.
+      const outstandingCritical = critical - acceptedCritical;
+      const outstandingWarning = warning - acceptedWarning;
+
       const parts = [];
-      if (critical) parts.push(`${critical} critical`);
-      if (warning) parts.push(`${warning} warning`);
+      if (outstandingCritical) parts.push(`${outstandingCritical} critical`);
+      if (outstandingWarning) parts.push(`${outstandingWarning} warning`);
+      // Last, and never omitted: a card reading "clean" over a type where one
+      // resource was never looked at is the verdict this page did not earn.
+      if (unreadable) parts.push(`${unreadable} could not be read`);
+
+      // Abbreviated because the card is 175px and this trails a line that has
+      // already spelled at least one severity out in full.
+      const decided = [];
+      if (acceptedCritical) decided.push(`${acceptedCritical} C`);
+      if (acceptedWarning) decided.push(`${acceptedWarning} W`);
+      const bracket = decided.length ? ` (${decided.join(", ")} accepted)` : "";
 
       const where = card.querySelector(".dash-state");
-      where.textContent = rows.length === 0 ? "none"
-        : parts.length ? parts.join(", ")
+      where.textContent =
+        rows.length === 0 ? "none"
+        // Something to do, and possibly something already decided.
+        : parts.length ? parts.join(", ") + bracket
+        // Nothing outstanding, but findings exist and somebody accepted them.
+        // Deliberately not "clean": there is something here, it has just been
+        // answered, and the two are different states.
+        : decided.length ? `all accepted (${decided.join(", ")})`
         : "clean";
-      card.classList.toggle("has-critical", critical > 0);
-      card.classList.toggle("has-warning", !critical && warning > 0);
-      card.classList.toggle("clean", rows.length > 0 && !critical && !warning);
+
+      // Styled by what is left, for the same reason the words are. A red card
+      // over the word "clean" - or over an outstanding count of zero - is a
+      // contradiction the eye resolves before the text is read.
+      card.classList.toggle("has-critical", outstandingCritical > 0);
+      card.classList.toggle("has-warning",
+        !outstandingCritical && outstandingWarning > 0);
+      // Only where there was genuinely nothing to find. A type whose findings
+      // were all accepted is not clean, and is left neutral instead.
+      card.classList.toggle("clean",
+        rows.length > 0 && !critical && !warning && !unreadable);
+      // Cleared explicitly: loadDashboard's counting pass adds this class when
+      // its own list call fails, and a scan that then succeeds used to leave
+      // the card styled unreachable while printing a real verdict.
+      card.classList.toggle("unreachable", unreadable > 0);
     } catch (e) {
       total.unreachable.push(t.short_label || t.label);
       card.querySelector(".dash-state").textContent = "unreachable";
@@ -752,16 +857,32 @@ function renderVerdict(into, total) {
       + `(${total.unreachable.join(", ")}), so this is not the whole account.`
     : null;
 
-  if (total.critical) {
-    say(plural(total.critical, "critical finding"), "is-critical",
-        [total.warning ? `${plural(total.warning, "warning")} as well.` : null,
-         missed].filter(Boolean).join(" "));
+  // Outstanding, matching the cards. A headline counting accepted findings
+  // while the grid below leaves them out would be the two halves of one panel
+  // disagreeing, which is worse than either answer on its own.
+  const critical = total.critical - total.acceptedCritical;
+  const warning = total.warning - total.acceptedWarning;
+
+  // "and are not counted above" is the load-bearing half of this sentence.
+  // Without it "1 critical finding" beside "2 critical accepted" leaves the
+  // reader unable to tell whether the 1 includes the 2.
+  const decided = [];
+  if (total.acceptedCritical) decided.push(plural(total.acceptedCritical, "critical"));
+  if (total.acceptedWarning) decided.push(plural(total.acceptedWarning, "warning"));
+  const spokenFor = decided.length
+    ? `${decided.join(" and ")} already accepted, and not counted above.`
+    : null;
+
+  if (critical) {
+    say(plural(critical, "critical finding"), "is-critical",
+        [warning ? `${plural(warning, "warning")} as well.` : null,
+         spokenFor, missed].filter(Boolean).join(" "));
     return;
   }
 
-  if (total.warning) {
-    say(`No critical findings, ${plural(total.warning, "warning")}`,
-        "is-warning", missed);
+  if (warning) {
+    say(`No critical findings, ${plural(warning, "warning")}`,
+        "is-warning", [spokenFor, missed].filter(Boolean).join(" ") || null);
     return;
   }
 
@@ -775,6 +896,15 @@ function renderVerdict(into, total) {
   if (!total.resources) {
     say("Nothing in this account yet", null,
         "No resources of any type, so there is nothing to judge.");
+    return;
+  }
+
+  if (total.accepted) {
+    // Everything found has been answered. Not the same as nothing being
+    // found, and it must not borrow that wording: the difference is a set of
+    // decisions somebody made, which are worth going back to.
+    say("Nothing outstanding", null,
+        `${spokenFor} Everything found here has been looked at and accepted.`);
     return;
   }
 
@@ -1183,9 +1313,41 @@ function renderFinding(w, resourceId) {
   // decided to live with this, not that it stopped being true.
   if (w.acknowledged) {
     const a = w.acknowledged;
-    box.append(text("div",
+    const note = text("div",
       `${a.by} accepted this${a.on ? " on " + a.on : ""}` +
-      `${a.until ? ", until " + a.until : ""}: ${a.reason}`, "ack"));
+      `${a.until ? ", until " + a.until : ""}: ${a.reason}`, "ack");
+
+    // Undoing it sits with the decision it undoes, rather than somewhere else
+    // on the page. There is no confirmation step and no form: accepting a
+    // finding is the direction that needs one, because it is the direction
+    // that can hide something. This one only makes a finding louder, and the
+    // state it returns to is the state it started in.
+    if (w.rule_id) {
+      const undo = document.createElement("button");
+      undo.className = "quiet";
+      undo.textContent = "Stop accepting this";
+      undo.onclick = async () => {
+        undo.disabled = true;
+        try {
+          const res = await api(
+            `/acknowledgements/${encodeURIComponent(w.rule_id)}`
+            + `?confirm=${encodeURIComponent(w.rule_id)}`,
+            { method: "DELETE" });
+          toast(res.message);
+          // The counts change, so what the dashboard last measured no longer
+          // describes this type - the same reasoning as a fix or a delete.
+          forgetScan();
+          showDetail(resourceId);
+          loadList();
+        } catch (e) {
+          toast(e.message, true);
+          undo.disabled = false;
+        }
+      };
+      note.append(document.createTextNode(" "), undo);
+    }
+
+    box.append(note);
   }
 
   if (w.control) {
@@ -1980,9 +2142,18 @@ function collectSpec(inputs) {
     }
 
     if (kind === "multi") {
-      const chosen = typeof el.value === "function"
-        ? el.value()
-        : el.value.split(",").map((s) => s.trim()).filter(Boolean);
+      // A real <select multiple> is asked what is selected. Its `value` getter
+      // answers with the FIRST selected option only, so reading that and
+      // splitting it kept one choice out of however many were made - silently,
+      // and identically for the live pre-flight, so nothing anywhere reported
+      // that the request had been truncated. buildCreateForm falls back to a
+      // plain comma-separated <input> when a type has no options to offer, and
+      // that case still needs the split.
+      const chosen = el.multiple
+        ? [...el.selectedOptions].map((o) => o.value)
+        : typeof el.value === "function"
+          ? el.value()
+          : el.value.split(",").map((s) => s.trim()).filter(Boolean);
       if (chosen.length) spec[name] = chosen;
       continue;
     }
@@ -2118,9 +2289,13 @@ async function uploadAttached(inputs, resourceId, out) {
 
   try {
     // Not api(): that sets a JSON content type, and multipart needs the
-    // browser to set its own with the boundary in it.
+    // browser to set its own with the boundary in it. Skipping api() also
+    // skips the region it appends to every other request, so this carries it
+    // by hand: a bucket in eu-west-1 is not there when looked for in
+    // us-east-1, and the upload would report it missing.
     const res = await fetch(
-      `${API}/resources/bucket/${encodeURIComponent(resourceId)}/objects`,
+      `${API}/resources/bucket/${encodeURIComponent(resourceId)}/objects`
+      + `?region=${encodeURIComponent(state.region)}`,
       { method: "POST", body: form });
     const answered = await res.json().catch(() => ({}));
 

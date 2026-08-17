@@ -209,6 +209,89 @@ def test_the_api_reaches_the_writer_through_exactly_one_function():
             assert writes not in line, line
 
 
+def test_an_acknowledgement_can_be_taken_back(tmp_path):
+    """The counterpart of record(). A decision somebody made has to be one
+    somebody can unmake, or the only way out of a stale entry is a text
+    editor."""
+    where = tmp_path / "acknowledged.json"
+    where.write_text(json.dumps({"acknowledgements": [
+        {"rule_id": "bucket:public_policy", "reason": "the CV site, on purpose",
+         "by": "ada", "on": "2026-01-01", "until": "2026-12-01"},
+        {"rule_id": "bucket:encryption_kms", "reason": "kms costs money here",
+         "by": "ada", "on": "2026-01-01", "until": "2026-12-01"},
+    ]}))
+
+    removed, path_used = acknowledged.remove("bucket:public_policy", where)
+
+    assert [e["rule_id"] for e in removed] == ["bucket:public_policy"]
+    assert path_used == where
+    # What it said comes back with it: the file no longer holds the reason,
+    # and the caller is the last place it exists.
+    assert removed[0]["reason"] == "the CV site, on purpose"
+
+    left, _ = acknowledged.load(where)
+    assert [e["rule_id"] for e in left] == ["bucket:encryption_kms"], (
+        "and nothing else in the file is touched")
+
+
+def test_taking_back_something_that_was_never_accepted_changes_nothing(tmp_path):
+    where = tmp_path / "acknowledged.json"
+    where.write_text(json.dumps({"acknowledgements": [
+        {"rule_id": "bucket:public_policy", "reason": "on purpose", "by": "ada"},
+    ]}))
+    before = where.read_text()
+
+    removed, _ = acknowledged.remove("bucket:nothing_like_this", where)
+
+    assert removed == []
+    assert where.read_text() == before, "the file is not rewritten for nothing"
+
+
+def test_every_entry_for_one_rule_is_taken_back_not_just_the_first(tmp_path):
+    """record() appends and does not look, so the file can hold two for one
+    rule. Leaving one behind would answer "no longer accepted" while the
+    finding stayed dimmed, which is the one result that would make this
+    untrustworthy."""
+    where = tmp_path / "acknowledged.json"
+    where.write_text(json.dumps({"acknowledgements": [
+        {"rule_id": "bucket:public_policy", "reason": "first", "by": "ada"},
+        {"rule_id": "bucket:encryption_kms", "reason": "unrelated", "by": "ada"},
+        {"rule_id": "bucket:public_policy", "reason": "written twice", "by": "bo"},
+    ]}))
+
+    removed, _ = acknowledged.remove("bucket:public_policy", where)
+
+    assert len(removed) == 2
+    left, _ = acknowledged.load(where)
+    assert [e["rule_id"] for e in left] == ["bucket:encryption_kms"]
+
+
+def test_a_removed_acknowledgement_stops_dimming_the_finding(tmp_path):
+    """End to end over the two functions that matter: apply() marks it, remove()
+    unmarks it, and nothing else about the finding changes."""
+    where = tmp_path / "acknowledged.json"
+    where.write_text(json.dumps({"acknowledgements": [
+        {"rule_id": "bucket:public_policy", "reason": "the CV site, on purpose",
+         "by": "ada", "on": "2026-01-01", "until": "2026-12-01"},
+    ]}))
+
+    def scan():
+        return [_warning(CRITICAL, "anyone can read it",
+                         {"rule_id": "bucket:public_policy",
+                          "resource_id": "bucket", "setting": "public_policy"})]
+
+    before = acknowledged.apply(scan(), acknowledged.load(where)[0], today=TODAY)
+    assert before[0].get("acknowledged")
+    assert acknowledged.count(before) == 1
+
+    acknowledged.remove("bucket:public_policy", where)
+
+    after = acknowledged.apply(scan(), acknowledged.load(where)[0], today=TODAY)
+    assert not after[0].get("acknowledged"), "it speaks at full volume again"
+    assert after[0]["level"] == CRITICAL, "and at the severity it always had"
+    assert acknowledged.count(after) == 0
+
+
 def test_the_write_is_refused_without_the_rule_id_repeated():
     """The same demand every forced delete here makes.
 

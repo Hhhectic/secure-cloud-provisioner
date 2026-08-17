@@ -357,3 +357,43 @@ def record(entry, source=None):
     document.setdefault("acknowledgements", []).append(entry)
     where.write_text(json.dumps(document, indent=2) + "\n")
     return where
+
+
+def remove(rule_id, source=None):
+    """Takes one rule's acknowledgements back out. Returns (removed, path).
+
+    `removed` is the entries that were dropped, so the caller can say what the
+    decision was rather than only that there is no longer one. That matters
+    more here than it would for most deletes: the thing being thrown away is
+    somebody's written reason, and echoing it back is the only record left of
+    what it said once the file no longer holds it.
+
+    Deliberately lighter guards than `check_entry`. Everything that function
+    protects is about *quietening* a finding - the direction that can hide a
+    live exposure, on a service holding credentials with no login. This is the
+    other direction: the worst a wrong call here can do is report something at
+    full volume that somebody had already decided about, which is the state the
+    tool starts in and the one it is safe to be wrong towards.
+
+    Removes every entry for the id rather than the first. Nothing stops the
+    file holding two for one rule - `record` appends and does not look - and
+    leaving one behind would answer "un-accepted" while the finding stayed
+    dimmed, which is the one outcome that would make this untrustworthy.
+    """
+    where = Path(source) if source else path()
+    if not where.exists():
+        return [], where
+
+    document = json.loads(where.read_text())
+    if isinstance(document, list):
+        document = {"acknowledgements": document}
+
+    entries = document.get("acknowledgements", [])
+    removed = [e for e in entries if isinstance(e, dict)
+               and e.get("rule_id") == rule_id]
+    if not removed:
+        return [], where
+
+    document["acknowledgements"] = [e for e in entries if e not in removed]
+    where.write_text(json.dumps(document, indent=2) + "\n")
+    return removed, where

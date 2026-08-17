@@ -66,6 +66,71 @@ def test_it_builds_every_piece(ec2, keys):
     }
 
 
+def test_a_build_that_stops_partway_keeps_what_it_learned(ec2, keys, monkeypatch):
+    """Every failure return answered with one fresh sentence and dropped
+    `problems`, at the moment it was worth most.
+
+    The identifiers survived - `created` is returned either way, and this
+    module's own docstring promises a caller can tell exactly what exists - but
+    the caveats about those identifiers did not. A network that really was
+    built, and whose DNS attribute really could not be set, came back as
+    "vpc-1" and one unrelated error: the caller was told the network exists and
+    not what is wrong with it.
+
+    The same defect CLAUDE.md records for the Azure machine create, where
+    `problems` was thrown away by the one caller that could have shown it.
+    """
+    monkeypatch.setattr(bastion.vpcs, "create_vpc", lambda *a, **k: (
+        True, "vpc-1",
+        ["Could not enable EnableDnsSupport: not authorized. Names inside "
+         "this network will not resolve."]))
+    monkeypatch.setattr(bastion.vpcs, "read_vpc_for_scanning", lambda *a, **k: {
+        "subnets": [
+            {"subnet_id": "subnet-pub", "declared_role": "public",
+             "cidr": "10.0.1.0/24", "reaches_internet": True},
+            {"subnet_id": "subnet-priv", "declared_role": "private",
+             "cidr": "10.0.2.0/24", "reaches_internet": False},
+        ]})
+    # And then a later step fails, as any of them might.
+    monkeypatch.setattr(bastion.kp, "import_key_pair",
+                        lambda *a, **k: (False, "throttled", []))
+
+    ok, created, problems = _build(ec2, keys, public_keys={
+        bastion.BASTION_KEY: "ssh-ed25519 AAAA one",
+        bastion.PRIVATE_KEY: "ssh-ed25519 AAAA two"})
+
+    assert not ok
+    assert created["vpc"] == "vpc-1", "the caller is told the network exists"
+    assert any("EnableDnsSupport" in p for p in problems), (
+        "and is told what is wrong with it")
+    assert any("throttled" in p for p in problems), (
+        "as well as what stopped the build")
+    assert problems.index(next(p for p in problems if "EnableDnsSupport" in p)) \
+        < problems.index(next(p for p in problems if "throttled" in p)), (
+        "in the order they happened")
+
+
+def test_a_missing_subnet_is_explained_rather_than_restated(ec2, keys,
+                                                            monkeypatch):
+    """create_vpc reports a subnet it could not build and still returns the
+    network as created, so the reason is already in hand here. Dropping it
+    replaced the explanation with a restatement of the symptom."""
+    monkeypatch.setattr(bastion.vpcs, "create_vpc", lambda *a, **k: (
+        True, "vpc-1",
+        ["'10.1.0.0/16' is too small to divide into two subnets, so none "
+         "were created."]))
+    monkeypatch.setattr(bastion.vpcs, "read_vpc_for_scanning",
+                        lambda *a, **k: {"subnets": []})
+
+    ok, _, problems = _build(ec2, keys)
+
+    assert not ok
+    assert any("too small" in p for p in problems), (
+        "the sentence saying why is kept")
+    assert any("missing a subnet" in p for p in problems), (
+        "alongside the one saying what")
+
+
 def test_the_private_machine_is_in_the_private_subnet(ec2, keys):
     """The mistake this blueprint exists to prevent.
 

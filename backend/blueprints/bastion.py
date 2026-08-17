@@ -72,11 +72,30 @@ def build(ec2, name, region="us-east-1", report=print, with_instances=True,
         created[kind] = identifier
         created["order"].append((kind, identifier))
 
+    def stopped(*here):
+        """Everything learned so far, then what stopped it.
+
+        Every failure return below used to answer with a fresh list holding one
+        sentence, which threw away `problems` at the exact moment it was worth
+        most. The identifiers survived - `created` is returned either way, and
+        the docstring above promises a caller can tell what exists - but the
+        caveats *about* those identifiers did not: a network that was built and
+        whose DNS attribute could not be set reported "vpc-1" and nothing else,
+        so the caller was told the network exists and not what is wrong with
+        it.
+
+        The same defect CLAUDE.md records for the Azure machine create, where
+        `problems` was discarded by the one caller that could have shown it.
+        Chronological: what happened on the way, then what ended it.
+        """
+        return False, created, problems + [p for p in here if p]
+
     # ---- The network -----------------------------------------------------
     report("Creating the network...")
     ok, vpc_id, vpc_problems = vpcs.create_vpc(ec2, name, region=region)
     if not ok:
-        return False, created, [vpc_id]
+        problems.extend(vpc_problems)
+        return stopped(vpc_id)
     record("vpc", vpc_id)
     problems.extend(vpc_problems)
 
@@ -85,10 +104,14 @@ def build(ec2, name, region="us-east-1", report=print, with_instances=True,
     private = _find_subnet(layout, "private")
 
     if not public or not private:
-        return False, created, [
+        # The reason is already in `problems` - create_vpc reports a subnet it
+        # could not make and still returns the network as created - so this is
+        # the one failure where dropping them replaced the explanation with a
+        # restatement of the symptom.
+        return stopped(
             "The network was created but is missing a subnet, so nothing can "
             f"be placed in it. Remove {vpc_id} and try again."
-        ]
+        )
 
     report(f"  network      {vpc_id}")
     report(f"  public       {public['subnet_id']}  {public['cidr']}")
@@ -119,25 +142,24 @@ def build(ec2, name, region="us-east-1", report=print, with_instances=True,
         if public_keys:
             material = public_keys.get(key_name)
             if not material:
-                return False, created, [
+                return stopped(
                     f"No public key was supplied for {key_name}. Generate the "
                     "pair where the private half should live and send only "
                     "the public part."
-                ]
+                )
         else:
             generated, material, private_path = kp.generate_locally(
                 full_name, directory=key_directory
             )
             if not generated:
-                return False, created, [
-                    f"Could not create {full_name}: {material}"
-                ]
+                return stopped(f"Could not create {full_name}: {material}")
 
         imported, result, key_problems = kp.import_key_pair(
             ec2, full_name, material
         )
         if not imported:
-            return False, created, [f"Could not register {full_name}: {result}"]
+            problems.extend(key_problems)
+            return stopped(f"Could not register {full_name}: {result}")
 
         record(key_name, full_name)
         problems.extend(key_problems)
@@ -150,10 +172,10 @@ def build(ec2, name, region="us-east-1", report=print, with_instances=True,
     try:
         my_address = sg.my_public_ip() + "/32"
     except OSError:
-        return False, created, [
+        return stopped(
             "Could not work out this machine's public address, so the bastion "
             "rule cannot be written. Check your internet connection."
-        ]
+        )
 
     ok, bastion_sg, sg_problems = sg.create_security_group(
         ec2, f"{name}-bastion-sg",
@@ -162,7 +184,8 @@ def build(ec2, name, region="us-east-1", report=print, with_instances=True,
           "source": my_address}],
     )
     if not ok:
-        return False, created, [f"Could not create the bastion group: {bastion_sg}"]
+        problems.extend(sg_problems)
+        return stopped(f"Could not create the bastion group: {bastion_sg}")
     record("bastion_sg", bastion_sg)
     problems.extend(sg_problems)
     report(f"  bastion-sg   {bastion_sg}  SSH from {my_address}")
@@ -174,7 +197,8 @@ def build(ec2, name, region="us-east-1", report=print, with_instances=True,
           "source": f"sg:{bastion_sg}"}],
     )
     if not ok:
-        return False, created, [f"Could not create the private group: {private_sg}"]
+        problems.extend(sg_problems)
+        return stopped(f"Could not create the private group: {private_sg}")
     record("private_sg", private_sg)
     problems.extend(sg_problems)
     report(f"  private-sg   {private_sg}  SSH from {bastion_sg} only")
@@ -194,7 +218,8 @@ def build(ec2, name, region="us-east-1", report=print, with_instances=True,
         assign_public_ip=True,
     )
     if not ok:
-        return False, created, [f"Could not launch the bastion: {bastion_id}"]
+        problems.extend(launch_problems)
+        return stopped(f"Could not launch the bastion: {bastion_id}")
     record("bastion_instance", bastion_id)
     problems.extend(launch_problems)
     report(f"  bastion      {bastion_id}  public subnet, public address")
@@ -207,10 +232,11 @@ def build(ec2, name, region="us-east-1", report=print, with_instances=True,
         assign_public_ip=False,
     )
     if not ok:
-        return False, created, [
+        problems.extend(launch_problems)
+        return stopped(
             f"Could not launch the private machine: {private_id}. The bastion "
             f"({bastion_id}) is running and billing."
-        ]
+        )
     record("private_instance", private_id)
     problems.extend(launch_problems)
     report(f"  private      {private_id}  private subnet, no public address")

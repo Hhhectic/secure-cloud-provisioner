@@ -109,6 +109,63 @@ def test_unrecognised_open_port_is_a_warning():
     assert warnings[0]["fix"]["action"] == "narrow_to_my_ip"
 
 
+def test_half_the_internet_is_not_a_private_range():
+    """`0.0.0.0/0` was tested by string equality, which is the shape of check
+    somebody writes a backdoor around.
+
+    `0.0.0.0/1` and `128.0.0.0/1` are two rules covering every address there
+    is, and both produced no finding at all - on either cloud. So did
+    `0.0.0.0/4` and `::/1`. The branch that swallowed them was reasoning about
+    *private* ranges: "there is nothing to say about port 443 from a private
+    range". A broad public one is not that.
+    """
+    for source, addresses in [
+        ("0.0.0.0/1", "2,147,483,648"),
+        ("128.0.0.0/1", "2,147,483,648"),
+        ("0.0.0.0/4", "268,435,456"),
+        ("8.0.0.0/9", "8,388,608"),
+    ]:
+        warnings = check_firewall_rules([_rule(22, source=source)])
+        assert warnings, f"{source} produced no warning at all"
+        assert warnings[0]["level"] == CRITICAL, source
+        # Named, and counted. Nobody reads /9 as eight million.
+        assert source in warnings[0]["message"], source
+        assert addresses in warnings[0]["message"], source
+
+
+def test_a_broad_ipv6_range_is_caught_the_same_way():
+    warnings = check_firewall_rules([_rule(22, source="::/1")])
+    assert warnings and warnings[0]["level"] == CRITICAL
+    assert "::/1" in warnings[0]["message"]
+
+
+def test_an_allowlist_is_still_an_allowlist():
+    """The other half, and the one that decides whether this is usable. A real
+    allowlist is an office, a VPN endpoint or one machine; reporting those
+    would put a critical on every correctly configured group in existence."""
+    for source in ["203.0.113.25/32", "8.8.8.0/24", "198.51.100.0/22"]:
+        assert check_firewall_rules([_rule(22, source=source)]) == [], source
+
+
+def test_private_space_stays_silent_however_large():
+    """10.0.0.0/8 is sixteen million addresses and not one of them is a
+    stranger. The size threshold applies to public space only - judging by
+    prefix length alone would report every VPC-internal rule as critical."""
+    for source in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                   "100.64.0.0/10"]:
+        assert check_firewall_rules([_rule(22, source=source)]) == [], source
+
+
+def test_a_rule_with_no_ports_does_not_report_a_port_called_none():
+    """It rendered as "Port None is open to the entire internet", which reads
+    as a bug rather than a finding."""
+    warnings = check_firewall_rules(
+        [_rule(22, from_port=None, to_port=None)])
+    assert warnings
+    assert "None" not in warnings[0]["message"]
+    assert "names no port range" in warnings[0]["message"]
+
+
 def test_private_source_is_never_flagged():
     for source in ("10.0.0.0/8", "192.168.1.0/24", "172.16.0.0/12", MY_IP):
         assert check_firewall_rules([_rule(22, source=source)]) == []

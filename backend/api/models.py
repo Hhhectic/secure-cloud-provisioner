@@ -99,10 +99,28 @@ class ResourceSpec(BaseModel):
 
     # Azure again. Every Azure resource lives in a resource group and there is
     # no AWS equivalent to borrow, so this is the one field a second cloud
-    # actually cost the shared model. `region` carries the Azure location
-    # rather than a second field beside it: they are the same idea under two
-    # names, and two fields would be one more pair to keep in step.
+    # actually cost the shared model.
     resource_group: Optional[str] = None
+
+    # `region` carries the Azure location, and this is the same idea under the
+    # name Azure and the page both use for it.
+    #
+    # The comment here used to say one field was deliberate, because two would
+    # be a pair to keep in step. The pair already existed and only one half was
+    # declared: all five Azure forms show a field called "location"
+    # (frontend/app.js FORMS), collectSpec sends the field name verbatim, and a
+    # key this model does not declare is dropped in silence. So every Azure
+    # create arrived with no location at all and fell through to eastus -
+    # typing westeurope built in eastus and reported success. Three of the five
+    # adapters already read `spec.get("region") or spec.get("location")`, which
+    # could never fire, because as_dict() cannot contain a key the model does
+    # not have.
+    #
+    # Declared rather than renaming the form field, because "region" is not
+    # what Azure calls this and the page is the half that has it right. `region`
+    # still wins where both are given: it is the one _spec_for_checking knows
+    # about, and it is what the CLI and the smoke test have always sent.
+    location: Optional[str] = None
 
     # Azure virtual machine. These were missing entirely, and a field this
     # model does not declare is dropped in silence - pydantic ignores unknown

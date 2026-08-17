@@ -32,10 +32,14 @@ from scanner.common import (
     cited,
     worst_level,
     print_warnings,
+    open_to_strangers,
 )
 
-# What Azure writes where AWS writes 0.0.0.0/0. "*" and "Internet" are Azure's
-# own service tags; the CIDR appears when somebody has typed it by hand.
+# The literal forms, kept because the create form offers them as menu entries.
+# Judging a rule no longer goes through this set: common.open_to_strangers
+# does, and both clouds ask it the same question. A set of four literals
+# matched by string equality left `0.0.0.0/1` - two billion addresses - silent,
+# and two such rules cover the whole internet between them.
 OPEN_TO_EVERYONE = {"*", "0.0.0.0/0", "internet", "::/0"}
 
 # The ports this reports on, and what they are for. Deliberately the same list
@@ -58,7 +62,7 @@ def _target(nsg_name, setting, rule_name=None):
 
 
 def _is_open_to_everyone(source):
-    return str(source or "").strip().lower() in OPEN_TO_EVERYONE
+    return open_to_strangers(source)[0]
 
 
 def _ports_covered(destination_port_range):

@@ -124,19 +124,47 @@ def statements_from(policies):
     return statements
 
 
+def _unrestricted(resource):
+    """Whether one Resource entry names everything rather than something.
+
+    `*` obviously. Also `arn:aws:iam::123456789012:role/*`, which is every role
+    in the account and is how the console writes it - and which this required
+    to be a bare `*`, so `iam:PassRole` on a wildcard role ARN reported nothing
+    at all. That is not "one named role is a deliberate arrangement", the case
+    the rule was written for; it is every role, spelled the ordinary way.
+
+    Two things deliberately left out, both to avoid trading a false negative
+    for a false positive:
+
+    A prefix - `role/build-*` - is a family somebody chose the shape of, and
+    reporting it would put a finding on a common, reasonable arrangement.
+
+    Only IAM ARNs are read this way. `arn:aws:s3:::mybucket/*` is every object
+    in *one* bucket, so treating a trailing `/*` as "everything" everywhere
+    would report an ordinary bucket policy as unrestricted access to all data.
+    Narrow on purpose: the escalation paths this module matches are IAM ones.
+    """
+    text = str(resource or "").strip()
+    if text == EVERY_RESOURCE:
+        return True
+    if not text.lower().startswith("arn:aws:iam:"):
+        return False
+    return text.endswith("/*") or text.endswith(":*")
+
+
 def permits(statements, wanted_action):
     """Whether these statements allow an action on every resource.
 
     Matching follows IAM's own wildcard rules, so `iam:*` permits
-    `iam:PassRole` and `*` permits everything. Resource must be `*`: a policy
-    that can pass one named role is a deliberate arrangement, and treating it
-    the same as one that can pass any role would put a finding on most
-    correctly-built infrastructure.
+    `iam:PassRole` and `*` permits everything. What counts as every resource is
+    `_unrestricted` above: passing one named role is a deliberate arrangement
+    and stays unreported, passing any of them is reported however the ARN is
+    written.
     """
     wanted = wanted_action.lower()
 
     for statement in statements:
-        if EVERY_RESOURCE not in as_list(statement.get("Resource")):
+        if not any(_unrestricted(r) for r in as_list(statement.get("Resource"))):
             continue
         for action in as_list(statement.get("Action")):
             if fnmatchcase(wanted, str(action).lower()):

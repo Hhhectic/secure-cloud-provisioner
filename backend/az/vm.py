@@ -339,7 +339,7 @@ def read_vm_for_scanning(client, name):
         # wrong.
         "password_authentication_disabled": getattr(
             linux, "disable_password_authentication", None),
-        "os_disk_encrypted": True if os_disk is not None else None,
+        "os_disk_encrypted": _os_disk_encrypted(os_disk),
         "encryption_at_host": getattr(security, "encryption_at_host", None),
         "power_state": _power_state(found),
         "public_ip": None,
@@ -350,6 +350,20 @@ def read_vm_for_scanning(client, name):
     unreadable = {}
     net = network_client()
 
+    # Three reads, three ways to fail, and each failure recorded against the
+    # setting it actually prevents.
+    #
+    # These were one try block recording one key, and `public_ip` was the key
+    # it did not record. A failure reading the card or the address left
+    # `public_ip` at None with nothing in `unreadable` saying why - which the
+    # scanner cannot tell apart from a machine that genuinely has no public
+    # address. It scores the difference: both the administration-port finding
+    # and the password one are CRITICAL on a reachable machine and WARNING
+    # otherwise, so an unreadable address silently bought the milder verdict,
+    # and describe_vm went on to show the machine as having no address at all.
+    # The no-card branch below has always recorded both keys; only the failure
+    # path recorded one.
+    nic = None
     try:
         nic_id = None
         profile = getattr(found, "network_profile", None)
@@ -364,7 +378,16 @@ def read_vm_for_scanning(client, name):
         else:
             nic_group = resource_group_of(nic_id)
             nic = net.network_interfaces.get(nic_group, nic_id.split("/")[-1])
+    except Exception as e:
+        # Both answers hang off the card, so failing to read it leaves both
+        # unknown rather than either of them absent.
+        why = (f"the login could not read this machine's network card "
+               f"({type(e).__name__})")
+        unreadable["public_ip"] = why
+        unreadable["effective_rules"] = why
 
+    if nic is not None:
+        try:
             for configuration in (getattr(nic, "ip_configurations", None) or []):
                 address = getattr(configuration, "public_ip_address", None)
                 if getattr(address, "id", None):
@@ -374,14 +397,32 @@ def read_vm_for_scanning(client, name):
                     settings["public_ip"] = getattr(public, "ip_address", None) \
                         or "allocated, no address yet"
                     break
+        except Exception as e:
+            # A public address is its own resource, in its own resource group,
+            # which this login may hold no role on even where it can read the
+            # machine.
+            unreadable["public_ip"] = (
+                f"the login could not read this machine's public address "
+                f"({type(e).__name__})"
+            )
 
+        try:
             rules, groups = _effective_rules(net, nic)
             settings["effective_rules"] = rules
             settings["security_groups"] = groups
-    except Exception as e:
-        unreadable["effective_rules"] = (
-            f"the login could not read this machine's network "
-            f"({type(e).__name__})"
+        except Exception as e:
+            unreadable["effective_rules"] = (
+                f"the login could not read the rules filtering this machine "
+                f"({type(e).__name__})"
+            )
+
+    if settings["os_disk_encrypted"] is None:
+        # Neither managed nor unmanaged, so the question went unanswered. The
+        # rule fires only on False, which means silence here would read as a
+        # pass - the default this project refuses everywhere else.
+        unreadable["os_disk_encrypted"] = (
+            "Azure did not report how this machine's operating system disk is "
+            "stored"
         )
 
     if settings["password_authentication_disabled"] is None:
@@ -394,6 +435,33 @@ def read_vm_for_scanning(client, name):
 
     settings["unreadable"] = unreadable
     return settings
+
+
+def _os_disk_encrypted(os_disk):
+    """Whether the operating system disk is encrypted at rest, or None.
+
+    Read rather than asserted. This was `True if os_disk is not None`, which is
+    not a check of anything: it reported the presence of a disk as that disk
+    being encrypted, so the value could only ever be True or None, and the rule
+    that tests it for False could never fire under any circumstance. What that
+    rule's own comment keeps it for - "an older or imported disk can be
+    different" - is exactly the case it was unable to see.
+
+    Azure encrypts every *managed* disk at rest with platform-managed keys and
+    has since 2017, so a managed disk is a true True and no extra call is
+    needed to know it. An unmanaged one is a page blob in a storage account the
+    machine points at, which is what a lifted-and-shifted or imported disk
+    looks like, and none of that guarantee reaches it. Neither field present
+    means Azure did not say, which is a gap rather than a verdict - the caller
+    records it as unreadable rather than letting silence read as a pass.
+    """
+    if os_disk is None:
+        return None
+    if getattr(os_disk, "managed_disk", None) is not None:
+        return True
+    if getattr(os_disk, "vhd", None) is not None:
+        return False
+    return None
 
 
 def _power_state(machine):
@@ -772,18 +840,88 @@ def _subnet_id(net, resource_group, vnet_name, subnet_name):
         return None
 
 
+def _remove_card_and_address(group, short):
+    """The network card and public address this tool made for one machine.
+
+    Returns (removed, failed) as two lists of names.
+
+    Deliberately not the virtual network or the security group. Those are
+    reusable, another machine may already sit in them, and both are registered
+    resource types with their own delete route - so a caller who wants them
+    gone has a way to say so. A network card is none of those things. It exists
+    to attach one machine to one network, it is worth nothing the moment that
+    machine is gone, and *nothing in the registry can remove one*.
+
+    That last part is why this exists. Leaving the card stranded the network
+    and the group as well, because Azure refuses to delete a subnet or a
+    security group a card still references - so the API had no route to a clean
+    subscription at all, and clearing up after a machine meant reaching past
+    this tool with the SDK. Found by deleting a machine through the routes and
+    then trying to delete the two things left behind.
+
+    Only what carries this tool's tag, which is what keeps the rule the
+    docstring below states: a card somebody else made is not touched, and a
+    delete that reached resources it did not create is how somebody's network
+    disappears because a machine that briefly used it was removed.
+    """
+    removed, failed = [], []
+
+    try:
+        net = network_client()
+    except Exception:
+        # The machine is already deleted by the time this runs, so nothing here
+        # may raise: turning a successful delete into an exception would lose
+        # the one message telling somebody what still exists. Reported as left
+        # behind, which is what it is.
+        return removed, [f"{short}-nic"]
+
+    # The card first. A public address cannot be deleted while a card still
+    # refers to it, and the card refers to it until the card is gone.
+    for label, get, delete in [
+        ("nic", net.network_interfaces.get, net.network_interfaces.begin_delete),
+        ("ip", net.public_ip_addresses.get,
+         net.public_ip_addresses.begin_delete),
+    ]:
+        item_name = f"{short}-{label}"
+        try:
+            found = get(group, item_name)
+        except Exception:
+            # Absent, or not readable. Either way there is nothing to remove
+            # and nothing worth reporting as a failure.
+            continue
+
+        if not is_managed(getattr(found, "tags", None)):
+            continue
+
+        try:
+            delete(group, item_name).result()
+            removed.append(item_name)
+        except Exception:
+            # Reported rather than raised: the machine is already gone, and a
+            # delete that succeeded and then claimed to fail is worse than one
+            # that says exactly what is left.
+            failed.append(item_name)
+
+    return removed, failed
+
+
 def delete_vm(client, name, force=False):
     """Deletes one machine. Returns (ok, message).
 
-    Refuses without force. Deletes the machine and its operating system disk,
-    which was created with deleteOption Delete for exactly this reason, and
-    does not delete the network card, the public address, the security group or
-    the network - because this tool may not have made them, and a delete that
-    reaches resources it did not create is how somebody's network disappears
-    because a machine that briefly used it was removed.
+    Refuses without force. Deletes the machine, its operating system disk -
+    created with deleteOption Delete for exactly this reason - and the network
+    card and public address this tool made for it, which are useless without it
+    and which no other route here can remove.
 
-    Says so plainly rather than reporting success and leaving somebody to find
-    four billable leftovers later.
+    Does not delete the security group or the virtual network, because this
+    tool may not have made them, another machine may be in them, and a delete
+    that reaches resources it did not create is how somebody's network
+    disappears because a machine that briefly used it was removed. Both are
+    registered types with their own delete route, so asking for them is one
+    call away.
+
+    Says what it left plainly rather than reporting success and leaving
+    somebody to find billable leftovers later.
     """
     group, short = _locate(client, name)
 
@@ -802,14 +940,22 @@ def delete_vm(client, name, force=False):
     except Exception as e:            # HttpResponseError, imported lazily
         return False, why_azure_refused(e, f"delete '{short}'")
 
-    return True, (
-        f"Deleted virtual machine '{short}' and its operating system disk. Its "
-        f"network card ('{short}-nic'), any public address, its security group "
-        "and its virtual network are still there - this tool did not "
-        "necessarily create them and does not remove what it may not own. A "
-        "static public address with nothing attached still costs; the rest do "
-        "not."
+    removed, failed = _remove_card_and_address(group, short)
+
+    message = f"Deleted virtual machine '{short}' and its operating system disk."
+    if removed:
+        message += f" Also removed: {', '.join(removed)}."
+    if failed:
+        message += (f" Could not remove {', '.join(failed)} - delete these by "
+                    f"hand, and note that a static public address still costs "
+                    f"while it exists.")
+    message += (
+        f" Its security group ('{short}-nsg') and virtual network "
+        f"('{short}-vnet') are left: this tool did not necessarily create them "
+        "and will not remove what it may not own. Delete them through their "
+        "own routes if nothing else is using them."
     )
+    return True, message
 
 
 def cleanup_all_managed_vms(client, force=False):
@@ -830,27 +976,35 @@ def cleanup_all_managed_vms(client, force=False):
 def plan_deletion(client, name):
     """What a delete would take with it, and what it would leave.
 
-    The only preview here that is mostly about what *survives*, because that is
-    the surprising half: four resources stay and one of them can carry a
-    charge.
+    Still says what survives as well as what goes, because that half is the
+    surprising one - but the card and the address are on the destroyed side
+    now, and listing them as survivors was the preview agreeing with a delete
+    that stranded them.
     """
     settings = read_vm_for_scanning(client, name)
     if settings is None:
         return None
 
     short = settings.get("vm_name")
-    left = [f"{short}-nic", f"{short}-vnet", f"{short}-nsg"]
+
+    items = [{"id": short, "type": "virtual machine"},
+             {"id": "operating system disk", "type": "managed disk"},
+             {"id": f"{short}-nic", "type": "network card"}]
+    destroys = {"virtual machines": 1, "managed disks": 1, "network cards": 1}
     if settings.get("public_ip"):
-        left.append(f"{short}-ip")
+        items.append({"id": f"{short}-ip", "type": "public address"})
+        destroys["public addresses"] = 1
+
+    left = [f"{short}-vnet", f"{short}-nsg"]
 
     return {
-        "items": [{"id": short, "type": "virtual machine"},
-                  {"id": "operating system disk", "type": "managed disk"}],
-        "destroys": {"virtual machines": 1, "managed disks": 1},
+        "items": items,
+        "destroys": destroys,
         "message": (
-            "Deleting this destroys the machine and its operating system disk. "
-            f"These are left behind and are not removed: {', '.join(left)}. A "
-            "static public address with nothing attached still costs."
+            "Deleting this destroys the machine, its operating system disk, "
+            "and the network card and any public address this tool made for "
+            f"it. These are left behind: {', '.join(left)} - they may hold "
+            "other machines, and each has its own delete."
         ),
     }
 

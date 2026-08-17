@@ -8,6 +8,7 @@ The moto mock has to be active before the app builds a boto3 client, and the app
 builds one per request, so the fixture wraps each test rather than the module.
 """
 
+import dataclasses
 import json
 import os
 import re
@@ -17,7 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 from moto import mock_aws
 
-from api import audit, models
+from api import audit, models, registry
 from api.app import app
 from aws import security_groups as sg
 
@@ -1614,6 +1615,69 @@ def test_acknowledging_a_finding_marks_it_without_removing_it(
     assert again["counts"]["acknowledged"] == 1
 
 
+def test_an_acknowledgement_can_be_taken_back_through_the_api(
+        client, vpc_id, somewhere_to_write):
+    """A decision somebody made has to be one somebody can unmake.
+
+    Without this the only way out of a stale entry was editing the file by
+    hand, which is the position the write path was moved away from for exactly
+    the same reason: a documented feature whose only route is a text editor is
+    one most people never use.
+    """
+    group_id, rule_id = _a_group_with_ssh_open(client, vpc_id, "ack-undo-sg")
+    client.post("/acknowledgements", json=_body(group_id, rule_id))
+
+    marked = client.get(f"/resources/security-group/{group_id}").json()
+    assert marked["counts"]["acknowledged"] == 1
+
+    undone = client.delete(
+        f"/acknowledgements/{rule_id}", params={"confirm": rule_id})
+    assert undone.status_code == 200, undone.text
+    # The reason comes back with it. The file no longer holds it and this
+    # response is the last place it exists.
+    assert "deliberate jump box" in undone.json()["message"]
+
+    after = client.get(f"/resources/security-group/{group_id}").json()
+    still = [w for w in after["warnings"] if w.get("rule_id") == rule_id]
+    assert len(still) == 1, "the finding was never removed, only un-dimmed"
+    assert not still[0].get("acknowledged")
+    assert after["counts"]["acknowledged"] == 0
+    assert after["counts"]["critical"] == marked["counts"]["critical"], (
+        "and its severity never depended on being accepted")
+
+
+def test_taking_back_an_acknowledgement_still_names_the_rule_twice(
+        client, vpc_id, somewhere_to_write):
+    """Lighter guards than the write, but not none.
+
+    Nothing here re-scans or asks for a reason: every one of those exists to
+    make *quietening* a finding expensive, and this direction only makes one
+    louder. confirm stays because it is the one thing separating a request
+    meaning this acknowledgement from one cross-wired to a different one.
+    """
+    group_id, rule_id = _a_group_with_ssh_open(client, vpc_id, "ack-undo2-sg")
+    client.post("/acknowledgements", json=_body(group_id, rule_id))
+
+    refused = client.delete(f"/acknowledgements/{rule_id}",
+                            params={"confirm": "yes"})
+    assert refused.status_code == 400
+    assert "confirm" in refused.json()["detail"]
+
+    still = client.get(f"/resources/security-group/{group_id}").json()
+    assert still["counts"]["acknowledged"] == 1, "and nothing was removed"
+
+
+def test_taking_back_one_that_was_never_written_says_so(
+        client, somewhere_to_write):
+    """A 404 rather than a cheerful no-op: "there was nothing to undo" and "it
+    is undone" are different answers and the caller acted on one of them."""
+    gone = client.delete("/acknowledgements/bucket:invented",
+                         params={"confirm": "bucket:invented"})
+
+    assert gone.status_code == 404
+    assert "nothing to take back" in gone.json()["detail"]
+
+
 def test_a_rule_the_scan_does_not_report_is_refused(
         client, vpc_id, somewhere_to_write):
     """The guard with no CLI equivalent, and the strongest one here.
@@ -1826,3 +1890,271 @@ def test_an_absent_log_is_empty_rather_than_an_error(tmp_path, monkeypatch):
     """A tool that has changed nothing has no log, and that is not a fault."""
     monkeypatch.setenv("SCP_AUDIT_LOG", str(tmp_path / "never-written.log"))
     assert audit.read_recent() == []
+
+
+# ------------------------------------- the create sees the request that ran
+
+
+@pytest.mark.parametrize("region", ["us-west-2", "eu-west-1"])
+def test_a_bucket_is_created_in_the_region_that_was_chosen(client, region,
+                                                           monkeypatch):
+    """The region reached the pre-flight and not the create.
+
+    `region` is a query parameter and never a body field, and
+    _spec_for_checking injected it for the check while the create was handed a
+    bare spec.as_dict(). So _bucket_create fell through to DEFAULT_REGION
+    "us-east-1" while the client was built for the region actually asked for,
+    and create_bucket branches on that argument rather than on the client: it
+    omits CreateBucketConfiguration for us-east-1, which a regional endpoint
+    rejects. Every bucket outside us-east-1 failed, quoting raw AWS text at
+    somebody who had picked a region from a menu.
+
+    Asserted on the argument the cloud call receives rather than on where the
+    bucket ended up, because moto takes the location from the client and
+    records the right answer even when the argument is wrong - so the
+    end-to-end version of this test passes against the bug. Real S3 rejects
+    the mismatch outright, which is how this was found.
+    """
+    seen = {}
+    real = registry.s3.create_bucket
+
+    def spy(s3_client, bucket_name, region=None, **kw):
+        seen["region"] = region
+        return real(s3_client, bucket_name, region=region, **kw)
+
+    monkeypatch.setattr(registry.s3, "create_bucket", spy)
+
+    made = client.post(f"/resources/bucket?region={region}",
+                       json={"name": f"scp-region-{region}",
+                             "secure_by_default": True})
+    assert made.status_code in (200, 201), made.text
+    assert seen["region"] == region
+
+
+def test_a_server_is_launched_from_the_chosen_regions_own_image(client,
+                                                                monkeypatch):
+    """The same defect as the bucket, in the type that costs money.
+
+    `launch_instance` does `latest_ami(region, ...)`, and an AMI id is
+    region-specific. With the region missing from the create's spec it was
+    pinned to DEFAULT_REGION while the EC2 client was built for the region
+    actually chosen, so a machine launched anywhere but us-east-1 was handed a
+    us-east-1 image id and RunInstances answers InvalidAMIID.NotFound.
+
+    It went unnoticed because `instance` is the one type nobody creates while
+    testing - it is the one that spends money - so the failure sat behind the
+    same fix the bucket needed and was never seen on its own.
+    """
+    seen = {}
+    monkeypatch.setattr(
+        registry.ec2i, "launch_instance",
+        lambda ec2, name, region="us-east-1", **kw: (
+            seen.update(region=region, client_region=ec2.meta.region_name)
+            or (False, "not launched", [])))
+
+    client.post("/resources/instance?region=us-west-2&accept_risk=true",
+                json={"name": "scp-ami", "instance_type": "t3.micro"})
+
+    assert seen["region"] == "us-west-2"
+    assert seen["region"] == seen["client_region"]
+
+
+def test_the_pre_flight_and_the_create_judge_the_same_request(client, monkeypatch):
+    """Two calls built two dicts and only one carried the region.
+
+    Asserted on the dicts rather than on a symptom, because the symptom was
+    S3-specific and the divergence was not: any rule reading a field the check
+    is given and the create is not would pass its own test and mislead here.
+    """
+    seen = {}
+    # ResourceType is frozen, so the spy is a replaced copy put into the
+    # registry rather than two attributes patched onto the real one.
+    spy = dataclasses.replace(
+        registry.get("bucket"),
+        check_spec=lambda spec: (seen.update(check=dict(spec)) or []),
+        create=lambda c, spec: (seen.update(create=dict(spec))
+                                or (True, "b", [])),
+    )
+    monkeypatch.setitem(registry.REGISTRY, "bucket", spy)
+
+    client.post("/resources/bucket?region=eu-west-1",
+                json={"name": "scp-same-request", "secure_by_default": True})
+    assert seen["check"] == seen["create"]
+    assert seen["create"]["region"] == "eu-west-1"
+
+
+def test_an_azure_create_answers_with_an_id_its_own_routes_accept(monkeypatch):
+    """Azure hands back an ARM path; a route takes an id as one segment.
+
+    So read, scan, fix, the deletion plan and delete all 404'd on the id the
+    create had just returned, before any Azure code ran - a resource built
+    from the page could not then be deleted from the page. The list adapters
+    were fixed for this and the create adapters were not, which is why nothing
+    caught it: a list-then-act flow works and a create-then-act flow does not.
+    """
+    arm = ("/subscriptions/x/resourceGroups/scp-demo/providers"
+           "/Microsoft.Network/virtualNetworks/demo-net")
+    monkeypatch.setattr(registry.az_vnet, "create_vnet",
+                        lambda *a, **k: (True, arm, []))
+
+    ok, resource_id, _ = registry.get("azure-vnet").create(
+        None, {"name": "demo-net", "resource_group": "scp-demo"})
+    assert ok
+    assert resource_id == "demo-net"
+
+
+def test_a_refused_azure_create_keeps_its_whole_error(monkeypatch):
+    """Shortening the id must not touch the error half.
+
+    An adapter answers (ok, id_or_error, problems) on one channel, so a
+    refusal is a sentence sitting where an id sits. A sentence containing a
+    slash, trimmed to its last word, would be an error message destroyed by a
+    fix aimed at something else.
+    """
+    refusal = "Azure puts every resource in a group, and/or none was named."
+    monkeypatch.setattr(registry.az_vnet, "create_vnet",
+                        lambda *a, **k: (False, refusal, ["built: nothing"]))
+
+    ok, message, problems = registry.get("azure-vnet").create(
+        None, {"name": "demo-net", "resource_group": "scp-demo"})
+    assert ok is False
+    assert message == refusal
+    assert problems == ["built: nothing"]
+
+
+def test_the_location_the_azure_form_asks_for_is_the_one_used(monkeypatch):
+    """All five Azure forms ask for `location` and the model declared only
+    `region`, so pydantic dropped it and every resource was built in the
+    default: westeurope typed, eastus built, reported as success."""
+    seen = {}
+    monkeypatch.setattr(
+        registry.az_storage, "create_account",
+        lambda c, n, g, location=None, **k: (seen.update(location=location)
+                                             or (True, f"/x/y/{n}", [])))
+    make = registry.get("azure-storage").create
+
+    make(None, {"name": "a", "resource_group": "g", "location": "westeurope"})
+    assert seen["location"] == "westeurope"
+
+    # region still wins: it is what the CLI and the smoke test have always sent.
+    make(None, {"name": "a", "resource_group": "g",
+                "region": "uksouth", "location": "westeurope"})
+    assert seen["location"] == "uksouth"
+
+    make(None, {"name": "a", "resource_group": "g"})
+    assert seen["location"] == registry.DEFAULT_AZURE_LOCATION
+
+
+def test_choosing_cpu_builds_an_alarm_that_watches_cpu(monkeypatch):
+    """The menu chooses a namespace and a metric together, and only the
+    namespace was carried: metric_name fell back to EstimatedCharges
+    unconditionally, so "CPU usage (%)" built an alarm on AWS/EC2 +
+    EstimatedCharges. That pair has no data, CloudWatch accepts it without
+    complaint, and it sits in INSUFFICIENT_DATA forever - the exact silence
+    scanner/alarm_rules.py exists to report, and could not, because no rule
+    reads metric_name."""
+    seen = {}
+    monkeypatch.setattr(registry.alarms, "create_alarm",
+                        lambda c, **kw: (seen.update(kw) or (True, kw["name"], [])))
+    make = registry.get("alarm").create
+
+    make(None, {"name": "cpu", "namespace": registry.alarms.CPU_NAMESPACE,
+                "threshold": 80})
+    assert seen["metric_name"] == registry.alarms.CPU_METRIC
+
+    make(None, {"name": "spend", "namespace": registry.alarms.BILLING_NAMESPACE,
+                "threshold": 5})
+    assert seen["metric_name"] == registry.alarms.BILLING_METRIC
+
+    # An explicit metric still wins, because the CLI and smoke test send one.
+    make(None, {"name": "custom", "namespace": registry.alarms.CPU_NAMESPACE,
+                "metric_name": "NetworkIn", "threshold": 1})
+    assert seen["metric_name"] == "NetworkIn"
+
+
+def test_the_launch_preflight_does_not_call_a_firewall_sound_unread(client):
+    """It said "They currently look sound" about rules nobody had opened.
+
+    `_instance_check_spec` calls check_instance with no firewall findings,
+    because check_spec is a pure function of a spec and has no client to read
+    groups with. That made exposed_ports empty, which sent every public-address
+    launch to the branch that reports the firewall as fine. Naming a real
+    group, naming one that does not exist, and naming none at all produced
+    byte-identical output - proof the groups were never consulted, and the
+    reassurance was about nothing.
+
+    This is the AWS twin of the azure-vm defect this file already covers: the
+    tool declaring safe the exact configuration the type exists to warn about.
+    """
+    def check(groups):
+        return client.post("/resources/instance/check?region=us-east-1", json={
+            "name": "probe", "instance_type": "t3.micro",
+            "assign_public_ip": True, "security_group_ids": groups,
+        }).json()
+
+    body = check(["sg-real"])
+    ids = [w["rule_id"] for w in body["warnings"]]
+
+    assert "probe:firewall_not_examined" in ids, (
+        "the pre-flight says the rules were not read")
+    assert "probe:public_ip" not in ids, (
+        "and does not also claim they look sound")
+    assert body["counts"]["warning"] >= 1, (
+        "an unread firewall on a machine that would be reachable is not a "
+        "zero-warning launch")
+
+    # Still silent where there is nothing to be unsure about: no public
+    # address means the rules cannot let anyone in whether they were read or
+    # not, and a warning there would be noise on every private machine.
+    quiet = client.post("/resources/instance/check?region=us-east-1", json={
+        "name": "probe", "instance_type": "t3.micro",
+        "assign_public_ip": False,
+    }).json()
+    assert not any(w["rule_id"] == "probe:firewall_not_examined"
+                   for w in quiet["warnings"])
+
+
+def test_a_live_scan_still_says_the_firewall_looks_sound_when_it_read_them(
+        client):
+    """The other half. [] means read and clean, and that verdict is earned -
+    a fix that made every instance report an unread firewall would have
+    replaced a false reassurance with a false doubt."""
+    from scanner.instance_rules import check_instance
+
+    warnings = check_instance(
+        {"instance_id": "i-1", "name": "i-1", "public_ip": "203.0.113.10",
+         "imdsv2_required": True, "metadata_endpoint_enabled": True,
+         "metadata_hop_limit": 1, "root_volume_encrypted": True,
+         "key_name": "k", "ssh_reachable": True},
+        [],
+    )
+    ids = [w["rule_id"] for w in warnings]
+    assert "i-1:public_ip" in ids
+    assert "i-1:firewall_not_examined" not in ids
+
+
+def test_a_namespace_with_no_known_metric_is_refused_rather_than_guessed(
+        monkeypatch):
+    """The first fix for the above ended `return BILLING_METRIC`, which pairs
+    any third namespace with EstimatedCharges and rebuilds the same silent
+    alarm the moment one is added - the defect reproduced by its own repair.
+
+    Refused rather than guessed, because a wrong pairing says nothing and a
+    refusal says what to send. The mapping answers None and the adapter turns
+    that into the error half of (ok, error, problems), so nothing reaches
+    CloudWatch at all.
+    """
+    assert registry._metric_for("AWS/Lambda") is None
+
+    called = []
+    monkeypatch.setattr(registry.alarms, "create_alarm",
+                        lambda c, **kw: called.append(kw) or (True, "x", []))
+
+    ok, error, problems = registry.get("alarm").create(
+        None, {"name": "lambda-errors", "namespace": "AWS/Lambda",
+               "threshold": 1})
+
+    assert ok is False
+    assert not called, "and no alarm was built on a guess"
+    assert "AWS/Lambda" in error
+    assert "metric_name" in error

@@ -99,6 +99,16 @@ def check_instance(settings, firewall_warnings=None):
         ))
 
     # ---- Reachability --------------------------------------------------------
+    # None and [] are different answers, and treating them alike is what made
+    # the pre-flight claim something it had not checked. The live path hands
+    # over this instance's own firewall findings, so [] means "read them, and
+    # there is nothing wrong". `check_spec` has no client - by contract it is a
+    # pure function of a spec - so it hands over nothing, and None means "not
+    # read at all". Both reached the branch below that says the rules
+    # "currently look sound", about groups nobody had opened: naming a real
+    # group, naming one that does not exist, and naming none at all produced
+    # byte-identical findings.
+    examined = firewall_warnings is not None
     exposed_ports = sorted({
         w["rule"]["from_port"]
         for w in (firewall_warnings or [])
@@ -116,6 +126,16 @@ def check_instance(settings, firewall_warnings=None):
             "those ports on this machine right now. Fix the firewall rules, or "
             "take away the public address.",
             _target(instance_id, "reachable_from_internet"),
+        ))
+    elif public_ip and not examined:
+        warnings.append(_warning(
+            WARNING,
+            f"{name} would have a public address ({public_ip}), so its firewall "
+            "rules are the only thing that would stand between it and the "
+            "internet - and they were not read here. Whether anything could "
+            "reach it is unanswered rather than answered no. Scan the groups "
+            "you named before launching, or scan the machine once it exists.",
+            _target(instance_id, "firewall_not_examined"),
         ))
     elif public_ip:
         warnings.append(_warning(

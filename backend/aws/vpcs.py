@@ -23,9 +23,20 @@ that changes, the refusal is one deliberate edit away, which is the right
 amount of friction for a recurring charge.
 """
 
+import ipaddress
+import itertools
 import time
 
 from aws.common import client as _client, ClientError, WaiterError
+
+# Raised here too, so one HTTP handler turns a missing permission into a 403
+# for every resource type - the same import aws/roles.py makes, for the same
+# reason.
+from aws.s3_buckets import PermissionDenied
+
+# Codes that mean "this login is not allowed to look", matching aws/roles.py.
+_DENIED = {"AccessDenied", "AccessDeniedException", "UnauthorizedOperation",
+           "NotAuthorized"}
 
 MANAGED_TAG_KEY = "ManagedBy"
 MANAGED_TAG_VALUE = "secure-cloud-provisioner"
@@ -35,6 +46,40 @@ PUBLIC_SUBNET_CIDR = "10.0.1.0/24"
 PRIVATE_SUBNET_CIDR = "10.0.2.0/24"
 
 ANYWHERE = "0.0.0.0/0"
+
+
+def subnet_cidrs(cidr):
+    """The two subnet ranges to carve out of `cidr`, as (public, private).
+
+    These used to be the constants above, which sit inside 10.0.0.0/16 and
+    inside none of the other three networks the page's own menu offers. A
+    subnet has to be inside its VPC, so picking 10.1.0.0/16, 172.31.0.0/16 or
+    192.168.0.0/16 - three of four choices - failed both create_subnet calls
+    with "The CIDR '10.0.1.0/24' is invalid" and produced a VPC with nothing
+    in it. The problems were reported honestly and the VPC was still returned
+    as created, so the failure read as a network you could put a machine in.
+
+    The second and third block rather than the first and second, because that
+    is what the constants were and it keeps 10.0.0.0/16 building exactly the
+    subnets it always has. /24 wherever it fits: AWS accepts /16 to /28, and
+    a /24 is the shape every existing test and the bastion blueprint expect.
+    """
+    try:
+        network = ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return None, None
+
+    prefix = 24 if network.prefixlen <= 23 else min(network.prefixlen + 1, 28)
+    if prefix <= network.prefixlen:
+        # Nothing left to divide: the VPC is already a /28 or smaller.
+        return None, None
+
+    pieces = list(itertools.islice(network.subnets(new_prefix=prefix), 3))
+    if len(pieces) >= 3:
+        return str(pieces[1]), str(pieces[2])
+    if len(pieces) == 2:
+        return str(pieces[0]), str(pieces[1])
+    return None, None
 
 
 def get_client(region="us-east-1"):
@@ -120,10 +165,19 @@ def create_vpc(ec2, name, cidr=DEFAULT_CIDR, region="us-east-1",
                         "created.")
         return True, vpc_id, problems
 
+    # Derived from the CIDR asked for, not fixed. See subnet_cidrs.
+    public_cidr, private_cidr = subnet_cidrs(cidr)
+    if public_cidr is None:
+        problems.append(
+            f"'{cidr}' is too small to divide into two subnets, so none were "
+            f"created. Nothing can be placed in a network without one."
+        )
+        return True, vpc_id, problems
+
     # ---- Public side -----------------------------------------------------
     try:
         public_subnet = ec2.create_subnet(
-            VpcId=vpc_id, CidrBlock=PUBLIC_SUBNET_CIDR,
+            VpcId=vpc_id, CidrBlock=public_cidr,
             AvailabilityZone=zones[0],
             TagSpecifications=_tags(f"{name}-public", "subnet", role="public"),
         )["Subnet"]["SubnetId"]
@@ -155,7 +209,7 @@ def create_vpc(ec2, name, cidr=DEFAULT_CIDR, region="us-east-1",
     # for some other purpose would silently give this subnet a way out.
     try:
         private_subnet = ec2.create_subnet(
-            VpcId=vpc_id, CidrBlock=PRIVATE_SUBNET_CIDR,
+            VpcId=vpc_id, CidrBlock=private_cidr,
             AvailabilityZone=zones[1 % len(zones)],
             TagSpecifications=_tags(f"{name}-private", "subnet", role="private"),
         )["Subnet"]["SubnetId"]
@@ -194,15 +248,32 @@ def _availability_zones(ec2):
 
 
 def list_vpcs(ec2, only_ours=False):
-    """Returns VPCs, optionally only ones this tool created."""
+    """Returns VPCs, optionally only ones this tool created.
+
+    A read this login is not allowed to make raises rather than answering with
+    an empty list. That was the behaviour here and it was the one wrong answer
+    that reassures: the route hands back HTTP 200 with nothing in it, and the
+    page prints "none" - the single word that means somebody looked and there
+    was nothing there. Every other type in this account reports "unreachable"
+    when its read is refused, because every other list either raises or lets
+    the error out; networks alone went quiet.
+
+    `aws/snapshots.py` states the rule for itself and it is the same rule:
+    something this tool was not allowed to ask about must not be reported as
+    the safe answer. Anything that is not a refusal still propagates, as
+    before.
+    """
     filters = []
     if only_ours:
         filters.append({"Name": f"tag:{MANAGED_TAG_KEY}",
                         "Values": [MANAGED_TAG_VALUE]})
     try:
         return ec2.describe_vpcs(Filters=filters)["Vpcs"]
-    except ClientError:
-        return []
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _DENIED:
+            raise PermissionDenied(
+                "ec2:DescribeVpcs", e.response["Error"]["Message"]) from e
+        raise
 
 
 def _subnets(ec2, vpc_id):

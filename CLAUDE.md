@@ -161,10 +161,13 @@ sides' version of it. Then moving acknowledgement writing out of the CLI and
 into the page, and the bastion instructions' second gap, take it to 878.
 
 Then twenty-five commits rebuilding the page — see *The page is three tabs
-now* — plus bucket contents, take it to **915 from `backend/`**, 0 skipped,
-plus 212 checks across the two Node suites in `frontend/`. Everything is
-pushed to `origin` and `group` on `aws-provisioner-and-web-interface`, both at
-`73e5f78`.
+now* — plus bucket contents, took it to 915 from `backend/`. Then root
+collection and the six create-path defects took it to 929. Then the audit pass
+below — see *What reading the scanner found that driving it could not* — takes
+it to **964 from `backend/`** and **970 from the repository root**, 0 skipped,
+plus **234 checks** across the two Node suites in `frontend/`. Every figure
+here is re-run rather than carried forward, which is how two of them were once
+found to be one low.
 
 **Nothing in that stretch was found by a test.** Every one of those defects
 came from opening the page and looking at it, or from measuring something in
@@ -176,11 +179,25 @@ Whoever picks this up should assume the same is still true of whatever they
 change: `frontend/browse.mjs` and a real browser are the instrument, and the
 green tick is not.
 
-**The virtualenv on this machine is `/home/huori/scp-venv`.** This file says
-`/home/user/scp-venv` throughout, which is a different machine — there is no
-`/home/user` here, so every documented activation line fails before anything
-runs. Built with `python3 -m venv` and both requirements files plus `pytest`
-and `moto`, exactly as the setup block near the bottom describes.
+**And then a stretch where none of it was found by a browser either.** The
+section below is a reading pass over `scanner/`, and the two worst things in
+this file's history came out of it — a firewall rule opening SSH to two
+billion addresses that both clouds reported as nothing, and an escalation
+engine blind to the ordinary spelling of "any role". Neither is visible from
+the page, because the page faithfully displays a verdict that is wrong. So the
+instruments are now three, and they find different things: the suite finds
+regressions, the browser finds what the suite cannot see, and reading the rules
+against what the cloud actually does finds what both of them agree about and
+are wrong about.
+
+**The virtualenv is `/home/huori/scp-venv`.** This file named
+`/home/user/scp-venv` throughout for a while, which is a different machine —
+there is no `/home/user` here, so every documented activation line failed
+before anything ran, including the recipe for rebuilding the thing. The same
+shape as the `resource_skus` timing below: something true of one machine,
+written down as a property of the project. Built with `python3 -m venv` and
+both requirements files plus `pytest` and `moto`, exactly as the setup block
+near the bottom describes.
 
 **Both smoke tests have now been re-run and both are green.** The live AWS one
 is **116 passed, 0 failed** against account 679140927523 with no flags; the
@@ -197,14 +214,37 @@ machines. What that found is the section below, and it is the reason the
 Node suites are not the whole story: `app.test.mjs` answers a stub, and a stub
 written to match the code cannot disagree with it.
 
-**The root suite does not collect, and it arrived that way.** `ebdb579` renamed
-`run_azure_security_scan` to `scan_azure_payload` in `azure_scanner_engine.py`
-and `test_azure_scanner.py` still imports the old name, so `pytest` from the
-repository root stops before running anything. Verified against a clean export
-of `group/main`, where it fails identically; every root file here is
-byte-identical to that branch. `group/feature/key-vault` restores the old name,
-so this resolves when that branch lands rather than by being patched twice.
-Until then, run the suite from `backend/`.
+**The root suite collects now, and `pytest` from the repository root is 970
+passed** — the 964 from `backend/` plus the six Azure tests at the root, which
+had not run since `ebdb579`.
+
+The entry that used to sit here said the breakage was a rename and that it
+would resolve when `group/feature/key-vault` landed. Both halves were wrong.
+`ebdb579` did not rename `run_azure_security_scan`; it **replaced
+`azure_scanner_engine.py` wholesale** with an ARM-shaped scanner reading
+`network_security_group`/`storage_account`/`key_vault`, deleting the
+aggregator and with it the only importer of `azure_scanner.py`. So the obvious
+one-line fix — point the test at the new name — would have collected and then
+failed all six tests, because the two functions take different payload shapes
+and return different types. `azure_scanner.py` still matches the tests exactly;
+what was missing was the eleven lines that call it.
+
+Both functions live in `azure_scanner_engine.py` now. `scan_azure_payload` is
+untouched and still serves `main.py`'s two routes; `run_azure_security_scan` is
+restored beside it, delegating to `azure_scanner.py` so the wording stays in
+`security_messages.py` rather than being written a second time. That also
+un-orphans both of those modules, which this file lists as read by nothing.
+
+**Waiting for `group/feature/key-vault` was never going to fix it.** That
+branch is a divergent design rather than a later version: its `main.py` imports
+`run_azure_security_scan` and has no `scan_azure_payload` at all, so the flat
+payload shape is the whole root app there, while `ebdb579` moved this side to
+the ARM-shaped one. It is dated 2026-08-10 and is still not an ancestor of
+`group/main`. When it lands, expect a real conflict in `azure_scanner_engine.py`,
+`main.py` and `azure_scanner.py` — not one this patch created, and one worth
+resolving deliberately, because the branch's version also carries
+`check_key_vault_governance`, a fourth rule that does not exist in this
+checkout.
 
 **Two things were changed in AWS by hand and are not in any file here.** The
 `iam-audit` customer managed policy was extended twice, first with the six role
@@ -235,11 +275,11 @@ The AWS half, which is what the rest of this file is about:
 
 ```bash
 cd backend
-source /home/user/scp-venv/bin/activate      # not ../.venv: see below
+source /home/huori/scp-venv/bin/activate     # not ../.venv: see below
 
 pytest -v                                   # offline, moto, no credentials
-                                            # run from backend/, not the root:
-                                            # see the note above about ebdb579
+                                            # 964 here; 970 from the repository
+                                            # root, which collects again
 python main.py                              # the CLI, both clouds, 14 options
 uvicorn api.app:app --reload --host 127.0.0.1   # API, /docs and the page at /ui
 python scripts/smoke_test.py                # live AWS, free
@@ -331,18 +371,19 @@ uvicorn main:app --reload --port 8001    # Azure scan and deploy
 python -m pytest test_azure_scanner.py   # on group/main: six tests
 ```
 
-**The virtualenv is `/home/user/scp-venv`, and this file used to say
-`../.venv`.** There is no `.venv` in the repository and there does not appear
-ever to have been one on this machine, so the documented activation line fails
-before anything else is tried. It also arrived without `pytest` or `moto`, so
-the offline suite could not run until both were installed — the SDKs were
-there and the test tools were not, which is a confusing way to be broken
-because the application starts fine. If you are setting this up again:
+**The virtualenv is `/home/huori/scp-venv`, and this file has twice named one
+that does not exist** — first `../.venv`, then `/home/user/scp-venv`. There is
+no `.venv` in the repository and there does not appear ever to have been one on
+this machine, so the documented activation line failed before anything else was
+tried, both times. It also arrived without `pytest` or `moto`, so the offline
+suite could not run until both were installed — the SDKs were there and the
+test tools were not, which is a confusing way to be broken because the
+application starts fine. If you are setting this up again:
 
 ```bash
-python3 -m venv /home/user/scp-venv
-/home/user/scp-venv/bin/pip install -r backend/requirements.txt -r requirements.txt
-/home/user/scp-venv/bin/pip install pytest moto
+python3 -m venv /home/huori/scp-venv
+/home/huori/scp-venv/bin/pip install -r backend/requirements.txt -r requirements.txt
+/home/huori/scp-venv/bin/pip install pytest moto
 ```
 
 A checkout is also missing `.env`, which is gitignored and therefore absent
@@ -379,9 +420,11 @@ azure_crud.py           Azure provisioning, reached only by main.py. Fully
                         superseded now: every create in it exists in backend/az/
                         with a guard it does not have (it replaces an existing
                         group's whole rule list and reports success)
-security_messages.py    Azure's warning text. Orphaned: azure_scanner.py is the
-                        only thing that reads it and nothing reads that
-test_azure_scanner.py   six tests, no cloud calls. Does not currently import
+security_messages.py    Azure's warning text, read by azure_scanner.py, which
+                        azure_scanner_engine.run_azure_security_scan reads in
+                        turn. Both were orphaned between ebdb579 and the fix
+test_azure_scanner.py   six tests, no cloud calls. Collects again; they cover
+                        azure_scanner.py through the aggregator
 requirements.txt        the Azure SDK, not boto3. backend/requirements.txt is
                         the AWS one, and now also python-multipart — needed
                         only to accept an uploaded file, and the upload route
@@ -801,6 +844,48 @@ suppression that empties the screen is how people stop reading the screen.
 There are no wildcards, entries expire, and the acknowledgements are
 themselves audited — one that has lapsed or that matches nothing is reported.
 
+**"Quieter, never absent" is about the detail panel, and applying it to the
+summary was a mistake.** The dashboard counted an accepted critical as a
+critical on the grounds that anything else was suppression. It is not: an
+acknowledgement is a record that somebody has already looked at the finding and
+written down why they are living with it, so repeating it at full volume on the
+landing page tells them the one thing they went to the trouble of recording
+that they know. A dashboard that never gets quieter as you work through it
+makes the mechanism pointless.
+
+So the two halves answer different questions. The **summary leads with what is
+outstanding** — `1 warning (2 C, 1 W accepted)` on a card, `1 critical finding`
+in the headline with "already accepted, and not counted above" underneath,
+because without that clause a net figure beside an accepted count is
+unreadable. The card's colour follows the outstanding count too; a red card
+reading "1 warning" is a contradiction the eye resolves before the text does.
+The **detail panel is unchanged** and still lists every accepted finding at its
+own severity with its reason and author. Nothing is hidden in either; one says
+what is left, the other says what is here.
+
+A type where everything has been accepted says `all accepted (1 C, 1 W)` and is
+left neutral rather than green, and the headline says *Nothing outstanding*.
+Deliberately not "clean", which would claim nobody ever had to decide anything.
+
+**An acknowledgement can be taken back.** `DELETE /acknowledgements/{rule_id}`,
+and a *Stop accepting this* button sitting inside the note it undoes. The
+guards are deliberately much lighter than the write's: every one of
+`check_entry` exists to make *quietening* a finding expensive, on a service
+holding credentials with no login, and none of that reasoning survives being
+pointed the other way. The worst a wrong call here does is report something
+loudly that somebody had decided about, which is the state the tool ships in.
+`confirm` is still asked for and still repeats the id — not as a barrier, since
+the page fills it in from the finding the button belongs to, but because it is
+the one thing separating a request meaning *this* acknowledgement from one
+cross-wired to another. No re-scan, unlike the write: an entry matching nothing
+is exactly the stale one the audit reports and asks somebody to clear, so
+refusing to remove it because the resource is gone would trap the mess it is
+meant to clean up. The response echoes the reason back, because the file no
+longer holds it and that response is the last place it exists. `remove()` drops
+every entry for the id rather than the first — `record()` appends without
+looking, so the file can hold two, and leaving one behind would answer "no
+longer accepted" while the finding stayed dimmed.
+
 **The page writes them now, and this paragraph used to say nothing could.**
 The old rule was that no endpoint may create an acknowledgement, because it
 would be a remote "stop reporting this" API on a service holding credentials
@@ -1166,6 +1251,22 @@ real subscription: identical rules, priorities swapped, opposite verdicts.
   group, which `az/nsg.py` now fixes. Password authentication is set at
   creation and cannot be changed afterwards.
 
+**Deleting a machine takes its network card and its address with it, and stops
+there.** That is a narrowing of a rule this file used to state more broadly —
+`delete_vm` removed the machine and the disk and left four resources, on the
+stated grounds that this tool may not have made them. Right about the virtual
+network and the security group: both are reusable, another machine may already
+be in them, and both are registered types with their own delete route. Wrong
+about the card. A card attaches one machine to one network, it is worth nothing
+the moment that machine is gone, and *nothing in the registry can delete one* —
+so the stranded card stranded the other two as well, because Azure refuses to
+delete a subnet or a group a card still references. The API had no route to a
+clean subscription at all; clearing up after a machine meant reaching past this
+tool with the SDK. Only what carries this tool's tag is removed, so the rule
+the original refusal protected is intact, and `plan_deletion` moved the card
+and the address from the survivors to the destroyed — it had been agreeing with
+a delete that stranded them.
+
 **A machine's exposure is not on the machine.** An EC2 instance carries its
 security groups; an Azure machine is filtered by a group on its network card,
 or on its subnet, or both, or neither. `read_vm_for_scanning` reads all of
@@ -1356,6 +1457,211 @@ button silently do nothing leaves no other trace. It needs `npx playwright
 install chromium` once. It is not in `npm test`, because it needs a running
 server and a real account; run it before believing the page works, the same way
 the smoke test is run before believing the API does.
+
+## Six things the create path got wrong, and none of them had a test
+
+Found by starting the server and creating every type through its own routes,
+against both real clouds — nine of the eleven creatable types, all of it
+deleted afterwards. `instance` and `azure-vm` were left out as the two that
+cost money; their guardrails were exercised instead.
+
+The suites were green throughout. Four of the six live on the page/API seam,
+which is the same lesson as *What driving the page found* and is now the third
+time this file has had to record it.
+
+- **A bucket could not be created outside `us-east-1`.** `region` is a query
+  parameter and never a body field. `_spec_for_checking` injected it for the
+  pre-flight and the create was handed a bare `spec.as_dict()`, so
+  `_bucket_create` fell through to `DEFAULT_REGION` while the client was built
+  for the region actually chosen — and `create_bucket` branches on the
+  argument, omitting `CreateBucketConfiguration`, which a regional endpoint
+  rejects. Verified failing in `us-west-2` and `eu-west-1` and succeeding in
+  `us-east-1`. Both now use one dict, so **the pre-flight and the create can no
+  longer judge different requests** — which was the larger bug and was not
+  bucket-specific. The upload route's hardcoded `us-east-1` went with it: it
+  was unreachable only because no bucket could exist anywhere else.
+
+- **Three of the four networks the menu offers had no subnets.**
+  `PUBLIC_SUBNET_CIDR`/`PRIVATE_SUBNET_CIDR` were constants inside
+  `10.0.0.0/16` and inside none of the other three choices, so both
+  `create_subnet` calls failed and the VPC came back as created with the
+  failures in `problems`. `subnet_cidrs` derives them from the CIDR asked for,
+  and still answers `10.0.1.0/24` and `10.0.2.0/24` for the default so nothing
+  already running moves.
+
+- **Every Azure create stranded its own resource.** The create answered with
+  the full ARM path, and a route takes an id as one path segment — so read,
+  scan, fix, the deletion plan and delete all 404'd on the id the create had
+  just returned. A resource built from the page could not be deleted from the
+  page; three live ones had to be removed by typing their names in. The list
+  adapters were fixed for this and the create adapters were not, which is
+  exactly why nothing caught it: a list-then-act flow works and a
+  create-then-act flow does not. `_az_created` reduces the id at the one place
+  all five types return through, and leaves the error half alone — a refusal
+  travels on that same channel, and a sentence trimmed to its last word would
+  be an error message destroyed by a fix aimed elsewhere.
+
+- **The Azure location box did nothing.** All five Azure forms ask for
+  `location`, `ResourceSpec` declared only `region`, and pydantic drops what it
+  does not declare — so typing `westeurope` built in `eastus` and reported
+  success. Three adapters already read `spec.get("location")` as a fallback
+  that could never fire. `location` is declared now and `_az_location` is the
+  one place the two spellings meet; `region` still wins, because that is what
+  the CLI and the smoke test send.
+
+- **Choosing "CPU usage (%)" built an alarm watching `EstimatedCharges`.** The
+  menu picks a namespace and a metric together and only the namespace was
+  carried, so `metric_name` fell back to billing unconditionally. That pair has
+  no data, CloudWatch accepts it, and the alarm sits in `INSUFFICIENT_DATA`
+  forever — *an alarm fails by being quiet*, produced by the tool that exists
+  to report exactly that. It could not report it: no rule reads `metric_name`,
+  so the pre-flight and the read-back scan both called it clean.
+
+- **A multi-select submitted one value.** `multiChoice` did
+  `select.value = () => …`, but `value` is an accessor on
+  `HTMLSelectElement.prototype`, so the assignment went through the setter and
+  never created an own property. `collectSpec` then took its plain-`<input>`
+  branch and split on commas, and a multi-select's getter returns only the
+  first selected option. Picking ports 22, 80 and 443 sent `["22"]`. It hit
+  `azure-vm.open_ports` and `instance.security_group_ids`, and blinded the
+  pre-flight identically — asking to expose RDP alongside 80 reported on 80 and
+  said nothing about RDP, so create and check agreed with each other about a
+  machine nobody had asked for. The same idiom works elsewhere in the file
+  because it is applied to a `<span>` and to `<div>`s, which have no `value`
+  accessor to collide with, which is why it looked like a working pattern.
+
+**Every one is pinned by a test that fails without the fix**, checked by
+stashing the source and re-running. That is worth stating because the whole
+point of this section is that thirteen hundred existing checks did not fail:
+`app.test.mjs` had never driven a multi-select at all, and moto records a
+bucket's location from the client rather than from the argument, so the
+end-to-end version of the bucket test passes against the bug. The bucket test
+asserts what the cloud call was handed instead.
+
+## What reading the scanner found that driving it could not
+
+Every previous section here records a defect found by running something. This
+one is a reading pass over `scanner/`, module by module, each candidate checked
+by calling the rule directly with the values that reach it rather than by
+reasoning about the code. It found the two worst defects in this file's
+history, and neither could have been found any other way: the page renders them
+correctly, the suites pass, and both clouds agree with each other. They are
+wrong together.
+
+**Two of these are one mistake.** A check written as string equality against
+the literal form of a dangerous value, where the dangerous value has other
+spellings. The comment beside each explained why the *narrow* case was
+deliberate, and the code quietly swallowed the broad one along with it. Look
+for this shape anywhere a rule asks "is this the bad value" rather than "is
+this a bad value".
+
+- **A firewall rule could open SSH to two billion addresses and neither cloud
+  said anything.** `is_public` was `source in {"0.0.0.0/0", "::/0"}`, and
+  Azure's `EVERYONE` was four literals matched the same way. `0.0.0.0/1` and
+  `128.0.0.0/1` are two rules covering every address on the internet and both
+  were silent; so were `0.0.0.0/4` and `::/1`. Azure was worse than silent —
+  `azure_nsg_effective.decide` returned `DenyByDefault`, a positive statement
+  that a port was closed, about one it would have opened to half the internet.
+
+  This is the shape somebody adds a backdoor around, because every scanner
+  looks for `/0`. The comment on the silent branch was reasoning about
+  *private* ranges — "there is nothing to say about port 443 from a private
+  range" — and a broad public one is not that.
+
+  `common.open_to_strangers` is the judgement now and both clouds ask it.
+  Private, reserved, loopback, carrier-grade-NAT and documentation space stay
+  silent however large, via Python's `is_global` rather than a hand-kept
+  RFC1918 list: `10.0.0.0/8` is sixteen million addresses and not one of them
+  is a stranger. Public space fires at a **/16 or shorter**, because a real
+  allowlist is an office, a VPN endpoint or one machine — a /24 or smaller in
+  practice — and nothing legitimately permits SSH from sixty-five thousand
+  arbitrary hosts. IPv6 is set at **/32**, because the scales do not
+  correspond: a site is given a /48 and an internet provider a /32. Anything
+  that will not parse is still not open, which is what keeps the promise
+  `azure_nsg_effective` makes about never manufacturing an Allow the cloud
+  would not make. Both thresholds are constants and both are judgement calls.
+
+- **The escalation engine missed the ordinary spelling of "any role".**
+  `escalation.permits` required `Resource` to be a bare `*`, so `iam:PassRole`
+  with `ec2:RunInstances` on `arn:aws:iam::123456789012:role/*` — every role in
+  the account, written the way the console writes it — reported nothing at all.
+  Same for `arn:aws:iam::*:role/*` and `CreatePolicyVersion` on `policy/*`.
+  `role_rules` and `iam_rules` share this one matcher, so the gap applied to
+  all three identity kinds at once.
+
+  The reasoning beside it was sound and the code did not implement it: "a
+  policy that can pass one named role is a deliberate arrangement" is true, and
+  a wildcard ARN is not one named role. `_unrestricted` is deliberately narrow
+  — **IAM ARNs only**, because `arn:aws:s3:::mybucket/*` is every object in one
+  bucket and reading a trailing `/*` as "everything" everywhere would report an
+  ordinary bucket policy as unrestricted access to all data; and **prefixes
+  excluded**, because `role/build-*` is a family somebody chose the shape of.
+  Trading a false negative for a false positive is not a fix.
+
+**Three reads that resolved to the reassuring answer.** Same family as
+*A reader returns None when the thing is not there*, in the places that rule
+had not reached.
+
+- `aws/vpcs.list_vpcs` answered a denied `DescribeVpcs` with an empty list, so
+  the route returned 200 with no networks and the page printed "none" — the one
+  word meaning somebody looked and there was nothing there. Every other type
+  reports "unreachable" because every other list either raises or lets the
+  error out. It raises `PermissionDenied` now, like `roles.py`.
+- `az/vm.read_vm_for_scanning` wrapped three reads in one `try` and recorded
+  one key, and `public_ip` was the one it did not record. Both the
+  administration-port finding and the password one are CRITICAL on a reachable
+  machine and WARNING otherwise, so an unreadable address silently bought the
+  milder verdict and `describe_vm` then showed the machine as having none.
+  Three separate reads now, each failure recorded against the setting it
+  actually prevents, and `azure_vm_rules` treats an unknown address as
+  reachable rather than as absent.
+- `az/vm._os_disk_encrypted` was `True if os_disk is not None`, which is not a
+  check of anything: the value could only ever be True or None, so the rule
+  testing it for False could never fire — and what that rule is kept for, "an
+  older or imported disk", is exactly the case it could not see. It reads the
+  disk now: managed is encrypted, unmanaged is a page blob and is not, neither
+  is unreadable.
+
+**And the sixth instance of the 404-without-403 mistake**, in `az/nsg.apply_fix`
+— the identical read to `read_nsg_for_scanning` 370 lines above it, without the
+`denied()` check that one has. `_locate` returns immediately when handed a full
+resource id, so nothing enumerates first and absorbs it.
+
+**Two places that discarded what they had already learned.**
+
+- `blueprints/bastion.build` replaced `problems` with one fresh sentence at all
+  ten of its failure returns, and the failing step's own problems with it. A
+  network that was built and whose DNS attribute could not be set came back as
+  `vpc-1` and an unrelated error: the caller was told the network exists and
+  not what is wrong with it. The same defect this file records for the Azure
+  machine create, in the one other place that accumulates as it goes.
+- `api/registry._metric_for` ended `return alarms.BILLING_METRIC`, which pairs
+  any third namespace with `EstimatedCharges` and rebuilds the silent alarm the
+  fix was written for — the defect reproduced by its own repair. It is a
+  mapping returning None now, and the adapter refuses rather than guessing.
+
+**One thing the fix exposed rather than caused.** With `list_vpcs` no longer
+swallowing, `test_a_nat_gateway_is_refused_with_the_price_named` failed with
+`AuthFailure` — its last assertion sat *outside* the `with mock_aws()` block
+and had been talking to real AWS since it was written. The swallow made it pass
+vacuously. That is the third offline test in this project found reaching the
+network, and it is most of why the suite is now half a minute faster.
+
+**What was read and found correct**, stated because a list of defects reads as
+though the package is riddled with them and it is not. `azure_nsg_effective` is
+right about everything else it claims — priority ordering both ways, shadowing,
+Azure's own default rules, port ranges, protocol matching, an unparseable
+priority sorting last rather than first. `s3_rules` and `snapshot_rules` report
+every exposure and never resolve an unreadable setting into silence.
+`iam_rules` produces seven "could not check" warnings and no misleading quiet
+when nothing at all can be read. Every one of the 23 control names cited across
+the package resolves, and none is orphaned. All fourteen guards in
+`acknowledged.check_entry` refuse what they should.
+
+The `unreadable` discipline is genuinely consistent: where a check fires on
+*presence* there is no guard and none is needed, and where it fires on
+*absence* the guard is there. That asymmetry looks like an oversight and is
+not.
 
 ## Style
 
@@ -1676,22 +1982,26 @@ refinement, and the largest is that monitor and defender have no rules at all
 
 ## Next
 
-**Two small things first, both known and both one-line.**
+**One small thing first, and it is known and one-line.**
 
-0. **`pytest` from the repository root still does not collect.**
-   `test_azure_scanner.py` imports `run_azure_security_scan`;
-   `azure_scanner_engine.py` renamed it to `scan_azure_payload`. Anyone who
-   clones this and runs `pytest` gets an error instead of 915 passing tests,
-   which is the first thing a marker or a new teammate will do. This file has
-   said for a while that it resolves when `group/feature/key-vault` lands;
-   that branch is dated 2026-08-10 and is still not an ancestor of
-   `group/main`, so waiting is no longer a plan. Run from `backend/` meanwhile.
+0. **Root collection is fixed — `pytest` from the repository root is 970
+   passed.** See *The root suite collects now*. It was not the rename this
+   file called it, and the branch it was waiting on would have conflicted
+   rather than resolved it.
 
-   There is also a live bug nobody has hit yet: `sg.list_security_groups`
+   There is still a live bug nobody has hit yet: `sg.list_security_groups`
    returns raw AWS keys (`GroupId`), and `read_group_for_scanning` expects a
    lowercase `group_id`, so feeding one straight to the other raises
    `ParamValidationError`. The page does not hit it because the list adapter
-   reshapes first; a script using the two together will.
+   reshapes first; a script using the two together will. It is the last thing
+   in this file recorded as broken and not fixed, and it is still one line.
+
+   Two numbers to revisit rather than inherit. `common.BROAD_PREFIX_V4` is 16
+   and `BROAD_PREFIX_V6` is 32 — the point where public address space stops
+   being an allowlist and starts being a region of the internet. They are
+   judgement calls with the reasoning written beside them, they decide whether
+   a finding fires, and nobody has checked them against a real allowlist
+   anybody actually uses.
 
 1. **Follow a chain, not one identity at a time.** The CloudGoat re-run is
    done and `docs/benchmark.md` has it: six of twelve scenarios named, one

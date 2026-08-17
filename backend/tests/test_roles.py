@@ -82,6 +82,57 @@ def _find(warnings, setting):
 # ============================================ The scenarios that defeated it
 
 
+def test_a_wildcard_role_arn_is_every_role_not_one_named_one():
+    """The matcher required Resource to be a bare `*`, and the reasoning beside
+    it was about a *named* role being a deliberate arrangement.
+
+    `arn:aws:iam::123456789012:role/*` is not a named role. It is every role in
+    the account, written the way the console writes it, and it is at least as
+    common as a bare `*`. So the escalation engine - pointed at all three
+    identity kinds - reported nothing for the ordinary spelling of the thing it
+    exists to find.
+    """
+    for resource in [f"arn:aws:iam::{ACCOUNT}:role/*",
+                     "arn:aws:iam::*:role/*",
+                     f"arn:aws:iam::{ACCOUNT}:*"]:
+        found = _find(check_role(_settings(_policy(
+            _allow(["iam:PassRole", "ec2:RunInstances"], resource=resource)))),
+            "pass_role_to_compute")
+        assert found["level"] == CRITICAL, resource
+        assert "start a machine" in found["message"], resource
+
+
+def test_one_named_role_is_still_a_deliberate_arrangement():
+    """The half that keeps this usable. Passing one role by name is how
+    correctly-built infrastructure works, and reporting it would put a critical
+    on most of it."""
+    settings = _settings(_policy(_allow(
+        ["iam:PassRole", "ec2:RunInstances"],
+        resource=f"arn:aws:iam::{ACCOUNT}:role/build-runner")))
+    assert "pass_role_to_compute" not in _settings_of(check_role(settings))
+
+
+def test_a_prefix_is_not_treated_as_everything():
+    """`role/build-*` is a family somebody chose the shape of. Reporting it
+    would trade the false negative above for a false positive, which this
+    module's own header says it would rather not do."""
+    settings = _settings(_policy(_allow(
+        ["iam:PassRole", "ec2:RunInstances"],
+        resource=f"arn:aws:iam::{ACCOUNT}:role/build-*")))
+    assert "pass_role_to_compute" not in _settings_of(check_role(settings))
+
+
+def test_a_bucket_wildcard_is_not_read_as_all_of_the_data():
+    """Only IAM ARNs get the wildcard reading. `arn:aws:s3:::mybucket/*` is
+    every object in one bucket, and treating a trailing /* as "everything"
+    everywhere would report an ordinary bucket policy as unrestricted access to
+    all the data in the account."""
+    settings = _settings(_policy(_allow(
+        ["s3:GetObject", "s3:ListBucket"], resource="arn:aws:s3:::mybucket/*")))
+    found = _settings_of(check_role(settings))
+    assert "reads_everything" not in found, "one bucket is not every bucket"
+
+
 def test_iam_privesc_by_ec2_is_named_rather_than_its_flow_logs():
     """Pass a role to EC2 and inherit it. The tool previously reported flow
     logs and a subnet setting - both true, neither the escalation."""

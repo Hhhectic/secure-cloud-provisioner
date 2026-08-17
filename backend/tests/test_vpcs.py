@@ -7,6 +7,8 @@ DependencyViolation naming nothing, so a half-deleted network that will not
 finish dying is the characteristic failure. The tests below pin the ordering.
 """
 
+import ipaddress
+
 import boto3
 import pytest
 from botocore.exceptions import ClientError
@@ -15,6 +17,7 @@ from moto import mock_aws
 from api import registry
 from aws import vpcs
 from aws import instances as ec2i
+from aws.s3_buckets import PermissionDenied
 from scanner.vpc_rules import check_vpc
 from scanner.common import CRITICAL, WARNING, INFO, cited, fixable
 
@@ -63,12 +66,20 @@ def test_a_nat_gateway_is_refused_with_the_price_named():
         ec2 = boto3.client("ec2", region_name=REGION)
         ok, message, _ = vpcs.create_vpc(ec2, "demo", with_nat_gateway=True)
 
+        # Inside the mock, and it was not. This line sat after the block, so
+        # the client it used was talking to real AWS: the call failed with
+        # AuthFailure, list_vpcs swallowed every ClientError into an empty
+        # list, and the assertion passed without ever looking at the network
+        # the test had just refused to build. It only surfaced when that
+        # swallow was removed. The third time this project has found an
+        # offline test quietly reaching the network.
+        assert vpcs.list_vpcs(ec2, only_ours=True) == []
+
     assert not ok
     assert "$32" in message
     # The point that makes it dangerous: stopping your machines does not stop
     # this bill. Only deleting the gateway does.
     assert "until it is deleted" in message
-    assert vpcs.list_vpcs(ec2, only_ours=True) == []
 
 
 # ------------------------------------------------------------ Build, over moto
@@ -90,6 +101,53 @@ def test_a_created_network_has_a_public_and_a_private_subnet(ec2):
     assert set(by_role) == {"public", "private"}
     assert by_role["public"]["reaches_internet"] is True
     assert by_role["private"]["reaches_internet"] is False
+
+
+@pytest.mark.parametrize("cidr", ["10.0.0.0/16", "10.1.0.0/16",
+                                  "172.31.0.0/16", "192.168.0.0/16"])
+def test_every_cidr_the_form_offers_gets_both_its_subnets(ec2, cidr):
+    """The subnets have to be inside the network somebody chose.
+
+    They were the constants 10.0.1.0/24 and 10.0.2.0/24, which are inside
+    10.0.0.0/16 and inside none of the other three the page's menu offers. So
+    three of four choices failed both create_subnet calls with "The CIDR
+    '10.0.1.0/24' is invalid" and returned a VPC with nothing in it - reported
+    as created, with the failures relegated to `problems`, which is how it
+    survived: a network you cannot put a machine in, that answers ok.
+
+    Parametrized over the menu rather than over one awkward value, because the
+    bug was not that some exotic CIDR broke - it was that the default was the
+    only one that worked.
+    """
+    ok, vpc_id, problems = vpcs.create_vpc(ec2, "demo", cidr=cidr, region=REGION)
+    assert ok, vpc_id
+    assert not [p for p in problems if "invalid" in p.lower()], problems
+
+    settings = vpcs.read_vpc_for_scanning(ec2, vpc_id)
+    by_role = {s["declared_role"]: s for s in settings["subnets"]}
+    assert set(by_role) == {"public", "private"}, problems
+
+    network = ipaddress.ip_network(cidr)
+    for role in ("public", "private"):
+        subnet = ipaddress.ip_network(by_role[role]["cidr"])
+        assert subnet.subnet_of(network), f"{role} {subnet} is outside {network}"
+    assert by_role["public"]["cidr"] != by_role["private"]["cidr"]
+
+
+def test_the_default_network_keeps_the_subnets_it_always_had(ec2):
+    """The derivation is not an excuse to move the default's addresses.
+
+    Anything already running in a 10.0.0.0/16 built by this tool sits in
+    10.0.1.0/24 or 10.0.2.0/24, and a security group written against those
+    ranges by hand should not quietly start pointing at nothing.
+    """
+    assert vpcs.subnet_cidrs("10.0.0.0/16") == ("10.0.1.0/24", "10.0.2.0/24")
+
+
+def test_a_network_too_small_to_divide_says_so_rather_than_failing_twice(ec2):
+    """A /28 has nothing to carve, and one clear sentence beats two AWS errors."""
+    public, private = vpcs.subnet_cidrs("10.0.0.0/28")
+    assert public is None and private is None
 
 
 def test_the_private_subnet_has_no_internet_route_at_all(ec2):
@@ -154,6 +212,51 @@ def test_dns_is_enabled_so_instances_get_names(ec2):
             VpcId=vpc_id, Attribute=attribute
         )[attribute[0].upper() + attribute[1:]]["Value"]
         assert value is True, f"{attribute} should be on"
+
+
+def test_a_refused_listing_is_not_an_account_with_no_networks():
+    """It answered a denial with an empty list, which is the one wrong answer
+    that reassures.
+
+    The route hands that back as HTTP 200 with nothing in it and the page
+    prints "none" - the single word meaning somebody looked and there was
+    nothing there. Every other type reports "unreachable" when its read is
+    refused, because every other list either raises or lets the error out;
+    networks alone went quiet, and an account whose networks could not be read
+    was indistinguishable from one that has none.
+
+    aws/snapshots.py writes the rule down for itself and it is the same rule:
+    something this tool was not allowed to ask about must never be reported as
+    the safe answer.
+    """
+    denied = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "not authorized"}},
+        "DescribeVpcs")
+
+    class _Refusing:
+        def describe_vpcs(self, **kwargs):
+            raise denied
+
+    with pytest.raises(PermissionDenied) as raised:
+        vpcs.list_vpcs(_Refusing())
+
+    assert raised.value.permission == "ec2:DescribeVpcs"
+
+
+def test_a_listing_that_fails_for_another_reason_still_propagates():
+    """Only a refusal becomes PermissionDenied. Anything else keeps its own
+    identity rather than being relabelled as a missing permission, which would
+    send somebody to fix an IAM policy that was never wrong."""
+    other = ClientError(
+        {"Error": {"Code": "RequestLimitExceeded", "Message": "slow down"}},
+        "DescribeVpcs")
+
+    class _Throttled:
+        def describe_vpcs(self, **kwargs):
+            raise other
+
+    with pytest.raises(ClientError):
+        vpcs.list_vpcs(_Throttled())
 
 
 def test_a_created_network_is_tagged_and_findable(ec2):

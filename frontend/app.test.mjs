@@ -714,7 +714,7 @@ const ackWarning = {
                   on: "2026-08-09", until: "2027-02-09" },
 };
 
-const { document: ackDoc } = await boot({
+const { document: ackDoc, sent: ackFindingSent } = await boot({
   "/resources/security-group/sg-1": () => ({
     resource_type: "security-group", resource_id: "sg-1", settings: {},
     warnings: [ackWarning],
@@ -751,6 +751,28 @@ check(Boolean(accepted) && accepted.querySelector(".n").textContent === "1",
       "and the tally says so, rather than quietly subtracting it");
 check(detail.querySelector(".tally.critical .n").textContent === "1",
       "the critical it was still counts as critical");
+
+/* Undoing it sits with the decision it undoes. There is no form and no
+   confirmation step, because every guard on accepting a finding exists to make
+   *quietening* one expensive - and this only makes one louder, back to the
+   state the tool starts in. confirm is still sent, filled in from the finding
+   the button belongs to, so a request cannot be cross-wired to another rule. */
+const undo = [...finding.querySelectorAll("button")]
+  .find((b) => /stop accepting/i.test(b.textContent));
+if (check(Boolean(undo), "an accepted finding offers a way to stop accepting it")) {
+  const beforeUndo = ackFindingSent.length;
+  undo.click();
+  await new Promise((r) => setTimeout(r, 60));
+
+  const call = ackFindingSent.slice(beforeUndo)
+    .find((r) => r.options.method === "DELETE");
+  if (check(Boolean(call), "which asks the server to remove it")) {
+    check(call.url.includes("/acknowledgements/"),
+          "against the acknowledgement rather than the resource");
+    check(call.url.includes("confirm=b%3Apublic_policy"),
+          "naming the rule twice, as the write path also demands");
+  }
+}
 
 /* A level with nothing in it stays on screen. A row that silently omits the
    level somebody was looking for cannot be told from one that never checked,
@@ -1413,9 +1435,18 @@ const { document: dashDoc, sent: dashSent } = await boot({
   // One type with something in it, so "counted but not judged" is reachable.
   // With every type empty each card would read "none" and the distinction
   // this whole panel turns on could not be observed.
-  "/resources/security-group": () => ({
+  // Counts on the scanning pass and not on the counting one, which is the
+  // difference the real route turns on. Answering both without counts modelled
+  // a scan that came back empty-handed for every row, and the dashboard now
+  // reports exactly that - correctly - which is not what this fixture is here
+  // to exercise.
+  "/resources/security-group": (options, url) => ({
     resource_type: "security-group",
-    resources: [{ id: "sg-1", name: "demo" }, { id: "sg-2", name: "other" }],
+    resources: [{ id: "sg-1", name: "demo" }, { id: "sg-2", name: "other" }]
+      .map((r) => url.includes("with_scan=true")
+        ? { ...r, counts: { critical: 0, warning: 0, info: 0, accepted: 0 },
+            worst_level: null }
+        : r),
   }),
   "/activity": () => ({ activity: [
     { at: "2026-08-15T14:31:17-0400", method: "DELETE",
@@ -1457,6 +1488,121 @@ check($(dashDoc, "dash-body").querySelector(".scan-when").textContent
       "and the panel says the numbers are as of that scan");
 check($(dashDoc, "scan-all").textContent === "Scan again",
       "the button becomes a re-scan, the first one having already happened");
+
+/* A resource the login could not read is not a resource with nothing wrong in
+   it, and the dashboard scored it as one.
+
+   GET /resources/{type}?with_scan=true returns such a row rather than dropping
+   it - counts null, `unreachable` naming the permission - because a resource
+   you cannot audit is exactly the one worth knowing about. The aggregation
+   here skipped every row with no counts and never read `unreachable` at all,
+   so one readable clean alarm beside one unreadable one rendered as "clean",
+   under the headline "Nothing critical or warning".
+
+   The Audit list has always got this right and renders "?" for such a row. The
+   summary above it was the half that lied, which is the worse half to lie in,
+   and it is the same failure this panel already records learning once: nothing
+   here may print a verdict it did not earn by scanning. */
+const { document: partialDoc } = await boot({
+  "/resources/alarm": (options, url) => ({
+    resource_type: "alarm",
+    resources: url.includes("with_scan=true")
+      ? [{ id: "billing", name: "billing", worst_level: null,
+           counts: { critical: 0, warning: 0, info: 0, accepted: 0 } },
+         { id: "locked", name: "locked", worst_level: null, counts: null,
+           unreachable: "cloudwatch:DescribeAlarms" }]
+      : [{ id: "billing", name: "billing" }, { id: "locked", name: "locked" }],
+  }),
+}, "dashboard");
+
+/* What has already been decided about, attached to the severity it belongs to.
+
+   The first version of this trailed one number on the end - "2 critical, 2
+   warning, 3 accepted" - which reads as seven findings and never says which
+   three are spoken for, so a reader cannot tell whether anything is
+   outstanding without opening the type.
+
+   Still not subtracted, and that is the part worth holding. "1 warning" on a
+   bucket carrying two accepted criticals is the reading this whole panel
+   exists to prevent: a summary that empties the screen is how people stop
+   reading the screen. The severities stay whole and the parenthesis says how
+   much of each has been decided about. */
+const { document: ackDashDoc } = await boot({
+  "/resources/security-group": (options, url) => ({
+    resource_type: "security-group",
+    resources: url.includes("with_scan=true")
+      ? [{ id: "sg-1", name: "demo", worst_level: "critical",
+           counts: { critical: 2, warning: 2, info: 0, acknowledged: 3,
+                     accepted: { critical: 2, warning: 1, info: 0 } } }]
+      : [{ id: "sg-1", name: "demo" }],
+  }),
+}, "dashboard");
+
+const ackCard = [...ackDashDoc.querySelectorAll(".dash-card")].find(
+  (c) => c.querySelector(".dash-name").textContent === "Security group");
+const ackState = ackCard.querySelector(".dash-state").textContent;
+
+check(ackState === "1 warning (2 C, 1 W accepted)",
+      "the card leads with what is left to do, not with what was already answered");
+check(!ackCard.classList.contains("has-critical"),
+      "and is not styled as a crisis when every critical has been accepted");
+check(ackCard.classList.contains("has-warning"),
+      "but is styled by the warning that has not");
+check(!ackCard.classList.contains("clean"),
+      "and never reads clean, because findings exist and were decided about");
+
+const ackNote = $(ackDashDoc, "dash-body").querySelector(".verdict-note");
+check($(ackDashDoc, "dash-body").querySelector(".verdict-line").textContent
+        === "No critical findings, 1 warning",
+      "the headline agrees with the cards rather than counting them differently");
+check(Boolean(ackNote) && /2 criticals and 1 warning already accepted/.test(ackNote.textContent),
+      "and says what was accepted");
+check(Boolean(ackNote) && /not counted above/.test(ackNote.textContent),
+      "and that it is not inside the number above, which is otherwise unreadable");
+
+/* Everything found, and everything already answered. Not the same state as
+   nothing being found, and it must not borrow that wording: what is here is a
+   set of decisions somebody made, and those are worth going back to. */
+const { document: allAckDoc } = await boot({
+  "/resources/security-group": (options, url) => ({
+    resource_type: "security-group",
+    resources: url.includes("with_scan=true")
+      ? [{ id: "sg-1", name: "demo", worst_level: "critical",
+           counts: { critical: 1, warning: 1, info: 0, acknowledged: 2,
+                     accepted: { critical: 1, warning: 1, info: 0 } } }]
+      : [{ id: "sg-1", name: "demo" }],
+  }),
+}, "dashboard");
+
+const allAckCard = [...allAckDoc.querySelectorAll(".dash-card")].find(
+  (c) => c.querySelector(".dash-name").textContent === "Security group");
+
+check(allAckCard.querySelector(".dash-state").textContent
+        === "all accepted (1 C, 1 W)",
+      "a type with nothing outstanding says so, and says what it holds");
+check(!allAckCard.classList.contains("clean"),
+      "and is not called clean, which would claim nothing was ever found");
+check(!allAckCard.classList.contains("has-critical")
+        && !allAckCard.classList.contains("has-warning"),
+      "nor coloured as though something needs doing");
+check($(allAckDoc, "dash-body").querySelector(".verdict-line").textContent
+        === "Nothing outstanding",
+      "and the headline reaches its own wording for it");
+
+const alarmCard = [...partialDoc.querySelectorAll(".dash-card")].find(
+  (c) => c.querySelector(".dash-name").textContent === "Alarm");
+const alarmState = alarmCard.querySelector(".dash-state").textContent;
+
+check(alarmState !== "clean",
+      "a type holding one unreadable resource never reads as clean");
+check(/could not be read/.test(alarmState),
+      "the card says how many were not looked at instead of leaving them out");
+check(!alarmCard.classList.contains("clean"),
+      "and is not styled clean either, which is read before the words are");
+check(partialDoc.querySelector(".verdict-line").textContent === "Scan incomplete",
+      "the headline calls the account's scan short rather than calling it clean");
+check(partialDoc.querySelector(".verdict-note").textContent.includes("Alarm"),
+      "and names the type, so the gap is somewhere rather than everywhere");
 
 // The dashboard is a way in, not a dead end.
 const groupCard = dashCards.find((c) =>
@@ -1623,6 +1769,82 @@ if (check(Boolean(verdictPanel), "a resource with no findings says so")) {
   check(/every rule/i.test(verdictPanel.textContent),
         "saying that every rule ran, which is what separates it from the "
         + "empty list above");
+}
+
+// ------------------------------------------- a multi-select sends every choice
+
+/* The widest-reaching bug this suite never saw, because it never drove a
+ * multi-select at all.
+ *
+ * multiChoice built a real <select multiple> and then did
+ * `select.value = () => [...select.selectedOptions].map(o => o.value)`.
+ * `value` is an accessor on HTMLSelectElement.prototype, so that assignment
+ * went through the setter and no own property was ever created: `typeof
+ * el.value` stayed "string", collectSpec took its plain-<input> branch and
+ * split that string on commas, and a multi-select's value getter answers with
+ * the FIRST selected option and never contains a comma. Every choice after the
+ * first was discarded in silence, on the way to the create and to the live
+ * pre-flight alike - so the tool judged a machine nobody had asked for and
+ * agreed with itself about it. */
+
+console.log("\nA multi-select submits every option chosen");
+console.log("------------------------------------------");
+
+const { document: multiDoc, sent: multiSent } = await boot({
+  "/resources": () => ({
+    resources: [
+      { key: "instance", label: "Server", short_label: "Server",
+        provider: "aws", id_label: "Instance ID", read_only: false },
+    ],
+  }),
+  "/resources/instance": (options) =>
+    options.method === "POST"
+      ? { resource_type: "instance", resource_id: "i-1", problems: [],
+          settings: {}, warnings: [],
+          counts: { critical: 0, warning: 0, info: 0 } }
+      : { resource_type: "instance", resources: [] },
+  "/resources/instance/options": () => ({
+    options: {
+      instance_type: [{ value: "t3.micro", label: "t3.micro" }],
+      key_name: [{ value: "demo-key", label: "demo-key" }],
+      security_group_ids: [
+        { value: "sg-1", label: "sg-1" },
+        { value: "sg-2", label: "sg-2" },
+        { value: "sg-3", label: "sg-3" },
+      ],
+      subnet_id: [{ value: "subnet-1", label: "subnet-1" }],
+    },
+  }),
+}, "create");
+
+const multiBody = $(multiDoc, "create-body");
+const multiSelect = [...multiBody.querySelectorAll("select")]
+  .find((s) => s.multiple);
+
+if (check(Boolean(multiSelect), "the form offers a real multi-select")) {
+  multiBody.querySelector("input").value = "demo-server";
+  // Two of the three, and deliberately not the adjacent pair: the old code
+  // kept whichever option came first in the list, so selecting sg-1 and sg-2
+  // would have passed for the wrong reason.
+  for (const option of multiSelect.options) {
+    if (option.value !== "sg-2") option.selected = true;
+  }
+
+  const beforeMulti = multiSent.length;
+  [...multiBody.querySelectorAll("button")]
+    .find((b) => b.textContent === "Create").click();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  const post = multiSent.slice(beforeMulti)
+    .find((r) => r.options.method === "POST");
+  if (check(Boolean(post), "and submits it")) {
+    const spec = JSON.parse(post.options.body);
+    check(Array.isArray(spec.security_group_ids)
+          && spec.security_group_ids.length === 2,
+          "carrying both groups chosen, rather than only the first");
+    check(JSON.stringify(spec.security_group_ids) === '["sg-1","sg-3"]',
+          "and exactly the ones chosen");
+  }
 }
 
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");

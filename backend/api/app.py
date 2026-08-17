@@ -509,8 +509,25 @@ def create(resource_type: str, spec: models.ResourceSpec, region: str = "us-east
     _must_be_writable(known)
     client = known.get_client(region)
 
-    blocking = [w for w in known.check_spec(_spec_for_checking(known, spec, region))
-                if w["level"] == CRITICAL]
+    # One dict, used for both the pre-flight and the create.
+    #
+    # These were two separate calls: the check got _spec_for_checking, which
+    # injects the region the request is for, and the create got a bare
+    # spec.as_dict(). So the two judged different requests. `region` is sent by
+    # the page only as a query parameter, never in the body, so it was absent
+    # from every create: _bucket_create fell through to DEFAULT_REGION
+    # "us-east-1" while the client was built for the region actually chosen,
+    # and s3_buckets.create_bucket branches on that argument rather than on the
+    # client - omitting CreateBucketConfiguration for us-east-1, which a
+    # regional endpoint rejects. Creating a bucket anywhere but us-east-1 was
+    # impossible from the page, and the refusal quoted raw AWS text naming
+    # nothing anyone could act on.
+    #
+    # Azure is unaffected: _spec_for_checking injects only when the provider is
+    # aws, because `region` on an Azure spec carries the location instead.
+    data = _spec_for_checking(known, spec, region)
+
+    blocking = [w for w in known.check_spec(data) if w["level"] == CRITICAL]
     if blocking and not accept_risk:
         raise HTTPException(
             status_code=400,
@@ -532,7 +549,7 @@ def create(resource_type: str, spec: models.ResourceSpec, region: str = "us-east
             },
         )
 
-    ok, result, problems = known.create(client, spec.as_dict())
+    ok, result, problems = known.create(client, data)
     if not ok:
         # problems travels with the refusal, and used to be discarded here.
         #
@@ -676,7 +693,8 @@ if not _multipart_is_installed():
 if _multipart_is_installed():
     @app.post("/resources/bucket/{bucket_name}/objects",
               response_model=models.ActionResponse)
-    async def upload_objects(bucket_name: str, files: list[UploadFile] = File(...)):
+    async def upload_objects(bucket_name: str, files: list[UploadFile] = File(...),
+                             region: str = "us-east-1"):
         """Puts files into a bucket, unless the bucket is open to the world.
 
         Its own route rather than a field on ResourceSpec, for three reasons. A
@@ -689,7 +707,11 @@ if _multipart_is_installed():
         the bucket's state at the moment of writing - see the reasoning there.
         """
         known = _resource("bucket")
-        client = known.get_client("us-east-1")
+        # The region the caller is working in, like every other route here. It
+        # was hardcoded to us-east-1, which was invisible only because a bucket
+        # could not be created anywhere else; now that one can, uploading to it
+        # would have looked for it in the wrong region and reported it missing.
+        client = known.get_client(region)
 
         payload = []
         total = 0
@@ -798,6 +820,67 @@ def acknowledge(request: models.AcknowledgementRequest,
             f"severity and is now marked as accepted by {entry['by']}, until "
             f"{until}. Nothing is hidden. Commit {where.name} so it applies to "
             "everybody else's scans as well."
+        ),
+    )
+
+
+@app.delete("/acknowledgements/{rule_id:path}",
+            response_model=models.ActionResponse)
+def unacknowledge(rule_id: str, confirm: Optional[str] = None):
+    """Takes an acknowledgement back, so the finding speaks at full volume again.
+
+    The counterpart of the POST above, and deliberately a much smaller thing.
+    Every guard on writing one is about *quietening* a finding: this service
+    holds credentials and has no login, so a route that dims a warning is worth
+    more to an attacker than one that deletes something, and the whole of
+    `check_entry` exists to make that expensive. None of it applies in this
+    direction. The worst a wrong call here can do is report something loudly
+    that somebody had already decided about - which is the state the tool ships
+    in, and the side it is safe to err towards.
+
+    `confirm` is still asked for, and still has to repeat the id. Not as a
+    barrier - the page fills it in from the finding the button belongs to, so
+    nobody types it - but because it is the one thing that distinguishes a
+    request meaning *this* acknowledgement from a request that has been
+    cross-wired to the wrong one. The write path makes the same demand for the
+    same reason.
+
+    No re-scan here, unlike the POST. That check exists to stop an
+    acknowledgement being written for a finding that does not exist; an
+    acknowledgement that no longer matches anything is exactly the stale entry
+    the audit reports and asks somebody to clear, so refusing to remove it
+    because the resource is gone would trap the mess it is meant to clean up.
+    """
+    if confirm != rule_id:
+        problem = ("To remove an acknowledgement, confirm has to repeat its "
+                   f"rule id exactly. Expected '{rule_id}'.")
+        audit.record(method="DELETE", path="/acknowledgements",
+                     outcome="refused", why=problem, rule_id=rule_id)
+        raise HTTPException(status_code=400, detail=problem)
+
+    removed, where = acknowledged.remove(rule_id)
+    if not removed:
+        raise HTTPException(
+            status_code=404,
+            detail=(f"Nothing acknowledged for '{rule_id}', so there is "
+                    "nothing to take back."),
+        )
+
+    audit.record(method="DELETE", path="/acknowledgements", outcome="removed",
+                 rule_id=rule_id, count=len(removed))
+
+    # What it said, echoed back. The file no longer holds the reason, and this
+    # response is the only place it still exists.
+    was = removed[0]
+    return models.ActionResponse(
+        ok=True,
+        message=(
+            f"'{rule_id}' is no longer accepted and is reported normally again. "
+            f"It had been accepted by {was.get('by', 'unknown')}"
+            f"{' on ' + was['on'] if was.get('on') else ''}: "
+            f"\"{was.get('reason', '')}\". "
+            f"Commit {where.name} so it stops applying to everybody else's "
+            "scans as well."
         ),
     )
 

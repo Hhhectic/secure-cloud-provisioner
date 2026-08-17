@@ -14,6 +14,8 @@ does that the code got wrong, it says so - that is the lesson of
 one and so could never have shown that no such method exists.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from azure.core.exceptions import HttpResponseError
@@ -102,6 +104,34 @@ def test_a_rule_for_other_addresses_does_not_decide_this_packet():
     decision, _ = effective.decide([_rule("office", source="203.0.113.0/24")],
                                    "22")
     assert decision == "DenyByDefault"
+
+
+def test_half_the_internet_is_this_packets_rule():
+    """The failure here was worse than a missing finding.
+
+    `_matches_everyone` was string equality against four literals, so a rule
+    allowing 22 from `0.0.0.0/1` was skipped as "not this packet's rule" and
+    decide() fell through to DenyByDefault - a positive statement that the port
+    was closed, about a port Azure would have opened to two billion addresses.
+    Two such rules, `0.0.0.0/1` and `128.0.0.0/1`, cover every address there
+    is.
+    """
+    for source in ["0.0.0.0/1", "128.0.0.0/1", "0.0.0.0/4", "::/1"]:
+        decision, _ = effective.decide([_rule(source=source)], "22")
+        assert decision == "Allow", source
+
+        warnings = check_nsg(_nsg([_rule(source=source)]))
+        assert any(w["level"] == CRITICAL for w in warnings), source
+
+
+def test_an_allowlist_is_still_not_this_packets_rule():
+    """The other half. A rule naming an office, a machine or a private range is
+    not evidence of safety, but it is also not an exposure - and reporting it
+    as one would put a critical on every correctly configured group."""
+    for source in ["203.0.113.0/24", "8.8.8.0/24", "10.0.0.0/8",
+                   "VirtualNetwork", "AzureLoadBalancer"]:
+        decision, _ = effective.decide([_rule(source=source)], "22")
+        assert decision == "DenyByDefault", source
 
 
 def test_a_rule_for_another_protocol_does_not_open_the_port():
@@ -580,15 +610,27 @@ def test_an_unreadable_machine_network_is_a_finding_not_a_silence():
     assert "unreadable_effective_rules" in _settings_of(warnings)
 
 
-def test_a_machine_delete_says_what_it_leaves_behind():
-    """Reporting success and leaving somebody to find four billable leftovers
-    later would be true and misleading."""
+def test_a_machine_delete_says_what_it_leaves_behind(monkeypatch):
+    """Reporting success and leaving somebody to find billable leftovers later
+    would be true and misleading.
+
+    What it leaves changed deliberately - the card and the address go with the
+    machine now, because nothing else here can remove a card and leaving one
+    stranded the group and the network too. The group and the network still
+    stay, and this still insists the message names them.
+    """
     class _Ops:
         def list_all(self):
             return []
 
         def begin_delete(self, group, name):
             return _StubPoller(None)
+
+    # Monkeypatched rather than left to reach Azure. Removing the card is a
+    # network call, and an offline test that quietly acquired one would pass or
+    # fail on whether the machine running it happened to hold a credential.
+    monkeypatch.setattr(az_vm, "network_client",
+                        lambda *a, **k: _NetworkRecording({}))
 
     client = type("C", (), {"virtual_machines": _Ops()})()
     ok, message = az_vm.delete_vm(
@@ -598,8 +640,8 @@ def test_a_machine_delete_says_what_it_leaves_behind():
         force=True)
 
     assert ok
-    assert "still there" in message
-    assert "-nic" in message
+    assert "are left" in message
+    assert "demo-nsg" in message and "demo-vnet" in message
 
 
 class _StubCapability:
@@ -978,6 +1020,268 @@ def test_a_resource_that_is_absent_still_reads_back_as_nothing(label, reader):
     returns None when the thing is not there, and the routes turn that into a
     404."""
     assert reader(_RaisingClient(404), _A_RESOURCE_ID) is None
+
+
+def test_fixing_a_group_you_may_not_read_is_a_refusal_not_a_crash():
+    """The sixth instance of the mistake, in the one call that still had it.
+
+    `apply_fix` makes the identical read as `read_nsg_for_scanning` - same
+    client, same operation, same arguments - and that one checked denied()
+    first while this one went straight to 404 and re-raised the rest. So the
+    same 403 answered as a 403 through a scan and as a 500 and a traceback
+    through a fix. `_locate` returns immediately when handed a full resource
+    id, so nothing enumerates first and absorbs it.
+    """
+    with pytest.raises(AzureRefused):
+        az_nsg.apply_fix(_RaisingClient(403), _A_RESOURCE_ID,
+                         {"rule": {"rule_name": "allow-ssh"}})
+
+
+def test_a_group_that_is_absent_is_still_reported_as_absent_by_a_fix():
+    """The other half, held in place: 404 is still "there is no such group"
+    and still a refusal with a sentence, not an exception."""
+    ok, message = az_nsg.apply_fix(_RaisingClient(404), _A_RESOURCE_ID,
+                                   {"rule": {"rule_name": "allow-ssh"}})
+    assert ok is False
+    assert "No network security group" in message
+
+
+# ================== A machine's exposure, when the reads behind it are refused
+
+
+def _machine(nic_id="/subscriptions/s/resourceGroups/g/providers/"
+                    "Microsoft.Network/networkInterfaces/nic1"):
+    """A machine as the compute SDK hands one back: password login on, a
+    managed disk, and one primary network card."""
+    return SimpleNamespace(
+        name="vm1", id=_A_RESOURCE_ID, location="eastus",
+        hardware_profile=SimpleNamespace(vm_size="Standard_F1als_v7"),
+        os_profile=SimpleNamespace(
+            admin_username="azureuser",
+            linux_configuration=SimpleNamespace(
+                disable_password_authentication=False)),
+        storage_profile=SimpleNamespace(
+            os_disk=SimpleNamespace(managed_disk=object(), vhd=None)),
+        security_profile=SimpleNamespace(encryption_at_host=True),
+        instance_view=None,
+        network_profile=SimpleNamespace(network_interfaces=[
+            SimpleNamespace(id=nic_id, primary=True)]),
+    )
+
+
+class _ComputeReturning:
+    """A compute client that answers for the machine and nothing else."""
+
+    def __init__(self, machine):
+        self.virtual_machines = SimpleNamespace(
+            get=lambda *a, **k: machine)
+
+
+def test_an_unreadable_public_address_is_recorded_rather_than_read_as_absent(
+        monkeypatch):
+    """None from a read that failed is not None from a machine with no address.
+
+    Everything that makes an Azure machine reachable lives on other resources -
+    the card, the address, the groups - and each is a separate call and a
+    separate permission. Those three reads were one try block recording one
+    key, and `public_ip` was the key it did not record: a refusal on the card
+    or the address left the setting at None with nothing saying why, which is
+    indistinguishable from a machine that has no public address.
+
+    It is not a cosmetic difference. Both findings below score CRITICAL on a
+    reachable machine and WARNING otherwise, so the unanswered question bought
+    the milder verdict silently - and describe_vm went on to list the machine
+    as having no address at all.
+    """
+    class _Refusing:
+        def __getattr__(self, name):
+            return self
+
+        def get(self, *args, **kwargs):
+            raise _StatusError(403)
+
+    monkeypatch.setattr(az_vm, "network_client", lambda *a, **k: _Refusing())
+
+    settings = az_vm.read_vm_for_scanning(
+        _ComputeReturning(_machine()), _A_RESOURCE_ID)
+
+    assert "public_ip" in settings["unreadable"], (
+        "a public address that could not be read has to say so")
+    assert "effective_rules" in settings["unreadable"]
+    assert "public_ip" in az_vm.describe_vm(settings)["checks_skipped"]
+
+
+def test_an_unreadable_address_does_not_soften_the_findings_it_decides(
+        monkeypatch):
+    """The half that matters. With the address unknown the machine is judged as
+    though it has one, because the alternative is an unanswered question
+    resolving to the safer of two verdicts."""
+    class _Refusing:
+        def __getattr__(self, name):
+            return self
+
+        def get(self, *args, **kwargs):
+            raise _StatusError(403)
+
+    monkeypatch.setattr(az_vm, "network_client", lambda *a, **k: _Refusing())
+    settings = az_vm.read_vm_for_scanning(
+        _ComputeReturning(_machine()), _A_RESOURCE_ID)
+
+    password = [w for w in check_vm(settings)
+                if w["rule_id"] == "vm1:password_login_allowed"]
+    assert password, "password login is still reported"
+    assert password[0]["level"] == CRITICAL, (
+        "and at the severity of a machine that may be reachable")
+
+
+class _NetworkRecording:
+    """A network client that records what was deleted and holds tagged items."""
+
+    def __init__(self, tags):
+        self.deleted = []
+        self._tags = tags
+        outer = self
+
+        class _Ops:
+            def __init__(self, kind):
+                self.kind = kind
+
+            def get(self, group, name):
+                if name not in outer._tags:
+                    raise _StatusError(404)
+                return SimpleNamespace(name=name, tags=outer._tags[name])
+
+            def begin_delete(self, group, name):
+                outer.deleted.append(name)
+                return SimpleNamespace(result=lambda: None)
+
+        self.network_interfaces = _Ops("nic")
+        self.public_ip_addresses = _Ops("ip")
+
+
+def test_deleting_a_machine_takes_the_card_it_made_with_it(monkeypatch):
+    """A network card is the one piece no route here could ever remove.
+
+    delete_vm left the card, the address, the group and the network, on the
+    stated grounds that this tool may not have made them. That is right about
+    the group and the network - both are reusable, both might hold another
+    machine, and both are registered types with their own delete. It was wrong
+    about the card: a card attaches one machine to one network, it is worthless
+    the moment that machine is gone, and nothing in the registry can delete
+    one.
+
+    So the leftovers were not merely untidy. Azure refuses to delete a subnet
+    or a security group while a card still references them, so the stranded
+    card stranded the other two as well and the API had no route to a clean
+    subscription at all. Found by deleting a machine through the routes and
+    then failing to delete what it left.
+    """
+    client = SimpleNamespace(virtual_machines=SimpleNamespace(
+        begin_delete=lambda g, n: SimpleNamespace(result=lambda: None)))
+    net = _NetworkRecording({
+        "vm1-nic": az_common.managed_tags(),
+        "vm1-ip": az_common.managed_tags(),
+    })
+    monkeypatch.setattr(az_vm, "network_client", lambda *a, **k: net)
+
+    ok, message = az_vm.delete_vm(client, _A_RESOURCE_ID.replace("name", "vm1"),
+                                  force=True)
+
+    assert ok is True
+    assert "vm1-nic" in net.deleted, "the card goes with the machine"
+    assert "vm1-ip" in net.deleted, "and so does the address it was given"
+    assert net.deleted.index("vm1-nic") < net.deleted.index("vm1-ip"), (
+        "card first: Azure will not release an address a card still refers to")
+    assert "vm1-nsg" not in net.deleted and "vm1-vnet" not in net.deleted, (
+        "but not the group or the network, which may hold something else")
+    assert "vm1-nsg" in message and "vm1-vnet" in message, (
+        "and the message names what it left")
+
+
+def test_a_card_this_tool_did_not_make_is_left_alone(monkeypatch):
+    """The rule the original refusal was protecting, kept intact. Only what
+    carries this tool's tag is removed; anything else is somebody's."""
+    client = SimpleNamespace(virtual_machines=SimpleNamespace(
+        begin_delete=lambda g, n: SimpleNamespace(result=lambda: None)))
+    net = _NetworkRecording({"vm1-nic": {"owner": "someone-else"}})
+    monkeypatch.setattr(az_vm, "network_client", lambda *a, **k: net)
+
+    ok, _ = az_vm.delete_vm(client, _A_RESOURCE_ID.replace("name", "vm1"),
+                            force=True)
+
+    assert ok is True
+    assert net.deleted == [], "an untagged card is not this tool's to remove"
+
+
+def test_a_card_that_will_not_delete_is_named_rather_than_swallowed(monkeypatch):
+    """The machine is already gone by then, so this reports what is left
+    instead of failing a delete that mostly succeeded - the position this
+    project takes everywhere else about partial failures."""
+    client = SimpleNamespace(virtual_machines=SimpleNamespace(
+        begin_delete=lambda g, n: SimpleNamespace(result=lambda: None)))
+    net = _NetworkRecording({"vm1-nic": az_common.managed_tags()})
+
+    def _refuse(group, name):
+        raise _StatusError(409)
+
+    net.network_interfaces.begin_delete = _refuse
+    monkeypatch.setattr(az_vm, "network_client", lambda *a, **k: net)
+
+    ok, message = az_vm.delete_vm(client, _A_RESOURCE_ID.replace("name", "vm1"),
+                                  force=True)
+
+    assert ok is True, "the machine really was deleted"
+    assert "vm1-nic" in message and "by hand" in message
+
+
+def test_the_deletion_plan_agrees_with_what_the_delete_now_does(monkeypatch):
+    """The preview listed the card among the survivors, which was the preview
+    agreeing with a delete that stranded it."""
+    monkeypatch.setattr(az_vm, "read_vm_for_scanning", lambda c, n: {
+        "vm_name": "vm1", "public_ip": "203.0.113.5"})
+
+    plan = az_vm.plan_deletion(None, "vm1")
+    destroyed = [i["id"] for i in plan["items"]]
+
+    assert "vm1-nic" in destroyed
+    assert "vm1-ip" in destroyed
+    assert plan["destroys"].get("network cards") == 1
+    assert "vm1-nic" not in plan["message"].split("left behind:")[-1]
+
+
+def test_an_unmanaged_operating_system_disk_is_not_called_encrypted():
+    """This was `True if os_disk is not None`, which reports the presence of a
+    disk as the disk being encrypted. The value could only ever be True or
+    None, so the rule testing it for False could not fire under any
+    circumstance - and what that rule is kept for, an older or imported disk,
+    is precisely the case it could not see.
+
+    Azure encrypts every managed disk at rest and has since 2017. An unmanaged
+    one is a page blob in a storage account, which is what an imported disk
+    looks like, and none of that guarantee reaches it.
+    """
+    managed = SimpleNamespace(managed_disk=object(), vhd=None)
+    unmanaged = SimpleNamespace(managed_disk=None, vhd=object())
+    neither = SimpleNamespace(managed_disk=None, vhd=None)
+
+    assert az_vm._os_disk_encrypted(managed) is True
+    assert az_vm._os_disk_encrypted(unmanaged) is False
+    assert az_vm._os_disk_encrypted(neither) is None
+    assert az_vm._os_disk_encrypted(None) is None
+
+
+def test_the_unencrypted_disk_finding_can_now_actually_be_reached():
+    """The pairing, asserted end to end rather than either half alone: an
+    unmanaged disk reaches the scanner as False, and the rule reports it."""
+    settings = {
+        "vm_name": "vm1", "public_ip": None, "effective_rules": [],
+        "password_authentication_disabled": True,
+        "os_disk_encrypted": az_vm._os_disk_encrypted(
+            SimpleNamespace(managed_disk=None, vhd=object())),
+        "encryption_at_host": True, "unreadable": {},
+    }
+    assert any(w["rule_id"] == "vm1:unencrypted_disk"
+               for w in check_vm(settings))
 
 
 # ============================ Storage checks that came from the Prowler run

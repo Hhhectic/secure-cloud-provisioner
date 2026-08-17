@@ -85,6 +85,14 @@ def check_vm(settings):
     public_ip = settings.get("public_ip")
     rules = settings.get("effective_rules") or []
 
+    # An address that could not be read is not an address that is not there.
+    # Both findings below are CRITICAL on a reachable machine and WARNING
+    # otherwise, and "otherwise" was reached by an unanswered question as
+    # readily as by a No - which is the milder of the two answers and so
+    # exactly the default this file's own first rule forbids. Unknown is
+    # treated as reachable, and the wording says which of the two it is.
+    maybe_reachable = "public_ip" in unreadable
+
     # ---- An administration port open to the internet -------------------------
     #
     # Only reported as critical when the machine can actually be reached from
@@ -106,6 +114,17 @@ def check_vm(settings):
                     f"entire internet, through the rule '{rule_name}', and the "
                     f"machine has a public address ({public_ip}). Anyone can "
                     "reach it and try to log in.",
+                    _target(name, f"open_{port}"),
+                ))
+            elif maybe_reachable:
+                warnings.append(_warning(
+                    CRITICAL,
+                    f"Port {port} ({description}) on '{name}' is open to the "
+                    f"entire internet, through the rule '{rule_name}', and "
+                    "whether this machine has a public address could not be "
+                    "read. Reported as though it has one: an unanswered "
+                    "question is not a No, and the answer decides whether this "
+                    "is a crisis or a latent one.",
                     _target(name, f"open_{port}"),
                 ))
             else:
@@ -134,7 +153,7 @@ def check_vm(settings):
     if "password_authentication_disabled" not in unreadable:
         if settings.get("password_authentication_disabled") is False:
             warnings.append(_warning(
-                CRITICAL if public_ip else WARNING,
+                CRITICAL if (public_ip or maybe_reachable) else WARNING,
                 f"'{name}' accepts a password for logging in. A password can "
                 "be guessed, and a machine reachable from the internet is "
                 "guessed at continuously by people who are not aiming at you "
