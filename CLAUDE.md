@@ -1911,6 +1911,36 @@ do with the number being tested. It has to be routable space —
 one site inside it and does not. The boundary had never been pinned in either
 address family; it is now.
 
+**Then it was measured, and the answer is more interesting than the number.**
+The evidence above is six anecdotes, and every one sits on an easy side of the
+line: Cloudflare `/12`, Cloudflare `/13` and MIT `/8` above it, `/32`, `/24`
+and `/22` below. Nothing had looked at the band between. So 17,662 IPv4 ranges
+published by AWS, Cloudflare, GitHub and Google Cloud were counted. **8.2% are
+/16 or wider and fire. 55.7% sit between /17 and /24 and are silent on every
+port.** The gate does not see most of what these organisations publish.
+
+That alone is only a coverage figure, and it is a proxy — what an organisation
+*publishes* is not what a person *pastes*, and the aggregate is dominated by
+how finely AWS chooses to enumerate itself. **Cloudflare's own list settles it
+properly**, because it is short, canonical, and is the paste-this list: fifteen
+ranges, all expressing one decision — *anyone who can put a site behind this
+CDN*. On port 22 this gate calls **four of them critical and eleven of them
+nothing**. One configuration, two verdicts, decided by which line you look at.
+
+**The conclusion is not that /16 is wrong.** A gate at /22 makes Cloudflare
+coherent and then fires on an office /22, which is a range somebody does
+control. A gate at /20 splits the list somewhere else. Every candidate is the
+same mistake as the incumbent, because *width is a proxy for "nobody chose who
+is inside this" and the two come apart*: an office /22 and a CDN /22 are the
+same size and opposite decisions, and nothing in a CIDR says which is which.
+**No threshold can separate them.** So this is a pragmatic cut, not a
+principled boundary, and describing it honestly is worth more than moving it.
+
+It stays at 16 and 32. What changed is the claim made for it — and the study
+also closed the question of whether to add a second, tighter threshold for
+administration ports, which had looked like the obvious next step and turns out
+to relocate the incoherence rather than remove it.
+
 ## Style
 
 Comments explain *why*, not what. Test names are sentences describing the
@@ -2269,12 +2299,11 @@ refinement, and the largest is that monitor and defender have no rules at all
    and answer 404 about it. `test_every_spelling_of_a_group_id_reaches_the_same_group`
    pins it.
 
-   Two numbers to revisit rather than inherit. `common.BROAD_PREFIX_V4` is 16
-   and `BROAD_PREFIX_V6` is 32 — the point where public address space stops
-   being an allowlist and starts being a region of the internet. They are
-   judgement calls with the reasoning written beside them, they decide whether
-   a finding fires, and nobody has checked them against a real allowlist
-   anybody actually uses.
+   The two threshold numbers have also been checked — see *The two threshold
+   numbers, checked at last*. This entry used to sit here saying nobody had,
+   and stayed after the section above was written, so the file asserted both
+   halves at once for a while. Both survive; the reasoning beside them did
+   not, and was replaced.
 
 1. **Follow a chain, not one identity at a time.** The CloudGoat re-run is
    done and `docs/benchmark.md` has it: six of twelve scenarios named, one

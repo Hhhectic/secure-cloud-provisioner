@@ -69,6 +69,31 @@ EVERYONE_TAGS = {"*", "any", "internet"}
 # proves nothing and looks like a pass. The boundary has to be probed with
 # globally routable space - 2606:4700::/32 is a provider allocation and fires,
 # 2606:4700:4700::/48 is one site inside it and does not.
+#
+# Measured since, against 17,662 IPv4 ranges published by AWS, Cloudflare,
+# GitHub and Google Cloud: 8.2% are /16 or wider and fire, and 55.7% sit
+# between /17 and /24 and are silent on every port. The gate does not see most
+# of what these organisations publish. Worth knowing rather than assuming.
+#
+# The sharper result is Cloudflare's own list, which is short, canonical, and
+# what somebody actually pastes. All fifteen ranges express one decision -
+# "anyone who can put a site behind this CDN" - and this gate calls four of
+# them critical on port 22 and eleven of them nothing at all. One decision, two
+# verdicts, settled by which line you happen to look at.
+#
+# That is not an argument for a different number. /22 would make Cloudflare
+# coherent and would then fire on an office /22, which is a range somebody does
+# control; /20 just splits the list somewhere else. **Width is a proxy for
+# "nobody chose who is inside this", and the two come apart** - an office /22
+# and a CDN /22 are the same size and opposite decisions, and nothing in a CIDR
+# says which is which. No threshold separates them, so this is a pragmatic cut
+# and not a principled boundary, and is better described that way than defended
+# as though it were derived.
+#
+# It stays at /16 because the port axis carries the real judgement - see
+# test_broad_ranges_are_judged_by_what_they_open - and because moving it trades
+# a quiet failure for a noisy one on every correctly configured group, which
+# test_an_allowlist_is_still_an_allowlist exists to prevent.
 BROAD_PREFIX_V4 = 16
 BROAD_PREFIX_V6 = 32
 
