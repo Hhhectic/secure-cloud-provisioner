@@ -46,6 +46,35 @@ SETTING_LABELS = {
 }
 
 
+def _how_much_is_inside(settings):
+    """A clause saying how much is behind an exposure, or nothing.
+
+    An exposure finding could not previously say how much was exposed, so a
+    world-readable empty bucket and a world-readable bucket holding two
+    hundred files were reported in identical words. They are not the same
+    event: one is a misconfiguration and the other is an incident.
+
+    Returns "" when the contents could not be read, because a clause is
+    added to a sentence that is already true and a missing one must not be
+    read as "nothing in it". The unreadable list carries that separately, as
+    it does for every other setting here.
+    """
+    if "objects" in (settings.get("unreadable") or {}):
+        return ""
+
+    inside = settings.get("objects")
+    if not inside:
+        return ""
+
+    count = inside.get("count", 0)
+    if not count:
+        return ", though there is nothing in it at the moment"
+
+    at_least = "at least " if inside.get("at_least") else ""
+    thing = "object" if count == 1 else "objects"
+    return f", and there {'is' if count == 1 else 'are'} {at_least}{count} {thing} in it"
+
+
 def check_bucket_settings(settings):
     """Evaluates a bucket settings snapshot and returns detected risks.
 
@@ -167,12 +196,50 @@ def check_bucket_settings(settings):
         warnings.append(_warning(
             CRITICAL,
             "The permissions policy attached to this bucket makes it public. "
-            "Anyone who knows the address can reach the files inside.",
+            "Anyone who knows the address can reach the files inside"
+            + _how_much_is_inside(settings) + ".",
             _target(bucket, "public_policy"),
             fix={
                 "action": "block_public_access",
                 "label": "Block the public policy",
             },
+        ))
+
+    # ---- Who else was let in on purpose --------------------------------------
+    #
+    # The gap Prowler covers as s3_bucket_cross_account_access, and the only
+    # rule here that asks who can reach *into* a bucket rather than what it
+    # exposes outward. It matters because it is invisible from every other
+    # angle: an account named in the policy is not public, survives all four
+    # public access blocks, does not appear in the console's public/not-public
+    # summary, and looks identical to a correctly locked-down bucket.
+    #
+    # Uncited. CIS has no control for cross-account bucket access, and the
+    # recommendation usually quoted at it belongs to a different AWS standard
+    # than either of the two cited in this package.
+    #
+    # WARNING rather than CRITICAL, and this is the judgement in it: naming
+    # another account is how legitimate sharing is *supposed* to be done, so
+    # this is not a mistake in the way a public bucket is. What makes it worth
+    # reporting is that nobody re-reads these, and the accounts stay long after
+    # the arrangement ends. An acknowledgement is the right home for one that
+    # is meant.
+    others = settings.get("other_accounts")
+
+    if "other_accounts" not in unreadable and others:
+        named = ", ".join(others)
+        how_many = ("one AWS account" if len(others) == 1
+                    else f"{len(others)} AWS accounts")
+        warnings.append(_warning(
+            WARNING,
+            f"This bucket's policy lets {how_many} outside this "
+            f"one reach it: {named}. That is the correct way to share with a "
+            "partner or another team, so it may be exactly right - but it is "
+            "not visible as sharing anywhere in the console, and it keeps "
+            "working long after whoever arranged it has moved on. Check the "
+            "arrangement still holds, and that the permissions granted are "
+            "only the ones it needs.",
+            _target(bucket, "cross_account_policy"),
         ))
 
     # ---- Transport security --------------------------------------------------

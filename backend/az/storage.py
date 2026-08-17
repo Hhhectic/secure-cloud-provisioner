@@ -21,13 +21,15 @@ from az import names
 from az.common import (
     AzureNotConfigured,
     AzureRefused,
-    why_azure_refused,
+    denied,
     ensure_resource_group,
     is_managed,
     managed_tags,
+    not_allowed_to_look,
     plain,
     resource_group_of,
     storage_client,
+    why_azure_refused,
 )
 
 
@@ -92,6 +94,13 @@ def read_account_for_scanning(client, name):
     try:
         found = client.storage_accounts.get_properties(group, short)
     except Exception as e:
+        # Checked before 404, and for the reason CLAUDE.md records as the
+        # fourth instance of one mistake: Azure answers "you may not look" and
+        # "there is nothing there" in the same words, and a handler that knows
+        # only 404 re-raises the first as a crash. The create paths learned
+        # this; the readers had not.
+        if denied(e):
+            raise not_allowed_to_look(group, "storage accounts") from e
         if getattr(e, "status_code", None) == 404:
             return None
         raise
@@ -134,8 +143,42 @@ def read_account_for_scanning(client, name):
         # front of the findings that matter.
         "allow_shared_key_access": getattr(found, "allow_shared_key_access",
                                            None) is not False,
+        # How long the account keys have been the same keys.
+        #
+        # The older of the two, in days, because rotating one and leaving the
+        # other is not rotating. None where Azure did not say - an account
+        # created before it started reporting this returns nothing, and that
+        # is a question unanswered rather than a key known to be fresh.
+        "key_age_days": _oldest_key_age(found),
+        "blob_soft_delete": None,
+        "container_soft_delete": None,
         "containers": [],
     }
+
+    # Whether a deleted blob can be got back.
+    #
+    # A separate call and a separate permission, like the container listing
+    # below, and recorded as unreadable on failure for the same reason: "no
+    # soft delete" and "could not ask" look identical in a findings list and
+    # only one of them is safe to act on.
+    try:
+        blob_service = client.blob_services.get_service_properties(group, short)
+        policy = getattr(blob_service, "delete_retention_policy", None)
+        settings["blob_soft_delete"] = bool(getattr(policy, "enabled", False))
+        # Deleting a container and deleting a blob are separately recoverable,
+        # and only the second is what people picture. A container delete takes
+        # everything in it and is the larger loss of the two, so it is read
+        # and reported on its own rather than folded in.
+        container_policy = getattr(blob_service,
+                                   "container_delete_retention_policy", None)
+        settings["container_soft_delete"] = bool(
+            getattr(container_policy, "enabled", False))
+        soft_delete_unreadable = None
+    except Exception as e:
+        soft_delete_unreadable = (
+            "the login could not read this account's blob service properties "
+            f"({type(e).__name__})"
+        )
 
     # Which containers are actually served anonymously, as opposed to whether
     # the account permits it. These are two different questions: the account
@@ -170,9 +213,36 @@ def read_account_for_scanning(client, name):
                                "account")
     if containers_unreadable:
         unreadable["containers"] = containers_unreadable
+    if soft_delete_unreadable:
+        unreadable["blob_soft_delete"] = soft_delete_unreadable
+        unreadable["container_soft_delete"] = soft_delete_unreadable
+    if settings["key_age_days"] is None:
+        unreadable["key_age_days"] = ("Azure did not report when this "
+                                      "account's keys were created")
 
     settings["unreadable"] = unreadable
     return settings
+
+
+def _oldest_key_age(found):
+    """Days since the older of the two account keys was created, or None.
+
+    Both keys, because an account with one fresh key and one from three years
+    ago has not been rotated - the old one still opens everything. Azure
+    reports these as datetimes on `key_creation_time`, and reports nothing at
+    all for accounts predating the field, which is why None means "not known"
+    rather than zero.
+    """
+    from datetime import datetime, timezone
+
+    created = getattr(found, "key_creation_time", None)
+    stamps = [getattr(created, "key1", None), getattr(created, "key2", None)]
+    stamps = [s for s in stamps if s is not None]
+    if not stamps:
+        return None
+
+    now = datetime.now(timezone.utc)
+    return max(int((now - s).total_seconds() // 86400) for s in stamps)
 
 
 def describe_account(settings):

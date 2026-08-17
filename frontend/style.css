@@ -12,10 +12,27 @@
 
 :root {
   --ink: #17181a;
-  --ink-soft: #3d4145;
-  --muted: #585b5f;
-  --muted-2: #6a6c66;
-  --muted-3: #82847e;
+
+  /* Every one of these was a different grey, and they are all ink now.
+     The names are kept because the *roles* are real - a caption is still
+     secondary to the thing it captions - but the roles are carried by size,
+     weight, case and spacing rather than by fading the words out.
+
+     This is the palette rule this file opens with, applied honestly. Colour
+     is supposed to mean severity here, and five greys competing underneath a
+     critical finding were a second, quieter signal saying "this matters less"
+     about text that had nothing to do with severity. #82847e on white is also
+     3.5:1, which is below the 4.5:1 that ordinary text is meant to clear -
+     so a third of this page's words were failing contrast to communicate a
+     hierarchy that typography was already communicating.
+
+     One exception, further down: input placeholders stay grey. A black
+     placeholder is indistinguishable from a value somebody typed, which
+     turns an empty form into one that looks filled in. */
+  --ink-soft: #17181a;
+  --muted: #17181a;
+  --muted-2: #17181a;
+  --muted-3: #17181a;
   --page: #fcfcfb;
 
   --line: #e2e0da;
@@ -25,7 +42,11 @@
 
   --critical: #b4251d;
   --warning: #92670a;
-  --info: #5b6672;
+  /* Ink, like everything else. This was a slate grey, which was the one
+     "severity colour" that did not signal a problem - because informational
+     is not one. The word INFO and the round marker say which level it is;
+     nothing needs to be faded to say it matters less. */
+  --info: #17181a;
 
   --sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -37,9 +58,8 @@
   --accent-hover: #b7681a;
   --tint: #fdf6ee;
   --row-hover: #faf8f4;
-  --blob-1: rgba(217, 130, 43, .26);
-  --blob-2: rgba(226, 163, 80, .22);
-  --blob-3: rgba(184, 96, 26, .14);
+  /* The single tint under the header. Faint on purpose: see .drift. */
+  --wash: rgba(217, 130, 43, .10);
 }
 
 body.cloud-azure {
@@ -48,9 +68,7 @@ body.cloud-azure {
   --accent-hover: #1f5aa6;
   --tint: #f2f7fd;
   --row-hover: #f7fafe;
-  --blob-1: rgba(44, 114, 199, .24);
-  --blob-2: rgba(88, 151, 222, .20);
-  --blob-3: rgba(31, 90, 166, .13);
+  --wash: rgba(44, 114, 199, .09);
 }
 
 * { box-sizing: border-box; }
@@ -65,28 +83,13 @@ body {
 }
 
 a { color: var(--ink); }
-a:hover { color: #4a4d51; }
+a:hover { color: var(--accent-deep); }
 
 @keyframes scpIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 @keyframes scpFade { from { opacity: 0; } to { opacity: 1; } }
-@keyframes driftA {
-  0%   { transform: translate3d(-4%, -6%, 0) scale(1); }
-  50%  { transform: translate3d(10%, 8%, 0) scale(1.18); }
-  100% { transform: translate3d(-4%, -6%, 0) scale(1); }
-}
-@keyframes driftB {
-  0%   { transform: translate3d(6%, 4%, 0) scale(1.1); }
-  50%  { transform: translate3d(-8%, -6%, 0) scale(.92); }
-  100% { transform: translate3d(6%, 4%, 0) scale(1.1); }
-}
-@keyframes driftC {
-  0%   { transform: translate3d(-2%, 8%, 0) scale(.95); }
-  50%  { transform: translate3d(6%, -10%, 0) scale(1.22); }
-  100% { transform: translate3d(-2%, 8%, 0) scale(.95); }
-}
-
-/* Anyone who has asked not to be moved is not moved. The drift is decorative
-   and the entry animations are not load-bearing, so both simply stop. */
+/* Anyone who has asked not to be moved is not moved. The panel entry
+   animations are not load-bearing, so they simply stop. The three drift
+   keyframes that used to be exempted here went with the blobs. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: .001ms !important;
@@ -97,33 +100,43 @@ a:hover { color: #4a4d51; }
 
 /* --------------------------------------------------------------- background */
 
-.drift { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
-.drift i { position: absolute; border-radius: 50%; display: block; }
-.drift i:nth-child(1) {
-  top: -18%; left: -12%; width: 70vw; height: 70vw;
-  background: radial-gradient(circle at 50% 50%, var(--blob-1), transparent 68%);
-  animation: driftA 34s ease-in-out infinite;
+/* One quiet wash under the header, and nothing else.
+
+   This was three radial gradients drifting across the whole viewport on 34,
+   44 and 56 second loops. Seen on its own it is pleasant; seen behind the
+   thing this tool exists to show, it tinted every panel on the page a
+   different shade of orange depending on where the blobs happened to be, and
+   dropped the contrast of a critical finding to make room for decoration.
+
+   Severity is the only thing colour is allowed to mean here. A background
+   that competes with it is spending the one signal the page has. What is
+   left is a fixed tint below the header, going nowhere: enough that the
+   surface is not a flat sheet of white, not enough to be read as meaning
+   anything. */
+.drift {
+  position: fixed; inset: 0 0 auto; height: 420px; z-index: 0;
+  pointer-events: none; overflow: hidden;
+  background: linear-gradient(to bottom, var(--wash), transparent);
 }
-.drift i:nth-child(2) {
-  bottom: -26%; right: -14%; width: 62vw; height: 62vw;
-  background: radial-gradient(circle at 50% 50%, var(--blob-2), transparent 66%);
-  animation: driftB 44s ease-in-out infinite;
-}
-.drift i:nth-child(3) {
-  top: 24%; right: 16%; width: 38vw; height: 38vw;
-  background: radial-gradient(circle at 50% 50%, var(--blob-3), transparent 70%);
-  animation: driftC 56s ease-in-out infinite;
-}
+.drift i { display: none; }
 
 /* ------------------------------------------------------------------- header */
 
+/* A light bar with the cloud named in one stripe, not a solid slab of it.
+
+   This was 100% burnt orange across the full width, which made the loudest
+   thing on a page about severity the piece of furniture at the top of it.
+   The stripe keeps what the colour was for - which account you are about to
+   change is answerable at a glance, and getting it wrong is how somebody
+   deletes the right-named thing in the wrong place - while giving the
+   findings the contrast back. */
 header {
   position: sticky; top: 0; z-index: 20;
-  color: #fff;
-  background: var(--accent-deep);
-  transition: background .5s ease;
-  border-bottom: 1px solid rgba(255, 255, 255, .2);
-  box-shadow: 0 1px 14px rgba(0, 0, 0, .06);
+  color: var(--ink);
+  background: #fff;
+  border-top: 4px solid var(--accent);
+  border-bottom: 1px solid var(--line-soft);
+  transition: border-color .5s ease;
 }
 
 .head-inner {
@@ -132,45 +145,68 @@ header {
   flex-wrap: wrap;
 }
 
-.brand { display: flex; flex-direction: column; gap: 5px; }
-.wordmark { font: 600 26px/1.1 var(--sans); letter-spacing: -.02em; }
+/* The wordmark, as a lockup rather than two stacked strings.
+
+   It was 26px semibold Helvetica with the tagline loose underneath, which is
+   the default any text gets and read as a placeholder for branding rather
+   than as branding. What is different: tighter tracking so the letterforms
+   sit as one shape, and a short accent rule tying the name to the tagline -
+   the same accent as the stripe above it, so the mark says which cloud you
+   are in as well as what the tool is called. */
+.brand { display: flex; flex-direction: column; gap: 7px; }
+.wordmark {
+  font: 700 27px/1 var(--sans); letter-spacing: -.045em;
+}
 .tagline {
-  font: 11px/1.2 var(--mono); letter-spacing: .09em; text-transform: uppercase;
-  color: rgba(255, 255, 255, .92);
+  display: flex; align-items: center; gap: 9px;
+  font: 10.5px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase;
+  color: var(--ink);
+}
+.tagline::before {
+  content: ""; width: 18px; height: 2px; flex: 0 0 auto;
+  background: var(--accent); transition: background .5s ease;
 }
 
 .head-right { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
 
-/* The health pill. Kept as .pill/.ok/.bad because app.js sets those. */
+/* The health pill. Kept as .pill/.ok/.bad because app.js sets those.
+
+   It used to be white-on-orange with a white dot, and the note here said
+   green on burnt orange was very nearly invisible - which it was, on the
+   solid header this replaced. On white the ordinary colours work: the word
+   is ink like everything else and the dot carries the state, which is the
+   only part of a health indicator that has to be seen from across a desk. */
 .pill {
   display: inline-flex; align-items: center; gap: 7px;
-  font: 11.5px/1 var(--mono); letter-spacing: .04em; color: #fff;
+  font: 11.5px/1 var(--mono); letter-spacing: .04em; color: var(--ink);
   border: 0; padding: 0; background: none;
 }
 .pill::before {
-  content: ""; width: 6px; height: 6px; border-radius: 50%; background: #fff;
+  content: ""; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--muted-3);
 }
-/* These two beat the bare .ok/.bad further down, which are for text on the
-   page rather than for a pill sitting on a coloured header. Green on burnt
-   orange was very nearly invisible. */
-.pill.ok { color: #fff; }
-.pill.ok::before { background: #fff; }
-.pill.bad { color: #ffdcd7; }
-.pill.bad::before { background: #ffdcd7; }
+.pill.ok::before { background: #3f7d54; }
+.pill.bad { color: var(--critical); }
+.pill.bad::before { background: var(--critical); }
 
 /* The cloud switch. Two labels and a knob that slides between them, so the
    thing being switched and its current position are the same control. */
+/* Inverted with the header. The track was translucent white over orange and
+   the knob was solid white, which on a white bar leaves a white knob on a
+   white track: the control still worked and stopped saying anything. The
+   track is now the page's own faint grey and the knob is white with a
+   border, so the raised half is the selected one. */
 .toggle {
   position: relative; display: flex; align-items: center;
   width: 200px; height: 40px; padding: 4px;
-  border: 1px solid rgba(255, 255, 255, .4); border-radius: 999px;
-  background: rgba(255, 255, 255, .2);
+  border: 1px solid var(--line); border-radius: 999px;
+  background: var(--line-faint);
   cursor: pointer; font: inherit;
 }
 .toggle .knob {
   position: absolute; top: 4px; left: 4px; width: 96px; height: 30px;
-  border-radius: 999px; background: #fff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .10), 0 4px 12px rgba(0, 0, 0, .06);
+  border-radius: 999px; background: #fff; border: 1px solid var(--line-soft);
+  box-shadow: 0 1px 2px rgba(23, 24, 26, .08);
   transition: transform .38s cubic-bezier(.4, 0, .2, 1);
 }
 body.cloud-azure .toggle .knob { transform: translateX(96px); }
@@ -178,14 +214,18 @@ body.cloud-azure .toggle .knob { transform: translateX(96px); }
   position: relative; z-index: 1; flex: 1;
   display: flex; align-items: center; justify-content: center; gap: 7px;
   font: 600 12px/1 var(--mono); letter-spacing: .1em;
-  color: rgba(255, 255, 255, .96); transition: color .3s ease;
+  color: var(--ink); transition: opacity .3s ease;
+  /* The unselected side is the same ink, set back by weight of presence
+     rather than by a grey - the knob under the other one is what says which
+     is live. */
+  opacity: .45;
 }
 .toggle .opt .dot {
   width: 6px; height: 6px; border-radius: 50%;
-  background: rgba(255, 255, 255, .5); transition: background .3s ease;
+  background: var(--muted-3); transition: background .3s ease;
 }
 body:not(.cloud-azure) .toggle .opt[data-cloud="aws"],
-body.cloud-azure .toggle .opt[data-cloud="azure"] { color: var(--ink); }
+body.cloud-azure .toggle .opt[data-cloud="azure"] { opacity: 1; }
 body:not(.cloud-azure) .toggle .opt[data-cloud="aws"] .dot { background: #d9822b; }
 body.cloud-azure .toggle .opt[data-cloud="azure"] .dot { background: #2c72c7; }
 
@@ -199,7 +239,7 @@ body.cloud-azure .toggle .opt[data-cloud="azure"] .dot { background: #2c72c7; }
 .context > label {
   display: inline-flex; align-items: center; gap: 10px;
   font: 11px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase;
-  color: #4f524c;
+  color: var(--ink);
 }
 .context select {
   font: 13px/1 var(--mono); color: var(--ink); padding: 7px 9px;
@@ -223,6 +263,12 @@ main {
   display: grid; grid-template-columns: 212px minmax(0, 1fr); gap: 44px;
   align-items: start;
 }
+/* The dashboard has no resource picker, and hiding the sidebar is not enough
+   on its own: a display:none grid item stops being placed, so the stack slid
+   into the 212px column meant for the picker and rendered the whole dashboard
+   in a strip down the left with four fifths of the page empty. The column has
+   to go with it. */
+body.no-picker main { grid-template-columns: minmax(0, 1fr); }
 @media (max-width: 900px) {
   main { grid-template-columns: 1fr; gap: 26px; padding: 26px 20px 64px; }
   .head-inner, .context { padding-left: 20px; padding-right: 20px; }
@@ -239,7 +285,7 @@ main {
 }
 .side-head, .side-foot-head {
   font: 10.5px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase;
-  color: #4f524c; padding: 0 0 14px;
+  color: var(--ink); padding: 0 0 14px;
 }
 #types { display: flex; flex-direction: column; gap: 1px; }
 #types button {
@@ -261,8 +307,21 @@ main {
   font-weight: 400; white-space: nowrap;
 }
 /* The blueprint is not a resource type and is set apart from the ones that
-   are, because building it makes six things at once. */
-#types button.set-apart { margin-top: 14px; }
+   are, because building it makes six things at once rather than one.
+
+   It was set apart with 14px of nothing, and a bare gap in an evenly spaced
+   list does not read as grouping - it reads as a spacing bug, which is what
+   somebody looking at it asked about. A rule says the same thing on purpose.
+
+   The name also gets its own line here. Every other entry is one or two short
+   words beside a tag; "Bastion architecture" plus "six pieces" does not fit
+   the 212px column, so it wrapped mid-phrase and made the row look broken as
+   well as oddly spaced. */
+#types button.set-apart {
+  margin-top: 14px; padding-top: 15px;
+  border-top: 1px solid var(--line-soft);
+  flex-direction: column; align-items: flex-start; gap: 3px;
+}
 
 #side-foot {
   margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line-soft);
@@ -272,13 +331,22 @@ main {
 
 /* ------------------------------------------------------------------- cards */
 
+/* Opaque, and no longer frosted.
+
+   These were 84% white with a 14px backdrop blur, which is the right
+   treatment for a panel floating over something worth seeing through to.
+   What was behind them was the drifting wash, so every panel picked up
+   whatever colour happened to be under it and a finding's own tint - the
+   thing that carries its severity - was mixed with a background that meant
+   nothing. With the wash gone the blur costs a repaint per scroll to
+   composite white over white. */
 section {
   animation: scpIn .5s cubic-bezier(.2, .75, .3, 1) both;
-  background: rgba(255, 255, 255, .84);
-  backdrop-filter: blur(14px);
-  border: 1px solid rgba(228, 226, 220, .9);
+  background: #fff;
+  border: 1px solid var(--line-soft);
   border-radius: 6px;
   padding: 26px 28px;
+  box-shadow: 0 1px 2px rgba(23, 24, 26, .03);
 }
 /* The stagger follows the order they appear in, so it reads top to bottom
    rather than lighting up out of sequence. */
@@ -349,7 +417,7 @@ tr.foreign { background: #fdf7f6; }
 /* ----------------------------------------------------------------- buttons */
 
 button {
-  font: 12.5px/1 var(--sans); padding: 11px 15px; cursor: pointer;
+  font: 13px/1 var(--sans); padding: 11px 16px; cursor: pointer;
   color: var(--ink); background: #fff;
   border: 1px solid var(--line); border-radius: 4px;
   transition: border-color .18s ease, background .18s ease;
@@ -369,30 +437,59 @@ button.quiet {
   font: 11px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase;
   background: transparent; padding: 8px 12px;
 }
+/* One .link, not two. An earlier rule here made it red with a pink underline
+   for a control that undid something; a later one made it accent-coloured for
+   the scan-note. Two rules for one class means whichever loads last wins and
+   the other is a lie in the file. This is the survivor: a control that reads
+   as part of its sentence. */
 button.link {
-  font: 12px/1 var(--sans); color: var(--critical); background: transparent;
-  border: 0; border-bottom: 1px solid #eedcda; border-radius: 0;
-  padding: 2px 0 4px;
+  font: inherit; color: var(--accent-deep); background: transparent;
+  border: 0; border-radius: 0; padding: 0;
+  text-decoration: underline; text-underline-offset: 2px;
 }
+button.link:hover { color: var(--accent-hover); }
 
 /* --------------------------------------------------------------- form bits */
 
+/* Nothing in a form is smaller than the page's own text.
+
+   These ran 9.5 to 13px against a 14px body, so every part of the one panel
+   somebody has to read carefully and type into was set *below* the size of
+   the prose around it. A form that decides what gets built in a real account
+   is the last place to save space. */
 input, textarea, select {
-  font: 13px var(--sans); padding: 9px 11px;
+  font: 14px var(--sans); padding: 10px 12px;
   border: 1px solid var(--line); border-radius: 4px;
   background: #fff; color: var(--ink);
 }
 textarea { width: 100%; font: 12.5px/1.55 var(--mono); resize: vertical; }
 label { display: inline-flex; gap: .4rem; align-items: center; }
 
+/* Two gaps, not one.
+   `gap: 20px` set both axes, so a field's hint sat 20px under its own control
+   and 18px above the next field's label - equidistant, bonded to neither, and
+   reading as a stray line between two rows. The column gap is the space
+   between a caption and its control and wants to be wide; the row gap is the
+   space between a control and the sentence explaining it and wants to be
+   narrow. Same family as the note already here about a hint landing in the
+   label column. */
 .field {
   display: grid; grid-template-columns: 170px minmax(0, 520px);
-  gap: 20px; align-items: start; padding: 0 0 18px;
+  column-gap: 20px; row-gap: 5px; align-items: start; padding: 0 0 18px;
 }
+/* Sentence case, from CSS rather than from the strings.
+
+   The captions are also the keys the API takes - "resource group", "public
+   key" - so capitalising them in JavaScript would mean either a second
+   spelling of every field name to keep in step with the first, or
+   text-transform: capitalize, which gives "Resource Group" and reads as a
+   heading rather than a label. ::first-letter does exactly the one thing
+   wanted and leaves the string alone. */
 .field > label {
-  font: 12px/1.5 var(--sans); color: var(--muted); padding-top: 9px;
+  font: 13.5px/1.5 var(--sans); color: var(--ink); padding-top: 10px;
   display: block;
 }
+.field > label::first-letter { text-transform: uppercase; }
 /* Everything that is not the caption belongs in the second column and stacks
    there. Without this a field's hint became the first cell of the next
    implicit row, so "which network it belongs to" appeared underneath the word
@@ -407,25 +504,39 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
 .field input[type="checkbox"] {
   width: 15px; height: 15px; accent-color: var(--accent); margin: 0;
 }
-.field .hint { color: var(--muted-2); font-size: 12px; }
+.field .hint { color: var(--ink); font-size: 12.5px; }
 @media (max-width: 700px) {
   .field { grid-template-columns: 1fr; gap: 6px; }
   .field > label { padding-top: 0; }
 }
 
 .note {
-  color: #71747a; font-size: 12px; line-height: 1.5;
+  color: var(--ink); font-size: 12px; line-height: 1.5;
   margin: 0 0 18px 190px; max-width: 46ch; text-wrap: pretty;
 }
 @media (max-width: 700px) { .note { margin-left: 0; } }
 
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding-top: 6px; }
 
+/* The same right edge as the fields above it. A .field is 170 + 20 + 520, so
+   a rule row running to the full width of the card put a ragged step in the
+   one vertical line the form has. */
 .rule {
-  display: grid; grid-template-columns: 1fr 1fr 1.35fr auto; gap: 10px;
+  display: grid; grid-template-columns: 1fr 1.15fr 1.35fr auto; gap: 10px;
   align-items: end; background: #faf9f6; border: 1px solid #f0efea;
   border-radius: 4px; padding: 12px; margin-bottom: 10px;
+  max-width: 710px;
 }
+
+/* Three columns, not four.
+
+   An Azure rule carries six fields where a security group's carries three,
+   and it was laid out on the widths meant for three - so each control was
+   about 133px and the option labels truncated inside them. A menu that cuts
+   off its own selection is worse than a tall row: you cannot read back what
+   you chose, which on a firewall is the one thing that has to be checkable.
+   Seven items over three columns is one row taller and every label fits. */
+.rule.azure { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 @media (max-width: 700px) { .rule { grid-template-columns: 1fr; } }
 /* A grid item will not shrink below its content's minimum width, and the
    source menu's longest option is "0.0.0.0/0 — the entire internet, IPv6".
@@ -433,13 +544,36 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
    sitting outside the border it belongs inside. */
 .rule > * { min-width: 0; }
 .rule select, .rule input { width: 100%; }
+
+/* The three buttons as one grid item.
+   An Azure rule row carries six fields where an AWS one carries three, so
+   appending the buttons individually put them in whatever columns were left -
+   the up arrow landing in a 1fr column and rendering as a wide empty box with
+   an arrow lost in the middle of it. Grouped, they take one cell and size to
+   their own content. */
+.rule-actions { display: flex; gap: 8px; align-items: end; }
+.rule-actions .labelled { flex: 0 0 auto; }
+.rule-actions .labelled > span:last-child { gap: 4px; }
+.rule-actions button.move {
+  padding: 7px 9px; font-size: 13px; line-height: 1.15; min-width: 30px;
+}
+.rule-actions button[disabled] { opacity: .3; cursor: default; }
+.rule-actions button[disabled]:hover { background: inherit; }
 .labelled { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .labelled > span:last-child { display: flex; min-width: 0; }
+/* The same caption as a field's, because it is the same thing.
+
+   A rule row said PROTOCOL, PORT, SOURCE in 9.5px uppercase mono while the
+   fields three lines above said "name" and "network" in 12px lowercase sans.
+   Both are a word naming the control under it, and one form was using two
+   unrelated systems to write them - which is the honest answer to "why is
+   everything lowercase": it was not, and that was the problem. */
 .labelled small {
-  font: 9.5px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase;
-  color: var(--muted-2);
+  font: 13px/1.4 var(--sans); letter-spacing: 0; text-transform: none;
+  color: var(--ink);
 }
-.labelled select, .labelled input { font: 12.5px var(--sans); padding: 7px 8px; }
+.labelled small::first-letter { text-transform: uppercase; }
+.labelled select, .labelled input { font: 13.5px var(--sans); padding: 8px 10px; }
 
 .keygen {
   border: 1px dashed #ddd9d0; border-radius: 4px; padding: 16px; margin: 0 0 20px;
@@ -448,18 +582,181 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
 
 /* ---------------------------------------------------------------- findings */
 
+/* The tallies above the findings.
+
+   A zero and a two used to take the same amount of the eye, because the
+   whole thing was one sentence at one weight. The number carries the size
+   now and the level carries the colour, so "2 critical" is found by looking
+   rather than by reading. An empty level stays on screen, flat and grey:
+   nothing found is an answer, and a row that omits the level somebody was
+   looking for cannot be told from one that never ran. */
+
+.tallies { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 14px; }
+
+/* A tally is the control for its own findings.
+
+   Showing every finding at once is a wall and a wall gets skimmed, so each
+   level is a drawer and its count is the handle. The count is the honest
+   place for it: the thing somebody wants to open is "the two criticals", and
+   that is the words already on the button.
+
+   Criticals are open on arrival and the rest are shut. The rule this page has
+   followed everywhere else is that a finding is made quieter and never
+   absent, and a finding nobody thought to expand has been made absent
+   whatever the count says - so the level that cannot afford that is the one
+   that does not start folded. */
+/* Sized to be aimed at rather than found.
+
+   These were chips: 92px wide with a 9px chevron tucked in the corner, which
+   is a small target for the primary control on the panel and gave the marker
+   nowhere to be. The number is the thing being read, so it gets the room. */
+.tally {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 15px 44px 15px 18px; border-radius: 5px; min-width: 158px;
+  border: 1px solid var(--line-faint); background: #fff;
+  font: inherit; text-align: left; cursor: pointer;
+  position: relative;
+}
+
+/* The chevron, so a drawer reads as a drawer before it is clicked. */
+button.tally::after {
+  content: "▾"; position: absolute; right: 16px; top: 50%;
+  margin-top: -9px; font-size: 15px; line-height: 1; color: var(--muted-3);
+  transition: transform .14s ease;
+}
+button.tally.open::after { transform: rotate(180deg); }
+button.tally:hover:not(:disabled)::after { color: var(--muted); }
+
+button.tally:hover:not(:disabled) { border-color: var(--line); }
+button.tally.open { border-color: var(--line); }
+button.tally:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Nothing behind it, so it is not a control. A button that answers a click by
+   doing nothing teaches people that clicks here do nothing. */
+button.tally:disabled { cursor: default; }
+button.tally:disabled::after { display: none; }
+
+/* Accepted is a count and not a drawer: those findings are still listed under
+   their own severity, so a fourth drawer would list them twice. No chevron,
+   and no reserved space for one. */
+.tally.accepted { cursor: default; padding-right: 18px; min-width: 0; }
+
+.group { display: none; }
+.group.open { display: block; }
+.tally .n { font: 600 28px/1 var(--sans); letter-spacing: -.02em; }
+.tally .what {
+  font: 600 10px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase;
+  color: var(--muted-2);
+}
+
+.tally.critical { border-color: #f0d8d6; background: #fefaf9; }
+.tally.critical .n { color: var(--critical); }
+.tally.warning { border-color: #efe4cb; background: #fefcf7; }
+.tally.warning .n { color: var(--warning); }
+.tally.info .n { color: var(--info); }
+.tally.accepted .n { color: var(--muted-2); }
+
+/* Nothing at this level. Kept, and drawn as the non-event it is. */
+.tally.empty { background: #fff; border-color: var(--line-faint); }
+.tally.empty .n { color: var(--muted-3); font-weight: 400; }
+
+/* Severity has to be felt before it is read.
+
+   It used to be a line of small coloured capitals above the message, and the
+   three levels differed only in hue - so a critical finding and a note about
+   a machine being idle were the same object on the page, one of them slightly
+   redder. Somebody scanning a list saw a wall of identical grey cards.
+
+   What is spent here is weight, not just colour. A critical finding gets a
+   solid bar, a tinted ground and a filled badge; a warning gets a thinner bar
+   and a soft badge; a note gets almost nothing. The steepness is the point -
+   this file has said from the first commit that if everything is critical
+   nothing is, and the way to keep that true is to make the quiet levels
+   genuinely quiet rather than to make every level loud.
+
+   Colour is never the only carrier. The word CRITICAL is in the badge, and
+   the glyph in front of it differs per level, so the ranking survives being
+   read by somebody who cannot tell the two hues apart. */
+
 .finding {
-  border-top: 1px solid var(--line-faint); margin-top: 20px; padding-top: 18px;
+  border: 1px solid var(--line-faint);
+  border-left: 3px solid var(--line);
+  border-radius: 4px;
+  margin-top: 14px; padding: 14px 16px;
+  background: #fff;
 }
+
 .finding .level {
+  display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
   font: 600 10.5px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase;
+  padding: 5px 9px; border-radius: 3px;
+  color: var(--muted-2); background: var(--line-faint);
 }
-.finding.critical .level { color: var(--critical); }
-.finding.warning .level { color: var(--warning); }
-.finding.info .level { color: var(--info); }
+
+/* The glyph, so the level is not carried by hue alone. */
+.finding .level::before { font-size: 11px; letter-spacing: 0; }
+.finding.critical .level::before { content: "▲"; }
+.finding.warning .level::before { content: "▲"; }
+.finding.info .level::before { content: "●"; font-size: 7px; }
+
+.finding.critical {
+  border-left-color: var(--critical);
+  border-color: #f0d8d6; border-left-color: var(--critical);
+  background: #fefaf9;
+}
+.finding.critical .level { color: #fff; background: var(--critical); }
+
+.finding.warning {
+  border-color: #efe4cb; border-left-color: var(--warning);
+  background: #fefcf7;
+}
+.finding.warning .level { color: #6d4d07; background: #f6e7c4; }
+
+/* Deliberately the plainest of the three. A note is true and not urgent, and
+   giving it a bar and a ground of its own is how the other two stop meaning
+   anything. */
+.finding.info { border-left-color: var(--line); }
+.finding.info .level { color: var(--info); background: var(--line-faint); }
+
+.finding > div:not(.level):not(.ack):not(.cite) {
+  margin-top: 10px; max-width: 62ch; text-wrap: pretty; color: var(--ink-soft);
+}
+.finding.critical > div:not(.level):not(.ack):not(.cite) { color: var(--ink); }
+/* A closed finding is one row high, so its ground and bar have no reason to
+   take the padding an open one needs. */
+.finding:not([open]) { padding: 10px 16px; }
 .finding p { margin: 11px 0 0; max-width: 60ch; text-wrap: pretty; }
-.finding.acknowledged { opacity: .62; }
-.cite { font: 11.5px var(--mono); color: #7a7c76; }
+
+/* Accepted, not hidden. It keeps its bar and its badge - it is still a
+   critical finding and the counts still include it - but the ground goes
+   neutral and the whole card recedes, so a list of accepted findings does not
+   read as a list of live ones. */
+/* Accepted, and still fully legible.
+
+   This was `opacity: .55` on the whole card, which recedes exactly as
+   intended and does it by turning every word grey - including the reason
+   somebody wrote for accepting it, which is the part a reviewer has come to
+   read. Fading the argument is the wrong half to fade.
+
+   The state moves onto the card instead of into the ink: the ground goes
+   neutral, the severity bar loses its colour, and the badge says
+   "— ACKNOWLEDGED" as it always did. A list of accepted findings still does
+   not read as a list of live ones, and the text is at full contrast. */
+.finding.acknowledged {
+  background: #fff;
+  border-color: var(--line-faint);
+  border-left-color: var(--line);
+}
+.finding.acknowledged .level {
+  color: var(--ink); background: var(--line-faint);
+}
+.finding.acknowledged .level::before { opacity: .45; }
+.cite { font: 11.5px var(--mono); color: var(--ink); }
+/* The finding's own children get their spacing from the rule above, which
+   excludes this one so it can sit closer to the message it cites - but not
+   touching it, which is what excluding it entirely produced. */
+.finding .cite { display: block; margin-top: 8px; }
+.finding .ack { margin-top: 9px; }
 
 /* Folded away by default. The rule id is needed by anyone writing an
    acknowledgement and is noise to everyone else, so it is one click rather
@@ -477,11 +774,166 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
 
 .warn {
   margin: 13px 0 0; padding: 12px 14px; background: #faf9f6;
-  color: #4d5054; font-size: 12.5px; max-width: 62ch; border-radius: 4px;
+  color: var(--ink); font-size: 12.5px; max-width: 62ch; border-radius: 4px;
   border-left: 2px solid var(--accent);
 }
 
+/* ------------------------------------------------------------------- tabs */
+
+/* Three things somebody comes here to do, above the fourteen nouns they can
+   do them to. The sidebar answers "which resource"; this answers "which job",
+   and putting both in one list was what made "Resources" a drawer holding a
+   form and an audit report side by side. */
+/* The gutter is 40px everywhere: the header, the context strip and main all
+   use it. This bar was at 28 plus a tab's own 18 of padding, so the word
+   "Dashboard" started 6px right of the wordmark above it and 14px right of
+   the sidebar below - close enough to look like a mistake rather than a
+   choice, which is what it was. 24 + 16 puts the first label on the line
+   everything else starts on. */
+.tabs {
+  display: flex; gap: 2px; max-width: 1240px;
+  margin: 0 auto; padding: 0 24px;
+  border-bottom: 1px solid var(--line-faint);
+}
+
+.tab {
+  border: 0; background: transparent; cursor: pointer;
+  font: 500 13.5px/1 var(--sans); color: var(--muted);
+  padding: 15px 16px; border-bottom: 2px solid transparent;
+  border-radius: 0; margin-bottom: -1px;
+}
+.tab:hover { color: var(--ink-soft); }
+.tab.active {
+  color: var(--ink); font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+
+/* -------------------------------------------------------------- dashboard */
+
+/* Under the grid it describes, and above the next heading. */
+.scan-when {
+  margin: -14px 0 26px; font-size: 11.5px;
+}
+
+/* The one sentence the page is for.
+
+   A dashboard made only of tiles has no focal point: every number is the same
+   size, so the eye has nowhere to land and the reader adds nine cards up
+   themselves to reach the thing they came for. This is that sum, said once,
+   and the grid underneath becomes the breakdown of it rather than the whole
+   answer.
+
+   The rule on the left is the only place the severity colour appears at this
+   size, which is what makes one glance enough. */
+.verdict {
+  margin: 0 0 26px; padding: 2px 0 2px 16px;
+  border-left: 3px solid var(--line);
+}
+.verdict-line {
+  margin: 0; font: 600 22px/1.25 var(--sans); letter-spacing: -.02em;
+}
+.verdict-note {
+  margin: 5px 0 0; font-size: 12.5px; max-width: 66ch; text-wrap: pretty;
+}
+.verdict.is-critical { border-left-color: var(--critical); }
+.verdict.is-critical .verdict-line { color: var(--critical); }
+.verdict.is-warning { border-left-color: var(--warning); }
+.verdict.is-clean { border-left-color: #3f7d54; }
+
+.dash-grid {
+  display: grid; gap: 10px; margin: 0 0 26px;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+}
+
+.dash-card {
+  display: flex; flex-direction: column; gap: 5px; align-items: flex-start;
+  padding: 15px 16px; border-radius: 5px; text-align: left;
+  border: 1px solid var(--line-faint); background: #fff;
+  font: inherit; cursor: pointer;
+}
+.dash-card:hover { border-color: var(--line); background: var(--row-hover); }
+.dash-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.dash-name {
+  font: 600 10px/1.2 var(--mono); letter-spacing: .11em;
+  text-transform: uppercase; color: var(--muted-2);
+}
+.dash-count { font: 600 26px/1 var(--sans); letter-spacing: -.02em; color: var(--ink); }
+
+/* Counted and judged are different questions, so they are different words.
+   "not scanned" never reads as a verdict; a 0 in a column headed criticals
+   does, which is the confusion that made every row on the old list load
+   looking clean. */
+.dash-state { font-size: 11.5px; color: var(--muted-3); }
+
+.dash-card.has-critical { border-color: #f0d8d6; background: #fefaf9; }
+.dash-card.has-critical .dash-state { color: var(--critical); font-weight: 600; }
+.dash-card.has-warning { border-color: #efe4cb; background: #fefcf7; }
+.dash-card.has-warning .dash-state { color: var(--warning); font-weight: 600; }
+.dash-card.clean .dash-state { color: #3f7d54; }
+.dash-card.unreachable { opacity: .6; cursor: default; }
+
+.activity { list-style: none; margin: 0; padding: 0; }
+.activity li {
+  display: grid; gap: 12px; align-items: baseline;
+  grid-template-columns: 74px minmax(0, 1fr) auto;
+  padding: 7px 0; border-bottom: 1px solid var(--line-faint);
+  font-size: 12.5px;
+}
+.activity .outcome {
+  font: 600 9.5px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted-2);
+}
+.activity .outcome.done { color: #3f7d54; }
+.activity .outcome.refused { color: var(--warning); }
+.activity .outcome.failed { color: var(--critical); }
+.activity .what {
+  font: 12px var(--mono); color: var(--ink-soft);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.activity .when { color: var(--muted-3); font-size: 11.5px; }
+.activity .why {
+  grid-column: 2 / -1; color: var(--muted-2); font-size: 11.5px;
+}
+@media (max-width: 700px) {
+  .activity li { grid-template-columns: 1fr; gap: 3px; }
+}
+
+/* ------------------------------------------- a delete, while it is happening */
+
+.delete-progress p { margin: 0 0 6px; font-size: 13px; }
+.delete-progress .mono { font-family: var(--mono); font-size: 12.5px; }
+
+.delete-progress .steps {
+  margin: 12px 0 0; padding: 0; list-style: none;
+  max-height: 260px; overflow-y: auto;
+}
+
+.delete-progress .steps li {
+  padding: 5px 0 5px 20px; font-size: 12.5px; position: relative;
+  color: var(--muted-2); max-width: 62ch;
+}
+
+/* The marker carries the state, so a step reads as finished or not without
+   the colour having to do it alone. */
+.delete-progress .steps li::before {
+  position: absolute; left: 0; content: "·";
+}
+.delete-progress .steps li.done::before { content: "✓"; color: #3f7d54; }
+.delete-progress .steps li.failed::before { content: "×"; color: var(--critical); }
+
+.delete-progress .steps li.current {
+  color: var(--ink); font-weight: 500;
+}
+.delete-progress .steps li.current::before {
+  content: "→"; color: var(--accent-deep);
+}
+.delete-progress .steps li.failed { color: var(--critical); }
+
 /* ------------------------------------------------------------------- misc */
+
+.scan-note { margin: 0 0 12px; font-size: 12.5px; }
 
 .muted { color: var(--muted-2); }
 .bad { color: var(--critical); }
@@ -489,7 +941,7 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
 .hidden { display: none !important; }
 
 .mono-block {
-  margin: 0; font: 12.5px/1.6 var(--mono); color: #4a4d51;
+  margin: 0; font: 12.5px/1.6 var(--mono); color: var(--ink);
   background: #faf9f6; border-radius: 4px; padding: 14px 16px;
   overflow-x: auto; white-space: pre-wrap; word-break: break-word;
   max-height: 300px;
@@ -528,7 +980,14 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
   transition: transform .28s ease; transform: rotate(45deg);
 }
 .fold[aria-expanded="true"] .chev { transform: rotate(225deg); }
-.fold-body { animation: scpFade .3s ease both; }
+/* Room between the panel's own heading and the first thing under it.
+
+   Measured at zero: a `.field` carries its spacing as padding *below* itself,
+   so every row had 18px under it and the first row had nothing above it. The
+   heading sat flush on "Name", closer to that one field than the fields were
+   to each other - which groups a title with the first item in a list instead
+   of with the list. */
+.fold-body { animation: scpFade .3s ease both; padding-top: 22px; }
 .divider { height: 1px; background: var(--line-faint); margin: 20px 0 24px; }
 
 /* ------------------------------------------------------------ modal, toast */
@@ -559,3 +1018,63 @@ label { display: inline-flex; gap: .4rem; align-items: center; }
   animation: scpIn .3s cubic-bezier(.2, .75, .3, 1) both;
 }
 #toast.err { border-left-color: var(--critical); }
+
+/* ------------------------------------------------- the resource, folded away */
+
+/* What the thing *is*, under what is wrong with it. Worth keeping - a
+   verdict is only checkable against the settings it judged - and worth
+   folding, because a bucket's settings are forty lines of JSON and open by
+   default they were the largest thing on the panel, with the findings
+   scrolled away above them. */
+.what-it-is { margin-top: 26px; }
+.what-it-is > summary {
+  cursor: pointer; list-style: none;
+  display: inline-flex; align-items: center; gap: 8px;
+  font: 600 10.5px/1 var(--mono); letter-spacing: .12em;
+  text-transform: uppercase; color: var(--muted-2);
+  padding: 6px 0;
+}
+.what-it-is > summary::-webkit-details-marker { display: none; }
+.what-it-is > summary::before {
+  content: "▸"; font-size: 9px; transition: transform .12s ease;
+}
+.what-it-is[open] > summary::before { transform: rotate(90deg); }
+.what-it-is > summary:hover { color: var(--ink-soft); }
+.what-it-is .mono-block { margin-top: 8px; }
+
+/* ------------------------------------------------------------- placeholders */
+
+/* The one exception to black text, and it is not a hierarchy exception.
+   A placeholder is not content: it is a description of what should go in an
+   empty box. At full ink it is indistinguishable from a value somebody typed,
+   so an untouched form reads as a filled-in one - and this form's fields
+   decide what gets built in a real account.
+
+   Left as its own rule rather than inherited, because the browser default
+   varies and one of them is nearly invisible. */
+::placeholder { color: #8b8d87; opacity: 1; }
+
+/* -------------------------------------------------------------- empty states */
+
+/* What is empty, and what that does not mean.
+
+   These were four bare sentences in grey - "Nothing here.", "Nothing found.",
+   "Pick something from the list." - and the first two are dangerous rather
+   than merely thin. In a tool whose job is finding what is wrong, a short
+   "nothing" under a heading reads as a clean bill on the account, and for a
+   resource list it means only that this one kind of resource does not exist
+   here. The second line is where that distinction goes. */
+.nothing {
+  padding: 22px 20px; border: 1px dashed var(--line);
+  border-radius: 5px; background: #fdfdfc;
+}
+.nothing-line { margin: 0; font: 600 15px/1.3 var(--sans); }
+.nothing-note {
+  margin: 7px 0 0; font-size: 12.5px; max-width: 62ch; text-wrap: pretty;
+}
+
+/* The one empty state that is a verdict, because the scan really ran. */
+.nothing.is-clean {
+  border-style: solid; border-color: #dbe9e0; background: #fbfdfc;
+}
+.nothing.is-clean .nothing-line { color: #3f7d54; }

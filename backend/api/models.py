@@ -99,10 +99,28 @@ class ResourceSpec(BaseModel):
 
     # Azure again. Every Azure resource lives in a resource group and there is
     # no AWS equivalent to borrow, so this is the one field a second cloud
-    # actually cost the shared model. `region` carries the Azure location
-    # rather than a second field beside it: they are the same idea under two
-    # names, and two fields would be one more pair to keep in step.
+    # actually cost the shared model.
     resource_group: Optional[str] = None
+
+    # `region` carries the Azure location, and this is the same idea under the
+    # name Azure and the page both use for it.
+    #
+    # The comment here used to say one field was deliberate, because two would
+    # be a pair to keep in step. The pair already existed and only one half was
+    # declared: all five Azure forms show a field called "location"
+    # (frontend/app.js FORMS), collectSpec sends the field name verbatim, and a
+    # key this model does not declare is dropped in silence. So every Azure
+    # create arrived with no location at all and fell through to eastus -
+    # typing westeurope built in eastus and reported success. Three of the five
+    # adapters already read `spec.get("region") or spec.get("location")`, which
+    # could never fire, because as_dict() cannot contain a key the model does
+    # not have.
+    #
+    # Declared rather than renaming the form field, because "region" is not
+    # what Azure calls this and the page is the half that has it right. `region`
+    # still wins where both are given: it is the one _spec_for_checking knows
+    # about, and it is what the CLI and the smoke test have always sent.
+    location: Optional[str] = None
 
     # Azure virtual machine. These were missing entirely, and a field this
     # model does not declare is dropped in silence - pydantic ignores unknown
@@ -168,6 +186,33 @@ class FixRequest(BaseModel):
 
 class DeleteOptions(BaseModel):
     force: bool = False
+
+
+class AcknowledgementRequest(BaseModel):
+    """Records that somebody looked at a finding and decided to live with it.
+
+    Carries the resource so the server can re-scan it and confirm the finding
+    is real, for the same reason FixRequest carries no action: what the server
+    writes is derived from what the server can see, not from what the caller
+    asserts. A request naming a rule id nothing reports is refused.
+
+    `confirm` repeats rule_id, which is the demand every forced delete here
+    already makes. Suppressing a critical finding is a smaller act than
+    deleting the resource, but it is quieter, and quiet is the direction that
+    needs the guard.
+    """
+
+    resource_type: str = Field(min_length=1)
+    resource_id: str = Field(min_length=1)
+    rule_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    by: str = Field(min_length=1)
+
+    # Optional so the caller can take the default rather than compute a date,
+    # which is what the page does. Bounded on the way in by check_entry.
+    until: Optional[str] = None
+
+    confirm: str = Field(min_length=1)
 
 
 class Warning_(BaseModel):
@@ -260,6 +305,13 @@ class BastionResponse(BaseModel):
     connection: Optional[dict] = None
     instructions: list[str]
     teardown: list[str]
+
+    # The instructions as one runnable script, or None before the addresses
+    # exist. Carries no key material: the private halves went from the
+    # browser to a download and this server has never held one. See
+    # bastion.connect_script.
+    script: Optional[str] = None
+    script_name: Optional[str] = None
 
 
 class DeletionPlanItem(BaseModel):

@@ -18,15 +18,21 @@ login screen to a tool that already trusts whoever is sitting at the machine
 would be theatre. Do not put it on a public interface.
 """
 
+import json
+import queue
+import re
 import secrets
+import threading
 import time
+from datetime import date
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 
 # Before api.registry imports the provider modules, and well before any route
@@ -37,8 +43,9 @@ environment.load()
 
 from api import audit, models, registry
 from aws.common import AwsNotConfigured
+from aws import s3_buckets
 from aws.s3_buckets import PermissionDenied
-from az.common import AzureNotConfigured
+from az.common import AzureNotConfigured, AzureRefused
 from blueprints import bastion
 from scanner import acknowledged
 from scanner.common import summarize, fixable, worst_level, CRITICAL
@@ -207,6 +214,30 @@ async def _aws_not_configured(request, exc):
     )
 
 
+@app.exception_handler(AzureRefused)
+async def _azure_refused(request, exc):
+    """Turns "you may not look at that" into a 403 that says so.
+
+    The mirror of the AWS handler above, and the last place the distinction
+    CLAUDE.md records four times over had not been made. Azure answers "this
+    resource group does not exist" and "you have no role on this resource
+    group" with the same 403, so a reader that handled only 404 re-raised the
+    refusal and the route turned it into a 500 with a traceback about an HTTP
+    response - which tells somebody holding Contributor on two groups nothing
+    about the fact that they are looking at a third.
+
+    403 rather than 404: saying "there is nothing there" to somebody who
+    simply cannot see it is the more misleading of the two answers, and the
+    one that sends people to look for a resource they never lost.
+    """
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(
+        status_code=403,
+        content={"detail": str(exc), "provider": "azure"},
+    )
+
+
 @app.exception_handler(AzureNotConfigured)
 async def _azure_not_configured(request, exc):
     """Turns an absent Azure SDK or credential into a 503 that says so.
@@ -332,6 +363,19 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/activity")
+def recent_activity(limit: int = 20):
+    """What this tool has changed, or refused to, most recently.
+
+    Read-only, and the log holds no request bodies - method, path, outcome and
+    a reason. It is exposed because the refusals are the half of this tool's
+    behaviour that leaves no trace anywhere else: CloudTrail records that an
+    API call happened and cannot record that somebody asked for a cascade,
+    failed to type the ID back, and was stopped.
+    """
+    return {"activity": audit.read_recent(min(max(limit, 1), 100))}
+
+
 @app.get("/resources")
 def list_resource_types():
     """What this tool knows about. Lets the frontend build its own menu.
@@ -358,7 +402,7 @@ def list_resource_types():
              "provider": r.provider,
              "short_label": r.short_label or r.label}
             for r in registry.REGISTRY.values()
-        ]
+        ],
     }
 
 
@@ -465,8 +509,25 @@ def create(resource_type: str, spec: models.ResourceSpec, region: str = "us-east
     _must_be_writable(known)
     client = known.get_client(region)
 
-    blocking = [w for w in known.check_spec(_spec_for_checking(known, spec, region))
-                if w["level"] == CRITICAL]
+    # One dict, used for both the pre-flight and the create.
+    #
+    # These were two separate calls: the check got _spec_for_checking, which
+    # injects the region the request is for, and the create got a bare
+    # spec.as_dict(). So the two judged different requests. `region` is sent by
+    # the page only as a query parameter, never in the body, so it was absent
+    # from every create: _bucket_create fell through to DEFAULT_REGION
+    # "us-east-1" while the client was built for the region actually chosen,
+    # and s3_buckets.create_bucket branches on that argument rather than on the
+    # client - omitting CreateBucketConfiguration for us-east-1, which a
+    # regional endpoint rejects. Creating a bucket anywhere but us-east-1 was
+    # impossible from the page, and the refusal quoted raw AWS text naming
+    # nothing anyone could act on.
+    #
+    # Azure is unaffected: _spec_for_checking injects only when the provider is
+    # aws, because `region` on an Azure spec carries the location instead.
+    data = _spec_for_checking(known, spec, region)
+
+    blocking = [w for w in known.check_spec(data) if w["level"] == CRITICAL]
     if blocking and not accept_risk:
         raise HTTPException(
             status_code=400,
@@ -488,9 +549,24 @@ def create(resource_type: str, spec: models.ResourceSpec, region: str = "us-east
             },
         )
 
-    ok, result, problems = known.create(client, spec.as_dict())
+    ok, result, problems = known.create(client, data)
     if not ok:
-        raise HTTPException(status_code=400, detail=result)
+        # problems travels with the refusal, and used to be discarded here.
+        #
+        # This project's stated position is that nothing rolls back and that a
+        # partial failure reports exactly what exists. The adapters honour it -
+        # every create returns what it built alongside the error - and this
+        # line threw that half away, so a create that failed after building a
+        # network, a security group and a card answered with one sentence about
+        # the size and no mention of the three resources the caller now owned.
+        #
+        # A dict rather than a string because frontend/app.js already reads
+        # detail.message when detail is not a string, so the page keeps working
+        # and the list is there for anything that wants it.
+        raise HTTPException(
+            status_code=400,
+            detail={"message": result, "problems": problems or []},
+        )
 
     settings, warnings = _describe_and_scan(known, client, result)
 
@@ -562,6 +638,250 @@ def scan(resource_type: str, resource_id: str, region: str = "us-east-1"):
         warnings=warnings,
         counts=summarize(warnings),
         fixable_count=len(fixable(warnings)),
+    )
+
+
+# -------------------------------------------------------------- Bucket objects
+
+# The most a single upload may carry. Not a technical limit - S3 takes five
+# gigabytes in one PUT - but this route holds every byte in memory to hand to
+# boto3, and a tool whose job is auditing configuration has no business being
+# a file transfer service. Enough for the demo material somebody would put in
+# a bucket to show what an exposure means.
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+def _multipart_is_installed():
+    """Whether fastapi can parse an uploaded file.
+
+    fastapi needs python-multipart to accept one and does not depend on it, so
+    declaring the route without it raises at *import* time - which would stop
+    the whole application starting, both clouds and every other route, over a
+    dependency belonging to one feature. That is precisely the failure
+    aws/common.py and az/common.py exist to avoid for boto3 and the Azure SDK,
+    and it would be a poor thing to reintroduce for a file upload.
+    """
+    try:
+        # python_multipart, not multipart. The package renamed its import in
+        # 0.0.12 and the old spelling still works while warning, so importing
+        # it the old way is a deprecation notice printed on every test run.
+        import python_multipart  # noqa: F401
+        return True
+    except ImportError:
+        try:
+            import multipart  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+
+if not _multipart_is_installed():
+    # The feature is unavailable and says so, rather than the page failing to
+    # start. Same shape as an absent SDK: one thing does not work, and the
+    # message names what to install.
+    @app.post("/resources/bucket/{bucket_name}/objects",
+              response_model=models.ActionResponse)
+    def upload_objects_unavailable(bucket_name: str):
+        raise HTTPException(
+            status_code=503,
+            detail=("Uploading needs python-multipart, which is not installed. "
+                    "pip install python-multipart, then restart. Everything "
+                    "else on this page works without it."),
+        )
+
+
+if _multipart_is_installed():
+    @app.post("/resources/bucket/{bucket_name}/objects",
+              response_model=models.ActionResponse)
+    async def upload_objects(bucket_name: str, files: list[UploadFile] = File(...),
+                             region: str = "us-east-1"):
+        """Puts files into a bucket, unless the bucket is open to the world.
+
+        Its own route rather than a field on ResourceSpec, for three reasons. A
+        file is multipart and the spec is JSON, so carrying one in the other means
+        base64 and a third more bytes. It works on a bucket that already exists
+        rather than only at creation. And it is a separate line in the audit log,
+        which matters for the one action here that puts data somewhere.
+
+        The refusal lives in `aws/s3_buckets.put_objects` and is checked against
+        the bucket's state at the moment of writing - see the reasoning there.
+        """
+        known = _resource("bucket")
+        # The region the caller is working in, like every other route here. It
+        # was hardcoded to us-east-1, which was invisible only because a bucket
+        # could not be created anywhere else; now that one can, uploading to it
+        # would have looked for it in the wrong region and reported it missing.
+        client = known.get_client(region)
+
+        payload = []
+        total = 0
+        for f in files:
+            body = await f.read()
+            total += len(body)
+            if total > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(f"That is more than {MAX_UPLOAD_BYTES // (1024 * 1024)}MB "
+                            "in one upload. This tool audits configuration; it is "
+                            "not a way to move files."),
+                )
+            # basename only. A browser sends what the file was called and a key
+            # containing "../" is a key containing "../" rather than a traversal,
+            # but a bucket full of keys shaped like paths somebody did not choose
+            # is its own small mess.
+            payload.append((Path(f.filename or "unnamed").name, body))
+
+        ok, message, written = s3_buckets.put_objects(client, bucket_name, payload)
+        if not ok:
+            raise HTTPException(
+                status_code=400,
+                detail={"message": message, "written": written},
+            )
+
+        return models.ActionResponse(ok=True, message=message)
+
+
+# ------------------------------------------------------------- Acknowledgement
+
+
+@app.post("/acknowledgements", response_model=models.ActionResponse)
+def acknowledge(request: models.AcknowledgementRequest,
+                region: str = "us-east-1"):
+    """Records that somebody has looked at a finding and decided to live with it.
+
+    This endpoint did not exist until recently, and the argument against it is
+    worth stating because it was a good one: the tool holds credentials and
+    has no login, so a route that quietens a finding is a route an attacker
+    would rather have than one that deletes something. Deletion is loud.
+
+    Two things answer it. The middleware above refuses any write carrying
+    another site's Origin, and any request whose Host is not this machine -
+    which is the cross-site POST the objection described. And this API already
+    exposes forced deletion of live infrastructure under exactly those guards,
+    so trusting them for suppression is not a new position, it is the existing
+    one applied consistently.
+
+    What the CLI had and a browser cannot reproduce is provenance: `by` came
+    from git config, so the name recorded was the one that would be on the
+    commit. The guards below stand in for it. The strongest is that the
+    finding must be real - the resource is re-scanned here, and a rule id the
+    scan does not report is refused, so this cannot write an acknowledgement
+    for something that was never found.
+    """
+    known = _resource(request.resource_type)
+    client = known.get_client(region)
+
+    # Re-read and re-scan rather than believing the request. Same reasoning as
+    # POST /fix, which takes a rule_id and derives the action itself: what the
+    # server writes down is a function of what the server can see.
+    settings, warnings = _describe_and_scan(known, client, request.resource_id)
+    if settings is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(f"No {known.label.lower()} called "
+                    f"'{request.resource_id}' was found."),
+        )
+
+    today = date.today()
+    until = request.until or date.fromordinal(
+        today.toordinal() + acknowledged.DEFAULT_DAYS).isoformat()
+
+    problem = acknowledged.check_entry(
+        rule_id=request.rule_id,
+        reason=request.reason,
+        by=request.by,
+        until=until,
+        confirm=request.confirm,
+        live_rule_ids={w.get("rule_id") for w in warnings if w.get("rule_id")},
+        today=today,
+    )
+    if problem:
+        audit.record(method="POST", path="/acknowledgements",
+                     outcome="refused", why=problem,
+                     rule_id=request.rule_id)
+        raise HTTPException(status_code=400, detail=problem)
+
+    entry = {
+        "rule_id": request.rule_id,
+        "reason": request.reason.strip(),
+        "by": request.by.strip(),
+        "on": today.isoformat(),
+        "until": until,
+    }
+    where = acknowledged.record(entry)
+
+    audit.record(method="POST", path="/acknowledgements", outcome="written",
+                 rule_id=request.rule_id, by=entry["by"], until=until)
+
+    return models.ActionResponse(
+        ok=True,
+        message=(
+            f"Recorded. '{request.rule_id}' stays in every scan at the same "
+            f"severity and is now marked as accepted by {entry['by']}, until "
+            f"{until}. Nothing is hidden. Commit {where.name} so it applies to "
+            "everybody else's scans as well."
+        ),
+    )
+
+
+@app.delete("/acknowledgements/{rule_id:path}",
+            response_model=models.ActionResponse)
+def unacknowledge(rule_id: str, confirm: Optional[str] = None):
+    """Takes an acknowledgement back, so the finding speaks at full volume again.
+
+    The counterpart of the POST above, and deliberately a much smaller thing.
+    Every guard on writing one is about *quietening* a finding: this service
+    holds credentials and has no login, so a route that dims a warning is worth
+    more to an attacker than one that deletes something, and the whole of
+    `check_entry` exists to make that expensive. None of it applies in this
+    direction. The worst a wrong call here can do is report something loudly
+    that somebody had already decided about - which is the state the tool ships
+    in, and the side it is safe to err towards.
+
+    `confirm` is still asked for, and still has to repeat the id. Not as a
+    barrier - the page fills it in from the finding the button belongs to, so
+    nobody types it - but because it is the one thing that distinguishes a
+    request meaning *this* acknowledgement from a request that has been
+    cross-wired to the wrong one. The write path makes the same demand for the
+    same reason.
+
+    No re-scan here, unlike the POST. That check exists to stop an
+    acknowledgement being written for a finding that does not exist; an
+    acknowledgement that no longer matches anything is exactly the stale entry
+    the audit reports and asks somebody to clear, so refusing to remove it
+    because the resource is gone would trap the mess it is meant to clean up.
+    """
+    if confirm != rule_id:
+        problem = ("To remove an acknowledgement, confirm has to repeat its "
+                   f"rule id exactly. Expected '{rule_id}'.")
+        audit.record(method="DELETE", path="/acknowledgements",
+                     outcome="refused", why=problem, rule_id=rule_id)
+        raise HTTPException(status_code=400, detail=problem)
+
+    removed, where = acknowledged.remove(rule_id)
+    if not removed:
+        raise HTTPException(
+            status_code=404,
+            detail=(f"Nothing acknowledged for '{rule_id}', so there is "
+                    "nothing to take back."),
+        )
+
+    audit.record(method="DELETE", path="/acknowledgements", outcome="removed",
+                 rule_id=rule_id, count=len(removed))
+
+    # What it said, echoed back. The file no longer holds the reason, and this
+    # response is the only place it still exists.
+    was = removed[0]
+    return models.ActionResponse(
+        ok=True,
+        message=(
+            f"'{rule_id}' is no longer accepted and is reported normally again. "
+            f"It had been accepted by {was.get('by', 'unknown')}"
+            f"{' on ' + was['on'] if was.get('on') else ''}: "
+            f"\"{was.get('reason', '')}\". "
+            f"Commit {where.name} so it stops applying to everybody else's "
+            "scans as well."
+        ),
     )
 
 
@@ -731,10 +1051,52 @@ def deletion_plan(resource_type: str, resource_id: str,
     return _deletion_plan(known, client, resource_type, resource_id)
 
 
+def _delete_as_it_happens(known, client, resource_id, force):
+    """Runs a delete on a thread and yields its progress as it arrives.
+
+    A cascade spends four or five minutes inside one blocking boto3 sequence,
+    so the progress cannot be yielded from the call itself - the callback and
+    the generator want to be in charge at the same time. A queue is the seam:
+    the worker pushes lines, this drains them, and the sentinel says the
+    worker has finished.
+
+    Every exception is caught and turned into a failed outcome rather than
+    raised. Once a streaming response has begun the status code is already
+    sent, so an exception escaping here would truncate the body and the page
+    would see a stream that simply stopped - which is the failure this whole
+    endpoint exists to remove.
+    """
+    lines = queue.Queue()
+    outcome = {}
+
+    def run():
+        try:
+            ok, message = known.delete(
+                client, resource_id, {"force": force, "report": lines.put})
+            outcome.update(ok=ok, message=message)
+        except Exception as e:
+            outcome.update(ok=False, message=f"{type(e).__name__}: {e}")
+        finally:
+            lines.put(None)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+
+    while True:
+        line = lines.get()
+        if line is None:
+            break
+        yield json.dumps({"step": line}) + "\n"
+
+    worker.join()
+    yield json.dumps({"done": True, **outcome}) + "\n"
+
+
 @app.delete("/resources/{resource_type}/{resource_id}",
             response_model=models.ActionResponse)
 def delete(resource_type: str, resource_id: str, force: bool = False,
-           confirm: Optional[str] = None, region: str = "us-east-1"):
+           confirm: Optional[str] = None, region: str = "us-east-1",
+           stream: bool = False):
     """Deletes one resource. force cascades, and cascading needs confirming.
 
     confirm has to repeat the resource's own ID. That is the same demand the
@@ -747,6 +1109,14 @@ def delete(resource_type: str, resource_id: str, force: bool = False,
     The refusal carries the whole deletion plan, so a caller learns what it
     was about to destroy at the moment it is stopped rather than having to go
     and ask.
+
+    `stream=true` answers with newline-delimited JSON instead: one object per
+    step as it happens, then a final one carrying the same ok and message the
+    plain form returns. It is opt-in because everything already calling this -
+    the CLI, the smoke test, every offline test - wants one answer, and
+    because a streamed body cannot carry a status code that is decided
+    partway through. The refusals above still happen before any of it, so a
+    caller that forgot to confirm gets a 400 with the plan in it either way.
     """
     known = _resource(resource_type)
     _must_be_writable(known)
@@ -755,6 +1125,15 @@ def delete(resource_type: str, resource_id: str, force: bool = False,
     if force and confirm != resource_id:
         plan = _deletion_plan(known, client, resource_type, resource_id)
         raise HTTPException(status_code=400, detail=plan.model_dump())
+
+    if stream:
+        return StreamingResponse(
+            _delete_as_it_happens(known, client, resource_id, force),
+            media_type="application/x-ndjson",
+            # Nothing between here and the browser should hold this back
+            # waiting for a complete body; the whole point is the partial one.
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
 
     ok, message = known.delete(client, resource_id, {"force": force})
     if not ok:
@@ -904,8 +1283,25 @@ def build_bastion(spec: models.BastionSpec):
         problems=problems,
         log=log,
         connection=details,
-        instructions=bastion.connection_instructions(details) if ok else [],
+        # keys_were_downloaded is true for every caller of this route, not
+        # only the page. POST /blueprints/bastion refuses to generate key
+        # pairs at all - it takes public_keys and nothing else - so whoever
+        # called it holds two private halves this server has never seen, and
+        # over HTTP the overwhelmingly likely way they got them is the
+        # browser generator this project recommends. The mv step is a no-op
+        # for anybody who already filed them, and the alternative is what was
+        # here before: paths that are wrong for the tool's own front door.
+        instructions=bastion.connection_instructions(
+            details, keys_were_downloaded=True) if ok else [],
         teardown=bastion.teardown_instructions(created),
+        # The same steps as one file, because the four the instructions list
+        # are the four a browser cannot perform: it cannot move a file, change
+        # its mode, reach an ssh-agent or open a shell. Handing over a script
+        # is the closest the tool gets to doing them, and it does it without
+        # ever holding a private key - which a route that filed the keys
+        # server-side could not claim.
+        script=bastion.connect_script(details, name=spec.name) if ok else None,
+        script_name=f"connect-{spec.name}.sh" if ok else None,
     )
 
 
@@ -924,5 +1320,79 @@ def build_bastion(spec: models.BastionSpec):
 # checkout where the frontend is absent.
 _PAGE = Path(__file__).resolve().parent.parent.parent / "frontend"
 
+
+class _AlwaysRevalidated(StaticFiles):
+    """Serves the page, and refuses to let a browser reuse it without asking.
+
+    Without this the browser decides for itself how long a file stays fresh,
+    and with no Cache-Control header it is allowed to guess. It guesses
+    differently per file - so a page can load a *new* app.js against an *old*
+    style.css, which is not a stale page but a broken one: markup the
+    stylesheet has never heard of, rendering as unstyled fragments. That
+    happened here. The counts arrived as new tally elements and the old
+    stylesheet had no rule for them, so they stacked up as "2critical".
+
+    It is the worst kind of stale, because "I refreshed and nothing changed"
+    is indistinguishable from "the change did not work", and the obvious next
+    move is to go looking for a bug in code that is already correct.
+
+    `no-cache` is not `no-store`: the file is still cached, the browser simply
+    has to ask whether it has changed. StaticFiles already sends an ETag and
+    answers 304 when it has not, so the cost of this on a page served from
+    localhost is one conditional request per file per load.
+
+    A build step with hashed filenames is the other answer to this, and is the
+    right one for something deployed. This page has no build step on purpose.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
+
+_ASSET = re.compile(r'(href|src)="([^"?:]+\.(?:css|js))"')
+
+
+def _stamped_page():
+    """index.html with every local asset URL carrying its file's timestamp.
+
+    The Cache-Control header added alongside this was necessary and was not
+    sufficient, for a reason worth writing down because it wasted an evening:
+    **a header only governs responses fetched after it exists.** A browser
+    that had already stored style.css with no Cache-Control at all assigns it
+    a heuristic freshness lifetime and then uses it *without asking* - so it
+    never issues the request that would have carried the new header, and no
+    number of refreshes changes that. The header fixes the next visitor and
+    does nothing for the one who already has the file.
+
+    What breaks a cache entry is a URL it is not keyed on. So each asset gets
+    ?v=<mtime>, which changes exactly when the file does: edit style.css and
+    every browser fetches it once, edit nothing and every browser keeps using
+    what it has. No manual version to bump and forget.
+
+    The page itself is served from here rather than by the mount so the
+    rewrite has somewhere to happen, and is marked no-store because it is the
+    one document that must never come from a cache - it is what carries the
+    new URLs.
+    """
+    html = (_PAGE / "index.html").read_text()
+
+    def stamp(match):
+        attribute, name = match.group(1), match.group(2)
+        beside = _PAGE / name
+        version = int(beside.stat().st_mtime) if beside.is_file() else 0
+        return f'{attribute}="{name}?v={version}"'
+
+    return _ASSET.sub(stamp, html)
+
+
 if _PAGE.is_dir():
-    app.mount("/ui", StaticFiles(directory=_PAGE, html=True), name="ui")
+    @app.get("/ui/", include_in_schema=False)
+    def page():
+        return HTMLResponse(
+            _stamped_page(),
+            headers={"Cache-Control": "no-store, must-revalidate"},
+        )
+
+    app.mount("/ui", _AlwaysRevalidated(directory=_PAGE, html=True), name="ui")

@@ -45,14 +45,25 @@ one the per-rule pass in `azure_nsg_rules.py` still reports separately.
 # outside.
 DEFAULT_DENY_PRIORITY = 65500
 
-# What Azure writes where AWS writes 0.0.0.0/0. Kept in step with
-# OPEN_TO_EVERYONE in azure_nsg_rules.py, which is the same idea for the
-# per-rule pass.
-EVERYONE = {"*", "0.0.0.0/0", "internet", "::/0"}
+from scanner.common import open_to_strangers
 
 
 def _matches_everyone(source):
-    return str(source or "").strip().lower() in EVERYONE
+    """Whether a packet from anywhere is this rule's packet.
+
+    This was a set of four literals - `*`, `internet`, `0.0.0.0/0`, `::/0` -
+    matched by string equality, and the consequence was worse here than on the
+    AWS side. A rule allowing 22 from `0.0.0.0/1` was skipped as "not this
+    packet's rule", so `decide` fell through to DenyByDefault and reported the
+    port closed: not a missing finding but a wrong statement about what Azure
+    would do with two billion source addresses.
+
+    common.open_to_strangers owns the judgement now, and both clouds ask it the
+    same question. It still refuses anything it cannot parse, which is what
+    keeps the promise in this module's header - a service tag it does not know
+    matches nothing, so it can never manufacture an Allow Azure would not make.
+    """
+    return open_to_strangers(source)[0]
 
 
 def _covers_port(rule, port):

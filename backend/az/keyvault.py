@@ -20,14 +20,16 @@ from az import names
 from az.common import (
     AzureNotConfigured,
     AzureRefused,
-    why_azure_refused,
+    denied,
     ensure_resource_group,
     is_managed,
     keyvault_client,
     managed_tags,
+    not_allowed_to_look,
     plain,
     resource_group_of,
     tenant_id,
+    why_azure_refused,
 )
 
 
@@ -89,6 +91,10 @@ def read_vault_for_scanning(client, name):
     try:
         found = client.vaults.get(group, short)
     except Exception as e:
+        # Refusal before absence, because Azure says both in the same words
+        # and a handler knowing only 404 re-raises the first as a crash.
+        if denied(e):
+            raise not_allowed_to_look(group, "key vaults") from e
         # Matching the status code rather than catching ResourceNotFoundError,
         # which lives behind an import this module does not make at scope.
         if getattr(e, "status_code", None) == 404:

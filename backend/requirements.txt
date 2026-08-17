@@ -6,6 +6,13 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 pydantic>=2.7
 
+# Multipart form parsing, which fastapi needs to accept an uploaded file and
+# does not depend on itself. Only POST /resources/bucket/{name}/objects uses
+# it, and that route is registered only when this is importable - a missing
+# dependency belonging to one feature must not stop the whole page starting,
+# which is the same rule aws/common.py and az/common.py follow for the SDKs.
+python-multipart>=0.0.9
+
 # Testing only. moto fakes AWS in memory so the suite needs no account.
 # httpx backs fastapi's TestClient. cryptography generates real key pairs for
 # the key pair tests: moto parses imported keys properly and rejects fabricated

@@ -3,6 +3,8 @@
 Contains pure Python evaluation logic with no external AWS dependencies.
 """
 
+import ipaddress
+
 from scanner.common import (
     CRITICAL,
     WARNING,
@@ -12,11 +14,30 @@ from scanner.common import (
     fixable,
     worst_level,
     print_warnings,
+    open_to_strangers,
 )
 
 OPEN_TO_WORLD_V4 = "0.0.0.0/0"
 OPEN_TO_WORLD_V6 = "::/0"
+
+# Kept because the create form offers these two as menu entries and the
+# registry imports them for it. Judging a rule no longer goes through this set
+# - see common.open_to_strangers - because a set of two literals is a check
+# somebody can write their way around.
 OPEN_SOURCES = {OPEN_TO_WORLD_V4, OPEN_TO_WORLD_V6}
+
+
+def _is_ipv6(source):
+    """Whether a source is written as an IPv6 range, for the CIS citation.
+
+    The two administration-port controls are numbered separately for v4 and v6,
+    so this decides which one a finding cites rather than whether there is a
+    finding at all.
+    """
+    try:
+        return ipaddress.ip_network(str(source).strip(), strict=False).version == 6
+    except ValueError:
+        return False
 
 RISKY_PORTS = {
     22: "SSH, the remote login door for Linux servers",
@@ -47,7 +68,8 @@ def _check_outbound(rule, reach):
     instead: it matters for what an attacker can send outward once inside, and
     no published benchmark here requires restricting it.
     """
-    if rule.get("source") not in OPEN_SOURCES:
+    wide, _ = open_to_strangers(rule.get("source"))
+    if not wide:
         return None
 
     if rule.get("protocol") == "-1":
@@ -73,9 +95,12 @@ def check_firewall_rules(rules):
         protocol = rule.get("protocol", "tcp")
         start = rule.get("from_port")
         end = rule.get("to_port")
-        is_public = source in OPEN_SOURCES
-        is_ipv6 = source == OPEN_TO_WORLD_V6
-        reach = "the entire internet (over IPv6)" if is_ipv6 else "the entire internet"
+        # Not string equality against "0.0.0.0/0" any more. See
+        # common.open_to_strangers: two rules saying 0.0.0.0/1 and 128.0.0.0/1
+        # cover every address on the internet and this reported nothing at all
+        # about either of them.
+        is_public, reach = open_to_strangers(source)
+        is_ipv6 = _is_ipv6(source)
 
         if rule.get("direction") == "outbound":
             outbound = _check_outbound(rule, reach)
@@ -168,9 +193,16 @@ def check_firewall_rules(rules):
         elif start == 443 and end == 443:
             continue
         else:
+            # A rule can arrive with no ports on it - an ICMP rule, or one the
+            # reader could not flatten. "Port None is open to the entire
+            # internet" is what that used to render as, which reads as a bug
+            # rather than as a finding and tells nobody anything.
+            opening = (f"Port {start}" if start is not None
+                       else "This rule names no port range, so everything it "
+                            "covers")
             warnings.append(_warning(
                 WARNING,
-                f"Port {start} is open to {reach}. Confirm this service is meant "
+                f"{opening} is open to {reach}. Confirm this service is meant "
                 "to be public.",
                 rule,
                 fix={

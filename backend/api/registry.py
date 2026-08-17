@@ -67,6 +67,41 @@ DEFAULT_REGION = "us-east-1"
 # DEFAULT_REGION because "us-east-1" is not a place Azure has heard of.
 DEFAULT_AZURE_LOCATION = "eastus"
 
+
+def _az_location(spec):
+    """Where an Azure resource goes, in one place for all five types.
+
+    Two spellings because two callers: the CLI and the smoke test have always
+    sent `region`, and the page's forms ask for `location`, which is the word
+    Azure uses. Three adapters already tried both and two read only `region`,
+    so the same form field worked or did not depending on which type it was -
+    except that `location` reached none of them, because ResourceSpec did not
+    declare it until now and pydantic drops what it does not declare.
+    """
+    return spec.get("region") or spec.get("location") or DEFAULT_AZURE_LOCATION
+
+
+def _az_created(result):
+    """Reduces a created Azure resource's id to the name the routes accept.
+
+    Azure answers a create with the full ARM path, which carries eight slashes;
+    a route takes an id as ONE path segment. So every follow-up call on the id
+    a create had just handed back - read, scan, fix, the deletion plan, delete -
+    matched no route and 404'd before any Azure code ran. A resource built from
+    the page could not then be deleted from the page, which is how three live
+    resources were stranded in a real subscription and had to be removed by
+    typing their names in by hand.
+
+    The list adapters were fixed for this and the create adapters were not,
+    which is why nothing caught it: a list-then-act flow works and a
+    create-then-act flow does not. `A row's id is whatever the routes accept`
+    is the rule, and for Azure that is the name.
+    """
+    ok, value, problems = result
+    if ok and isinstance(value, str) and "/" in value:
+        value = value.rsplit("/", 1)[-1]
+    return ok, value, problems
+
 # Ports a form should offer, which is not the same list as the ports the
 # scanner warns about. RISKY_PORTS exists to describe what is dangerous;
 # 80 and 443 belong in a menu of things people open on purpose and would be
@@ -75,16 +110,37 @@ DEFAULT_AZURE_LOCATION = "eastus"
 # user picks from are the words the warning will use back at them.
 FORM_PORTS = [22, 80, 443, 3389, 3306, 5432, 6379, 9200, 27017, 5900]
 
-EXTRA_PORT_LABELS = {
-    80: "HTTP, an unencrypted web server",
-    443: "HTTPS, an encrypted web server",
+# What a port is, in a few words, for a menu.
+#
+# Deliberately not RISKY_PORTS. That is the scanner's prose and it belongs in
+# a finding, where there is a whole sentence to be read and "the remote login
+# door for Windows servers" is exactly the right amount of explanation for
+# somebody who does not know what 3389 is. In a dropdown it is 63 characters
+# in a 133px control: measured, the longest of them overflowed by 280px, so
+# the closed menu showed "3389 — Remote Desktop, the remo…" and a chosen port
+# could not be read back at all.
+#
+# Short enough to fit, long enough to still answer "what is this port". The
+# names people actually say - SSH, RDP, MySQL - rather than a description of
+# them.
+PORT_MENU_LABELS = {
+    22: "SSH",
+    80: "HTTP",
+    443: "HTTPS",
+    3389: "Remote Desktop",
+    3306: "MySQL",
+    5432: "PostgreSQL",
+    6379: "Redis",
+    9200: "Elasticsearch",
+    27017: "MongoDB",
+    5900: "VNC",
 }
 
 
 def _port_choices():
     choices = []
     for port in FORM_PORTS:
-        what = RISKY_PORTS.get(port) or EXTRA_PORT_LABELS.get(port, "")
+        what = PORT_MENU_LABELS.get(port, "")
         choices.append({"value": str(port),
                         "label": f"{port} — {what}" if what else str(port)})
     return choices
@@ -100,14 +156,18 @@ def _protocol_choices():
 
 
 def _source_choices():
+    # "the entire internet" stays: an address is jargon by this project's own
+    # style rule, and 0.0.0.0/0 is the one entry here where the words are the
+    # whole warning. "private networks only" shortens to "private" without
+    # losing anything - the address beside it already says which.
     return [
         {"value": OPEN_TO_WORLD_V4,
          "label": f"{OPEN_TO_WORLD_V4} — the entire internet"},
         {"value": OPEN_TO_WORLD_V6,
-         "label": f"{OPEN_TO_WORLD_V6} — the entire internet, IPv6"},
-        {"value": "10.0.0.0/8", "label": "10.0.0.0/8 — private networks only"},
-        {"value": "172.16.0.0/12", "label": "172.16.0.0/12 — private networks only"},
-        {"value": "192.168.0.0/16", "label": "192.168.0.0/16 — private networks only"},
+         "label": f"{OPEN_TO_WORLD_V6} — all of it, IPv6"},
+        {"value": "10.0.0.0/8", "label": "10.0.0.0/8 — private"},
+        {"value": "172.16.0.0/12", "label": "172.16.0.0/12 — private"},
+        {"value": "192.168.0.0/16", "label": "192.168.0.0/16 — private"},
     ]
 
 
@@ -215,8 +275,9 @@ class ResourceType:
     # The page needs the split to offer one cloud at a time rather than
     # fourteen tabs in a row, and the only other way to get it is to match on
     # the "azure-" key prefix - the page inferring a provider from a naming
-    # convention nothing guarantees. Declared here instead, next to the
-    # adapters that actually talk to that cloud, so a third provider is one
+    # convention nothing guarantees - and one that goes wrong the first time
+    # somebody registers "aks" or "s3-glacier". Declared here instead, next to
+    # the adapters that actually talk to that cloud, so a third provider is one
     # more value rather than another prefix rule in JavaScript.
     #
     # Defaulted to aws because eight of the nine AWS types predate the second
@@ -246,11 +307,28 @@ class ResourceType:
 
 
 def _sg_create(client, spec):
+    """Creates a group in the network the caller named, and only there.
+
+    This used to fall back to the account's default VPC when a spec omitted
+    vpc_id. That contradicted the rule the rest of this program is built on -
+    placement is asked for, never assumed - and it was only ever reachable over
+    HTTP, because the CLI and the page both ask. So the one caller who could
+    hit it was a script, which is the caller least likely to notice that its
+    group went somewhere it did not choose.
+
+    A network cannot be changed after creation and it decides more about a
+    group's reach than any rule in it, so guessing is the expensive kind of
+    wrong. The menu is served by _sg_options; a caller with no vpc_id in hand
+    can read it from GET /resources/security-group/options.
+    """
     vpc_id = spec.get("vpc_id")
     if not vpc_id:
-        vpc_id, err = sg.get_default_vpc(client)
-        if err:
-            return False, err, []
+        return False, (
+            "Which network this group belongs to has to be chosen, because it "
+            "cannot be changed afterwards and it decides what the group can "
+            "reach. Pass vpc_id; GET /resources/security-group/options lists "
+            "the networks in this account."
+        ), []
 
     return sg.create_security_group(
         client,
@@ -797,7 +875,13 @@ def _vpc_fix(client, resource_id, warning, options):
 
 
 def _vpc_delete(client, resource_id, options):
-    return vpcs.delete_vpc(client, resource_id, force=options.get("force", False))
+    # report travels in options rather than as a parameter on ResourceType.
+    # delete, because thirteen other adapters would otherwise have to grow an
+    # argument they ignore. A delete that has nothing to say simply never
+    # calls it, which is every type but this one so far.
+    return vpcs.delete_vpc(client, resource_id,
+                           force=options.get("force", False),
+                           report=options.get("report"))
 
 
 def _vpc_cleanup(client, options):
@@ -928,12 +1012,53 @@ SNAPSHOT = ResourceType(
 # --------------------------------------------------------------------- Alarms
 
 
+def _metric_for(namespace):
+    """The metric that goes with a namespace, since the menu chooses both.
+
+    The form offers one control - "Account spending ($)" or "CPU usage (%)" -
+    whose value is a namespace. The metric was then read from the spec with an
+    unconditional `or BILLING_METRIC` fallback, and no caller of the web form
+    can send a metric because there is no field for one. So picking CPU built
+    an alarm on AWS/EC2 + EstimatedCharges: a pair that has no data, which
+    CloudWatch accepts without complaint and which then sits in
+    INSUFFICIENT_DATA forever.
+
+    That is exactly the silence `scanner/alarm_rules.py` exists to catch, and
+    it could not: no rule reads metric_name, so the pre-flight and the
+    read-back scan both called it clean. backend/main.py has always paired the
+    two correctly; this is the same pairing, in the half the page uses.
+
+    A mapping and not an `if`, returning None for anything unlisted. The first
+    version of this fix ended `return alarms.BILLING_METRIC`, which pairs any
+    third namespace with EstimatedCharges and rebuilds the same
+    never-fires-forever alarm the moment one is added - the defect reproduced
+    by its own repair. The caller refuses instead, because a wrong pairing is
+    silent and a refusal is not.
+    """
+    return {
+        alarms.BILLING_NAMESPACE: alarms.BILLING_METRIC,
+        alarms.CPU_NAMESPACE: alarms.CPU_METRIC,
+    }.get(namespace)
+
+
 def _alarm_create(client, spec):
+    namespace = spec.get("namespace") or alarms.BILLING_NAMESPACE
+    # An explicit metric still wins: the CLI and the smoke test send one.
+    metric_name = spec.get("metric_name") or _metric_for(namespace)
+    if not metric_name:
+        return False, (
+            f"'{namespace}' is not a namespace this tool knows the metric for, "
+            f"and none was named. Send metric_name as well, or use one of "
+            f"{alarms.BILLING_NAMESPACE} or {alarms.CPU_NAMESPACE}. Guessing "
+            f"here builds an alarm on a pair with no data, which CloudWatch "
+            f"accepts and then leaves silent forever."
+        ), []
+
     return alarms.create_alarm(
         client,
         name=spec["name"],
-        namespace=spec.get("namespace") or alarms.BILLING_NAMESPACE,
-        metric_name=spec.get("metric_name") or alarms.BILLING_METRIC,
+        namespace=namespace,
+        metric_name=metric_name,
         threshold=spec.get("threshold"),
         region=spec.get("region"),
         period=spec.get("period"),
@@ -1091,8 +1216,18 @@ def _az_summary(resources):
     The name is unique per resource group rather than per subscription for
     every type but storage, so this is the same ambiguity the routes already
     had by taking a name at all; it is not introduced here.
+
+    Which is why the resource group and the location travel alongside it. The
+    readers have always known both, and dropping them here left the page
+    printing the name in both of its two columns - a table saying one thing
+    twice. They are also the two facts that make the name legible: a group
+    called `web` means nothing on its own, and two of them in different
+    resource groups are two different firewalls.
     """
-    return [{"id": r["name"], "name": r["name"]} for r in resources]
+    return [{"id": r["name"], "name": r["name"],
+             "resource_group": r.get("resource_group"),
+             "location": r.get("location")}
+            for r in resources]
 
 
 def _az_nsg_list(client, only_ours):
@@ -1117,15 +1252,15 @@ def _az_nsg_create(client, spec):
             "already exist."
         ), []
 
-    return az_nsg.create_nsg(
+    return _az_created(az_nsg.create_nsg(
         client,
         spec.get("name"),
         group,
-        location=spec.get("region") or spec.get("location") or "eastus",
+        location=_az_location(spec),
         # azure_rules, not rules: the AWS field carries a different shape, and
         # check_nsg_spec reads the same key for the same reason.
         rules=spec.get("azure_rules") or [],
-    )
+    ))
 
 
 def _az_nsg_delete(client, resource_id, options):
@@ -1136,6 +1271,65 @@ def _az_nsg_delete(client, resource_id, options):
 def _az_nsg_cleanup(client, options):
     return az_nsg.cleanup_all_managed_nsgs(
         client, force=options.get("force", False))
+
+
+def _az_nsg_options(client):
+    """What a firewall form may offer, per field of one rule.
+
+    The ports and the sources are the AWS lists, for the reason
+    `_az_vm_options` gives: a port is the same port on either cloud and the
+    scanner describes it in the same words. Only "everyone" differs - Azure
+    writes `*` where AWS writes 0.0.0.0/0, and offering the AWS spelling
+    produces a rule Azure accepts and treats as one address, which is the
+    quietest possible way to build a firewall that does not do what it says.
+
+    There is no priority here on purpose. `az/nsg._priorities_for` assigns one
+    per rule from the list order, ten apart, and refuses a set where some
+    rules name a priority and some do not. A field for it would let somebody
+    submit two rules with the same priority - which Azure rejects - or an
+    order whose effect is not the order the list reads as, which Azure accepts
+    and nobody notices. The list is the precedence, and that is the only
+    arrangement where what was typed and what Azure does are the same thing.
+    """
+    # Every label here has to fit a control about 133px wide, because an Azure
+    # rule row carries six fields where a security group's carries three. A
+    # label that overflows is not merely untidy: the closed menu truncates it,
+    # so the thing somebody just chose cannot be read back.
+    #
+    # What survives shortening is whatever the bare value does not already
+    # say. "Inbound" and "Allow" are ordinary words under captions that read
+    # "direction" and "allow or deny", so the explanation was the same word
+    # twice; "*" and "VirtualNetwork" say nothing on their own and keep theirs.
+    return {
+        "rule_direction": [
+            {"value": "Inbound", "label": "Inbound"},
+            {"value": "Outbound", "label": "Outbound"},
+        ],
+        # The field with no AWS counterpart, and the reason the AWS rules
+        # widget cannot be reused as it stands. A security group has no deny;
+        # every rule in one is an allow. An Azure rule set is read in order
+        # until something matches, so a Deny above an Allow is what closes a
+        # port the Allow below would open - and a form that submitted
+        # everything as Allow would silently build a different firewall.
+        "rule_access": [
+            {"value": "Allow", "label": "Allow"},
+            {"value": "Deny", "label": "Deny"},
+        ],
+        "rule_protocol": [
+            {"value": "Tcp", "label": "TCP"},
+            {"value": "Udp", "label": "UDP"},
+            {"value": "Icmp", "label": "ICMP (ping)"},
+            {"value": "*", "label": "All protocols"},
+        ],
+        "rule_port": _port_choices(),
+        "rule_source": [
+            {"value": "*", "label": "* — everywhere"},
+            {"value": "VirtualNetwork", "label": "This network"},
+            {"value": "AzureLoadBalancer", "label": "Azure load balancer"},
+            {"value": "10.0.0.0/8", "label": "10.0.0.0/8 — private"},
+            {"value": "192.168.0.0/16", "label": "192.168.0.0/16 — private"},
+        ],
+    }
 
 
 AZURE_NSG = ResourceType(
@@ -1154,6 +1348,7 @@ AZURE_NSG = ResourceType(
     fix=_az_nsg_fix,
     delete=_az_nsg_delete,
     cleanup=_az_nsg_cleanup,
+    options=_az_nsg_options,
     # This type creates resources now, so the tag means something and the box
     # is worth offering. It did not until create_nsg arrived.
     only_ours_label="only ones this tool made",
@@ -1191,13 +1386,13 @@ def _az_storage_create(client, spec):
             "already exist."
         ), []
 
-    return az_storage.create_account(
+    return _az_created(az_storage.create_account(
         client,
         spec["name"],
         group,
-        location=spec.get("region") or DEFAULT_AZURE_LOCATION,
+        location=_az_location(spec),
         secure_by_default=spec.get("secure_by_default", True),
-    )
+    ))
 
 
 def _az_storage_delete(client, resource_id, options):
@@ -1258,13 +1453,13 @@ def _az_keyvault_create(client, spec):
             "already exist."
         ), []
 
-    return az_keyvault.create_vault(
+    return _az_created(az_keyvault.create_vault(
         client,
         spec["name"],
         group,
-        location=spec.get("region") or DEFAULT_AZURE_LOCATION,
+        location=_az_location(spec),
         secure_by_default=spec.get("secure_by_default", True),
-    )
+    ))
 
 
 def _az_keyvault_delete(client, resource_id, options):
@@ -1320,14 +1515,14 @@ def _az_vnet_create(client, spec):
             "already exist."
         ), []
 
-    return az_vnet.create_vnet(
+    return _az_created(az_vnet.create_vnet(
         client,
         spec.get("name"),
         group,
-        location=spec.get("region") or spec.get("location") or "eastus",
+        location=_az_location(spec),
         address_prefixes=spec.get("address_prefixes"),
         subnets=spec.get("subnets"),
-    )
+    ))
 
 
 def _az_vnet_delete(client, resource_id, options):
@@ -1381,11 +1576,11 @@ def _az_vm_create(client, spec):
             "already exist."
         ), []
 
-    return az_vm.create_vm(
+    return _az_created(az_vm.create_vm(
         client,
         spec.get("name"),
         group,
-        location=spec.get("region") or spec.get("location") or "eastus",
+        location=_az_location(spec),
         vm_size=spec.get("vm_size"),
         admin_username=spec.get("admin_username") or "azureuser",
         # public_key, matching the AWS key-pair field. There is deliberately no
@@ -1398,7 +1593,7 @@ def _az_vm_create(client, spec):
         open_ports=spec.get("open_ports"),
         allowed_source=spec.get("allowed_source"),
         encryption_at_host=bool(spec.get("encryption_at_host")),
-    )
+    ))
 
 
 def _az_vm_delete(client, resource_id, options):
@@ -1409,6 +1604,30 @@ def _az_vm_delete(client, resource_id, options):
 def _az_vm_cleanup(client, options):
     return az_vm.cleanup_all_managed_vms(
         client, force=options.get("force", False))
+
+
+def _size_choices(offered, allowlist):
+    """A machine size menu that says what each size is.
+
+    `offered` carries vCPU and memory from resource_skus; the fallback is the
+    bare allowlist, used when that call could not be made. A size with no
+    numbers is labelled with its name alone rather than with a guess - the
+    menu being less helpful is better than it being wrong about how big a
+    machine is.
+    """
+    if not offered:
+        return [{"value": name, "label": name} for name in sorted(allowlist)]
+
+    choices = []
+    for size in offered:
+        vcpus, memory = size.get("vcpus"), size.get("memory_gb")
+        if vcpus and memory:
+            core = "core" if vcpus == 1 else "cores"
+            label = f"{size['name']} — {vcpus} {core}, {memory} GB memory"
+        else:
+            label = size["name"]
+        choices.append({"value": size["name"], "label": label})
+    return choices
 
 
 def _az_vm_options(client):
@@ -1439,11 +1658,21 @@ def _az_vm_options(client):
     # wrong region is a worse menu than this, but an empty one is worse still,
     # so an unanswerable lookup falls back to the allowlist rather than
     # offering nothing.
-    startable = az_vm.available_sizes(client, DEFAULT_AZURE_LOCATION)
+    startable = az_vm.offered_sizes(client, DEFAULT_AZURE_LOCATION)
 
     return {
-        "vm_size": [{"value": size, "label": size}
-                    for size in (startable or sorted(az_vm.ALLOWED_VM_SIZES))],
+        # Labelled with what the machine is, not only what Azure calls it.
+        #
+        # The name is jargon of the purest kind - family, generation, memory
+        # ratio and feature letters, all of which have to be already known to
+        # be read - and this project's own style note says findings are aimed
+        # at somebody who does not know the jargon. The port menu two lines
+        # down says "22 - SSH, the remote login door for Linux servers"; the
+        # size menu was saying "Standard_F1als_v7" twice.
+        #
+        # The numbers arrive on the same call that decides which sizes are
+        # offered at all, so this costs nothing extra.
+        "vm_size": _size_choices(startable, az_vm.ALLOWED_VM_SIZES),
         "open_ports": _port_choices(),
         "allowed_source": [
             {"value": "*", "label": "* — the entire internet"},

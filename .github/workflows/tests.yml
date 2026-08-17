@@ -65,13 +65,12 @@ jobs:
           AWS_DEFAULT_REGION: us-east-1
         run: pytest -q
 
-      - name: Run the Azure half's own suite
-        # Added when the two halves were merged. CI ran only backend/ before
-        # that, so azure_scanner's six tests had never run here at all - a
-        # green tick meant half the repository was tested.
-        #
-        # Run from the root because that is where those modules live, and
-        # without installing the Azure SDK: test_azure_scanner.py exercises
-        # the rule logic, which touches no cloud. If it ever needs the SDK,
-        # that is a sign a rule has grown a dependency it should not have.
-        run: pytest test_azure_scanner.py -q
+      # The job that ran the Azure half's own suite is gone with the modules it
+      # ran. test_azure_scanner.py covered azure_scanner.py, which covered the
+      # root application; all of it is retired, and backend/scanner/ has the
+      # rules that replaced it under CI's existing job above.
+      #
+      # Worth knowing why this job existed: CI ran only backend/ before the two
+      # halves merged, so those six tests had never run here at all and a green
+      # tick meant half the repository was tested. That is not a hazard this
+      # deletion reintroduces - there is no longer a second half to miss.

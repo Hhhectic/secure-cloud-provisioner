@@ -31,6 +31,16 @@
 
 <div class="drift" aria-hidden="true"><i></i><i></i><i></i></div>
 
+<!-- Three things a person comes here to do, rather than fourteen nouns.
+     "Resources" was one list mixing the form you fill in to make something
+     with the list you read to find out what is wrong with it, and those are
+     different jobs done at different times. -->
+<nav id="tabs" class="tabs" role="tablist">
+  <button class="tab" data-tab="dashboard" role="tab">Dashboard</button>
+  <button class="tab" data-tab="create" role="tab">Create</button>
+  <button class="tab" data-tab="audit" role="tab">Audit</button>
+</nav>
+
 <div class="context">
   <label id="scope-box"></label>
   <p id="scope-note"></p>
@@ -38,20 +48,40 @@
 
 <main>
   <aside id="sidebar">
-    <div class="side-head">Resources</div>
+    <div class="side-head" id="side-head">Resources</div>
     <nav id="types"></nav>
     <div id="side-foot"></div>
   </aside>
 
   <div class="stack">
+    <section id="dashboard" class="hidden">
+      <div class="card-head">
+        <h2>Dashboard</h2>
+        <span class="controls">
+          <button id="scan-all" class="quiet">Scan everything</button>
+          <button id="dash-refresh" class="quiet">Refresh</button>
+        </span>
+      </div>
+      <div id="dash-body"></div>
+    </section>
+
     <section id="listing">
       <div class="card-head">
         <h2 id="listing-title">Resources</h2>
         <span class="controls">
           <span id="audit-badge" class="audit-badge hidden">audit only</span>
-          <label><input type="checkbox" id="only-ours" checked>
-            <span id="only-ours-label">only ones this tool made</span></label>
-          <label><input type="checkbox" id="with-scan"> <span>scan each (slow)</span></label>
+          <!-- Two checkboxes stood here and both have gone.
+               "scan each (slow)" moved to the Dashboard: starting a scan and
+               reading its answers are different acts, and a box that silently
+               made opening a list take a minute was the wrong place for the
+               first of them.
+               "only ones this tool made" was on by default, which meant this
+               tab quietly answered a narrower question than the Dashboard
+               beside it - the counts there have always been every resource -
+               so the same account read as two different accounts depending on
+               which tab you were looking at. An audit that hides what it did
+               not create is the wrong default for a tool whose whole job is
+               finding what is wrong in an account. -->
           <button id="refresh" class="quiet">Refresh</button>
         </span>
       </div>
@@ -84,7 +114,16 @@
         <h2>Detail</h2>
         <span id="detail-id" class="muted"></span>
       </div>
-      <div id="detail-body" class="muted">Pick something from the list.</div>
+      <!-- Replaced by resetDetail() as soon as app.js runs. Kept as plain
+           text so the panel is not empty in the half-second before it does,
+           and so it says something if the script fails to load at all. -->
+      <div id="detail-body">
+        <div class="nothing">
+          <p class="nothing-line">Nothing selected.</p>
+          <p class="nothing-note">Pick a row above to see what it is and what
+            is wrong with it.</p>
+        </div>
+      </div>
     </section>
 
     <section id="blueprint" class="hidden">

@@ -65,6 +65,11 @@ def _settings(**overrides):
         "password_policy": {
             "minimum_length": 14,
             "passwords_remembered": 24,
+            # An account with nothing wrong with it has an expiry set. Without
+            # this the helper produced a password_never_expires note in every
+            # test that used it - the note firing correctly, against a default
+            # that claimed to be well run and was missing one.
+            "max_age_days": 90,
         },
         "users": [],
         "credentials": {},
@@ -923,10 +928,28 @@ def test_the_benchmark_version_these_ids_were_read_against_has_not_moved():
     assert controls.CIS_VERSION == "5.0.0"
 
 
+# IAM findings that are deliberately uncited, and why each one is.
+#
+# This used to be empty, and the test below asserted every finding was cited on
+# the grounds that CIS section 1 covers all of IAM. Two findings ported from
+# Prowler broke that, and neither is a forgotten citation:
+#
+#   password_never_expires - CIS carried a password-expiry recommendation in
+#     v1.2 and deliberately dropped it by v3.0.0, because forced rotation
+#     produces predictable variations. Citing a control the benchmark removed
+#     on purpose would be worse than citing none.
+#   user_virtual_mfa - CIS 1.6 asks for hardware MFA on the root user only.
+#     Stretching it to cover every user would claim a control for a population
+#     it does not name.
+#
+# Named individually rather than allowing "some findings are uncited", so a
+# citation that really was forgotten still fails this.
+UNCITED_BY_DESIGN = {"password_never_expires", "user_virtual_mfa"}
+
+
 def test_every_iam_finding_carries_a_citation():
-    """Unlike the firewall rules, there is no ordinary-good-practice finding
-    here: section 1 covers all of it, so an uncited finding would mean a
-    citation was forgotten rather than deliberately omitted."""
+    """Section 1 covers nearly all of IAM, so an uncited finding is a forgotten
+    citation unless it is one of the two named above."""
     warnings = check_account(_settings(
         summary={"root_access_keys": 1, "root_mfa_enabled": False},
         root_hardware_mfa=False,
@@ -944,7 +967,13 @@ def test_every_iam_finding_carries_a_citation():
         support_role_exists=False,
         cloudshell_full_access=True,
     ))
-    assert len(cited(warnings)) == len(warnings)
+    expected = [w for w in warnings
+                if w["rule"]["setting"] not in UNCITED_BY_DESIGN]
+    assert len(cited(warnings)) == len(expected), (
+        "uncited: "
+        + str(sorted(w["rule"]["setting"] for w in warnings
+                     if not w.get("control")))
+    )
     assert worst_level(warnings) == CRITICAL
 
 

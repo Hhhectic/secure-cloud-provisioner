@@ -85,6 +85,10 @@ def read_vnet_for_scanning(client, name):
     try:
         found = client.virtual_networks.get(group, short)
     except Exception as e:
+        # Refusal before absence, the same order _name_is_taken already uses
+        # below: "not allowed" is not "not there".
+        if denied(e):
+            raise not_allowed_to_look(group, "virtual networks") from e
         # Matching the status code rather than catching ResourceNotFoundError,
         # which lives behind an import this module does not make at scope.
         if getattr(e, "status_code", None) == 404:

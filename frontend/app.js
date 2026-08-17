@@ -12,8 +12,22 @@
 
 const API = "..";
 
-const state = { types: [], type: null, cloud: "aws", region: "us-east-1",
-                options: {}, createInputs: null };
+const state = { types: [], type: null, tab: "dashboard", cloud: "aws",
+                region: "us-east-1", options: {}, createInputs: null,
+                /* What the last dashboard scan found, per type.
+                   `{ [typeKey]: { at: Date, byId: Map<id, counts> } }`
+
+                   Scanning is something you set going, and the tab you read
+                   the answers on is a different place from the button that
+                   starts it. So the Audit list no longer scans: it shows what
+                   the dashboard found, and says plainly when that is nothing
+                   yet rather than printing a verdict nobody asked for.
+
+                   Cleared per type whenever something in that type is
+                   created, fixed or deleted, because a cached verdict about a
+                   resource that has since changed is worse than no verdict -
+                   it is a wrong one with a timestamp on it. */
+                scans: {} };
 
 // The blueprint's sidebar key. Deliberately not a resource type: it composes
 // six of them and the registry has no entry for it, so nothing must ever ask
@@ -57,6 +71,70 @@ async function api(path, options = {}) {
   return body;
 }
 
+/* The same request, read a line at a time.
+
+   `onStep` is called with each progress line as the server produces it, and
+   the final object is returned like api() would. A cascade delete spends four
+   or five minutes inside one request, and before this the page showed nothing
+   for the whole of it - which is what somebody waiting cannot tell apart from
+   a hang, and reported as one.
+
+   Falls back to reading the whole body when there is no stream to read. That
+   is not defensive padding: the jsdom suite replaces fetch with a stub that
+   answers a plain object, and a page that only worked against a real
+   streaming server would be untestable there. */
+async function apiStream(path, options = {}, onStep = () => {}) {
+  const sep = path.includes("?") ? "&" : "?";
+  const res = await fetch(`${API}${path}${sep}region=${encodeURIComponent(state.region)}`, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+
+  if (!res.ok || !res.body || !res.body.getReader) {
+    // A refusal still arrives as one JSON object with a status on it, because
+    // everything that can refuse this does so before the stream begins.
+    let body = null;
+    try { body = await res.json(); } catch { /* empty body */ }
+    if (!res.ok) {
+      const detail = body && body.detail;
+      const err = new Error(
+        typeof detail === "string" ? detail
+          : detail && detail.message ? detail.message
+          : `HTTP ${res.status}`);
+      err.status = res.status;
+      err.detail = detail;
+      throw err;
+    }
+    return body;
+  }
+
+  const reader = res.body.getReader();
+  const decode = new TextDecoder();
+  let pending = "";
+  let last = null;
+
+  // A chunk boundary lands wherever the network puts it, so the tail of a
+  // read is usually half a line. It is held back until the newline arrives.
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    pending += decode.decode(value, { stream: true });
+
+    const lines = pending.split("\n");
+    pending = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const parsed = JSON.parse(line);
+      if (parsed.step) onStep(parsed.step);
+      else last = parsed;
+    }
+  }
+  if (pending.trim()) last = JSON.parse(pending);
+
+  if (last && last.ok === false) throw new Error(last.message);
+  return last;
+}
+
 function toast(message, isError = false) {
   const el = $("toast");
   el.textContent = message;
@@ -70,6 +148,43 @@ function text(tag, content, className) {
   el.textContent = content;
   if (className) el.className = className;
   return el;
+}
+
+/* A block of commands, with a button that puts them on the clipboard.
+
+   The bastion's connect and teardown steps were rendered as a <pre> and left
+   there, which meant the one path this tool recommends - generate the keys in
+   the browser, build from the page - ended in transcribing six commands by
+   hand from a screen. Every one of them carries a generated key filename or
+   an address, so a typo is silent until ssh fails on something that looks
+   right. */
+function commandBlock(lines) {
+  const wrap = document.createElement("div");
+  const body = lines.join("\n");
+  const pre = text("pre", body, "mono-block");
+
+  const copy = document.createElement("button");
+  copy.className = "quiet";
+  copy.textContent = "Copy";
+  copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(body);
+      toast("Copied.");
+    } catch {
+      // A page served over plain HTTP on a machine without clipboard
+      // permission cannot write to it, and failing silently would look like
+      // the button doing nothing.
+      const range = document.createRange();
+      range.selectNodeContents(pre);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      toast("Clipboard unavailable — the text is selected, copy it.", true);
+    }
+  };
+
+  wrap.append(pre, copy);
+  return wrap;
 }
 
 /* A menu of known answers plus an escape hatch.
@@ -110,7 +225,20 @@ function multiChoice(options) {
   select.multiple = true;
   select.size = Math.min(Math.max(options.length, 2), 5);
   for (const o of options) select.append(new Option(o.label, o.value));
-  select.value = () => [...select.selectedOptions].map((o) => o.value);
+  // No `select.value = () => …` here, which is what this used to do and which
+  // silently threw away every choice after the first.
+  //
+  // `value` is an accessor on HTMLSelectElement.prototype, so assigning to it
+  // goes through the SETTER and never creates an own property. `typeof
+  // el.value` therefore stayed "string", collectSpec took its plain-<input>
+  // branch and split that string on commas - and a multi-select's value getter
+  // returns only the first selected option and never contains a comma. Picking
+  // 22, 80 and 443 submitted ["22"].
+  //
+  // The same idiom works a few lines up on a <span> and on the rule rows,
+  // because those elements have no `value` accessor to collide with, which is
+  // why this looked like a working pattern. collectSpec reads selectedOptions
+  // directly now, so there is nothing to attach.
   return select;
 }
 
@@ -134,7 +262,7 @@ async function checkHealth() {
    server answers, so this only ever reports what the last list call said. An
    Azure without credentials answers 503 with a sentence naming the four
    variables, and that sentence is better than anything invented here. */
-function setCloud(cloud) {
+function setCloud(cloud, { repaint = true } = {}) {
   state.cloud = cloud;
   document.body.classList.toggle("cloud-azure", cloud === "azure");
   if (cloud === "aws") {
@@ -146,7 +274,23 @@ function setCloud(cloud) {
     $("health").className = "pill";
   }
   renderScope();
-  renderTypes();
+
+  /* `repaint` is false exactly once: during boot, where loadTypes calls
+     selectTab immediately afterwards and that repaints anyway.
+
+     Without it the page loaded the current tab twice. On the dashboard, which
+     now scans as it opens, that was eighteen scan requests for nine types -
+     every resource in the account judged twice on every page load, against a
+     real account, for nothing. Found by counting requests in a browser after
+     a test insisted there should be one per type. */
+  if (!repaint) return;
+
+  // Switching cloud on the dashboard reloads the dashboard, not the picker.
+  // Repainting a hidden sidebar and leaving the visible panel showing the
+  // other account's counts is how "which cloud am I looking at" becomes a
+  // question again, which is what the toggle exists to answer.
+  if (state.tab === "dashboard") loadDashboard();
+  else renderTypes();
 }
 
 /* What the header pill says about the cloud in front of you.
@@ -213,6 +357,15 @@ function renderScope() {
     // networks.
     select.onchange = () => {
       state.region = select.value;
+      // Every cached verdict was taken in the region it was taken in, and the
+      // cache is keyed by type alone. Selecting the dashboard rebuilds it, so
+      // nothing stale is on screen today - but the Audit list reads this cache
+      // immediately below, and it matches on a resource's id. Most AWS ids are
+      // region-unique and simply miss, which shows honestly as "not scanned";
+      // an id that is not - an alarm is named, not numbered - would match the
+      // other region's row and print its verdict. Dropped rather than reasoned
+      // about per type, for the reason forgetScan already gives.
+      state.scans = {};
       buildCreateForm();
       loadList();
     };
@@ -237,7 +390,9 @@ async function loadTypes() {
 
   const clouds = cloudsPresent();
   $("cloud-toggle").classList.toggle("hidden", clouds.length < 2);
-  setCloud(clouds.includes(state.cloud) ? state.cloud : (clouds[0] || "aws"));
+  setCloud(clouds.includes(state.cloud) ? state.cloud : (clouds[0] || "aws"),
+           { repaint: false });
+  selectTab(state.tab);
 }
 
 /* One cloud's types, plus the blueprint where there is one.
@@ -247,21 +402,95 @@ async function loadTypes() {
    for. It used to be a panel rendered under every tab, including the five
    Azure ones, where it advertised an AWS architecture at a subscription that
    cannot build it. */
+/* Which tab a resource type belongs on.
+
+   Create is where things begin and Audit is where you look at what exists, so
+   a type that cannot be created has no business on the Create tab - a form
+   that always answers 405 is an advertised endpoint that can never work,
+   which is the reasoning `read_only` already carries on the server.
+
+   Everything appears under Audit, creatable or not. Scanning a bucket you
+   made a minute ago and auditing a role you did not are the same activity. */
+function belongsOn(type, tab) {
+  if (tab === "audit") return true;
+  if (tab === "create") return !type.read_only;
+  return false;
+}
+
+/* Which panels each tab is made of.
+
+   The sections are laid out once in index.html and shown or hidden, rather
+   than moved between tabs. Moving them would mean re-creating the create form
+   and re-fetching the list on every tab change, and the form is the one thing
+   on this page somebody may have half-filled in. */
+const PANELS = {
+  dashboard: ["dashboard"],
+  create: ["create"],
+  audit: ["listing", "detail"],
+};
+
+function selectTab(name) {
+  state.tab = name;
+
+  for (const b of $("tabs").children) {
+    const on = b.dataset.tab === name;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", String(on));
+  }
+
+  // The blueprint builds six resources, so it is a Create thing and is
+  // reached from the sidebar there. It hides itself here and selectType puts
+  // it back when it is the chosen entry.
+  $("blueprint").classList.add("hidden");
+  for (const id of ["dashboard", "listing", "detail", "create"]) {
+    $(id).classList.toggle("hidden", !(PANELS[name] || []).includes(id));
+  }
+
+  // The dashboard is about the whole account rather than one type, so it has
+  // no use for a resource picker and the region control means nothing there.
+  const picking = name !== "dashboard";
+  $("sidebar").classList.toggle("hidden", !picking);
+  document.body.classList.toggle("no-picker", !picking);
+  $("side-head").textContent = name === "create" ? "Make" : "Inspect";
+
+  // The region control belongs to a request about a resource. The dashboard
+  // asks about every type at once and the scope note underneath it talks
+  // about creating and deleting, neither of which happens there.
+  $("scope-box").classList.toggle("hidden", !picking);
+
+  if (name === "dashboard") {
+    loadDashboard();
+    return;
+  }
+  renderTypes();
+}
+
 function renderTypes() {
   const nav = $("types");
   nav.replaceChildren();
 
   for (const t of state.types) {
     if (providerOf(t) !== state.cloud) continue;
+    if (!belongsOn(t, state.tab)) continue;
     const b = document.createElement("button");
     b.dataset.key = t.key;
     b.append(text("span", t.short_label || t.label));
-    if (t.read_only) b.append(text("span", "audit", "tag"));
+    // No "audit" tag. It earned its place when one sidebar held every type
+    // and the tag was the only thing saying which could not be created; the
+    // tab split says that better, by not offering those types on Create at
+    // all. What was left was the word "audit" tagged onto three entries in a
+    // list headed "Inspect" inside a tab called "Audit" - the same fact three
+    // times, none of which was the one that matters here. The consequence of
+    // being read-only is no Delete button and no cleanup, and the "audit
+    // only" badge in the listing header says so at the moment you are looking
+    // at the list it applies to.
     b.onclick = () => selectType(t.key);
     nav.append(b);
   }
 
-  if (state.cloud === "aws") {
+  // Six resources at once, and all of them AWS. It is a way of making things,
+  // so it is offered where things are made.
+  if (state.cloud === "aws" && state.tab === "create") {
     const b = document.createElement("button");
     b.dataset.key = BLUEPRINT;
     b.className = "set-apart";
@@ -287,10 +516,10 @@ function selectType(key) {
   }
 
   // The blueprint is six resources at once rather than one of anything, so it
-  // replaces the three panels instead of appearing under them.
+  // replaces this tab's panels instead of appearing under them.
   const isBlueprint = key === BLUEPRINT;
   $("blueprint").classList.toggle("hidden", !isBlueprint);
-  for (const id of ["listing", "detail", "create"]) {
+  for (const id of PANELS[state.tab] || []) {
     $(id).classList.toggle("hidden", isBlueprint);
   }
   if (isBlueprint) {
@@ -298,63 +527,546 @@ function selectType(key) {
     return;
   }
 
-  // How this list can be narrowed, and what to call it, come from the server
-  // rather than from read_only. They are different questions: a role cannot
-  // be changed by this tool and can still be filtered usefully, and inferring
-  // one from the other left the role list showing AWS's own service roles
-  // with no way to hide them.
-  const filterLabel = state.types.find((t) => t.key === key).only_ours_label;
-  const box = $("only-ours");
-
-  box.disabled = !filterLabel;
-  box.checked = Boolean(filterLabel);
-  $("only-ours-label").textContent =
-    filterLabel || "nothing to narrow this list by";
-
   const known = currentType();
   $("audit-badge").classList.toggle("hidden", !known.read_only);
   $("detail-id").textContent = "";
-  $("detail-body").replaceChildren(text("p", "Pick something from the list.", "muted"));
-  buildCreateForm();
-  loadList();
+  resetDetail();
+
+  // Only the work this tab actually shows. Building the form while the Audit
+  // tab is open fetches that type's option menus - every machine size the
+  // subscription can start, which is a five to eight second call - to fill in
+  // a form nobody can see.
+  if (state.tab === "create") buildCreateForm();
+  if (state.tab === "audit") loadList();
+}
+
+// --------------------------------------------------------------- dashboard
+
+/* What exists, and what this tool has been doing.
+
+   Deliberately not a scan. Counting what is in the account is one call per
+   type and answers in a second; judging it is seven AWS calls per bucket,
+   one after another, which CLAUDE.md already records as visibly slow past a
+   demo account. A landing page that takes a minute is a landing page people
+   learn to skip, so the posture is behind a button and arrives per type as
+   each answer lands.
+
+   The two are kept visibly apart. A type that has not been scanned says so
+   rather than showing a zero, because "nothing found" and "nothing looked
+   for" are the one confusion this tool cannot afford - it is the same bug the
+   list had on its first load, where every row read as clean because
+   worst_level is null in both cases. */
+async function loadDashboard() {
+  const body = $("dash-body");
+  body.replaceChildren(text("p", "Loading…", "muted"));
+
+  const mine = state.types.filter((t) => providerOf(t) === state.cloud);
+
+  const grid = document.createElement("div");
+  grid.className = "dash-grid";
+  const cards = {};
+
+  for (const t of mine) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "dash-card";
+    card.append(text("div", t.short_label || t.label, "dash-name"));
+    card.append(text("div", "—", "dash-count"));
+    card.append(text("div", "counting…", "dash-state"));
+    // The dashboard is a way in, not a dead end: a card is the resource it
+    // names, so clicking one opens it where it can be acted on.
+    //
+    // The type is set before the tab changes, because selectTab renders the
+    // picker and picks the first entry when the current one is not in it -
+    // so doing it the other way round loaded a type nobody asked for and
+    // then loaded this one on top, two requests for one click.
+    card.onclick = () => { state.type = t.key; selectTab("audit"); };
+    cards[t.key] = card;
+    grid.append(card);
+  }
+
+  body.replaceChildren();
+
+  /* One sentence saying how the account stands.
+
+     The grid answers "how many of each", which took nine cards to add up into
+     the thing somebody actually came to find out. This says it once, at the
+     top, and the cards below it are the breakdown.
+
+     It is filled in by the scan, not by the count, and says so until then -
+     the whole panel turns on never printing a verdict before the question has
+     been asked. */
+  const verdict = document.createElement("div");
+  verdict.className = "verdict";
+  verdict.append(text("p", "Reading this account…", "verdict-line"));
+  body.append(verdict);
+
+  body.append(text("h3", "What is in this account"));
+  body.append(grid);
+
+  // Under the cards, not beside the heading. It describes every one of them,
+  // and sitting next to the title it read as a caption on the title - and
+  // pushed that title off its own line as the time got longer.
+  body.append(text("p", "counting…", "scan-when"));
+
+  const activity = document.createElement("div");
+  body.append(text("h3", "Recent activity"));
+  body.append(activity);
+  loadActivity(activity);
+
+  // One request per type, all at once. The server does each list serially
+  // inside itself; firing them together is what keeps the whole grid to about
+  // the time of its slowest type rather than the sum of all of them.
+  await Promise.all(mine.map(async (t) => {
+    const card = cards[t.key];
+    try {
+      const found = await api(`/resources/${t.key}?only_ours=false&with_scan=false`);
+      const n = (found.resources || []).length;
+      card.querySelector(".dash-count").textContent = String(n);
+      card.querySelector(".dash-state").textContent =
+        n === 0 ? "none" : "not scanned";
+      card.dataset.count = String(n);
+    } catch (e) {
+      card.querySelector(".dash-count").textContent = "—";
+      card.querySelector(".dash-state").textContent = "unreachable";
+      card.classList.add("unreachable");
+      card.title = e.message;
+    }
+  }));
+
+  reportCloudReach(!Object.values(cards).every((c) => c.classList.contains("unreachable")));
+
+  /* And then judge them, without being asked.
+
+     This was a button on the reasoning that scanning is the slow path - seven
+     AWS calls per bucket, one after another, which this repository records as
+     visibly slow past a demo account. Measured rather than assumed: 3.4
+     seconds for the whole AWS account and 3.6 for the whole subscription,
+     because the types are asked in parallel and only the resources within one
+     type are serial.
+
+     Three seconds is not a reason to make somebody press a button, and the
+     card that says "not scanned" is a card that has not answered the question
+     the page exists to answer. The counts are drawn first and the verdicts
+     land on top of them, so nothing waits on the scan to be readable. */
+  scanEverything();
+}
+
+/* Fills in the posture, per type, as each answer arrives.
+
+   Run on load and again on demand. Each type is asked in parallel and every
+   card updates the moment its own type comes back, so the grid takes about
+   the time of its slowest type rather than the sum of all of them - which is
+   what makes a whole account three seconds instead of thirty. */
+async function scanEverything() {
+  const button = $("scan-all");
+  button.disabled = true;
+  button.textContent = "Scanning…";
+
+  const when = $("dash-body").querySelector(".scan-when");
+  if (when) when.textContent = "scanning…";
+
+  const headline = $("dash-body").querySelector(".verdict-line");
+  if (headline) headline.textContent = "Scanning…";
+
+  const mine = state.types.filter((t) => providerOf(t) === state.cloud);
+  const cards = [...$("dash-body").querySelectorAll(".dash-card")];
+  const byName = new Map(cards.map((c) =>
+    [c.querySelector(".dash-name").textContent, c]));
+
+  for (const card of cards) card.querySelector(".dash-state").textContent = "scanning…";
+
+  // What the headline is made of. Unreachable is counted separately and on
+  // purpose: a type that could not be read is not a type with nothing wrong
+  // in it, and the difference is the one this tool must never blur.
+  // The dashboard leads with what is still outstanding, and puts what has been
+  // accepted in brackets after it.
+  //
+  // This panel used to count an accepted critical as a critical here, on the
+  // grounds that anything else was the suppression scanner/acknowledged.py
+  // exists to refuse. That reasoning does not survive contact with what an
+  // acknowledgement is for: somebody has already looked at the finding and
+  // written down why they are living with it, so repeating it at full volume
+  // on the landing page is telling them something they went to the trouble of
+  // recording that they know. A dashboard that never gets quieter as you work
+  // through it makes the mechanism pointless.
+  //
+  // Nothing is hidden by this, which is the line that matters. The accepted
+  // counts are on the card, the headline says they are not counted above, and
+  // the detail panel still lists every one of them at its own severity with
+  // the reason attached - see summarize() and the tallies, which are unchanged.
+  const total = { critical: 0, warning: 0, accepted: 0,
+                  acceptedCritical: 0, acceptedWarning: 0,
+                  resources: 0, unreachable: [] };
+
+  await Promise.all(mine.map(async (t) => {
+    const card = byName.get(t.short_label || t.label);
+    if (!card) return;
+    try {
+      const found = await api(`/resources/${t.key}?only_ours=false&with_scan=true`);
+      const rows = found.resources || [];
+      let critical = 0, warning = 0, accepted = 0;
+      let acceptedCritical = 0, acceptedWarning = 0;
+
+      // Kept per resource, not just totalled. This is the only scan the page
+      // runs over a whole type, so the Audit tab reads its answers rather
+      // than asking for them again - which is what lets that tab be a place
+      // findings are read instead of a place they are fetched.
+      const byId = new Map();
+      let unreadable = 0;
+      for (const r of rows) {
+        if (!r.counts) {
+          // A row the server could scan nothing of. It arrives with counts
+          // null and `unreachable` naming the permission, because api/app.py
+          // returns it rather than dropping it - a resource you cannot audit
+          // is exactly the one worth knowing about.
+          //
+          // Skipping it silently folded it into the clean total: two storage
+          // accounts, one unreadable, rendered as "clean" under the headline
+          // "Nothing critical or warning". That is the one thing this page
+          // must never do, and it is the same failure as the "not scanned"
+          // verdict this file already learned - counted here so the card and
+          // the headline can both say the scan is short.
+          unreadable += 1;
+          continue;
+        }
+        byId.set(r.id, r.counts);
+        critical += r.counts.critical || 0;
+        warning += r.counts.warning || 0;
+        accepted += r.counts.acknowledged || 0;
+        acceptedCritical += (r.counts.accepted || {}).critical || 0;
+        acceptedWarning += (r.counts.accepted || {}).warning || 0;
+      }
+      state.scans[t.key] = { at: new Date(), byId };
+
+      // Named in the headline's own vocabulary. renderVerdict already refuses
+      // the clean wording when anything is in here; what was missing was ever
+      // putting a partly-read type into it, which only whole-type failures did.
+      if (unreadable) total.unreachable.push(t.short_label || t.label);
+
+      total.critical += critical;
+      total.warning += warning;
+      total.accepted += accepted;
+      total.acceptedCritical += acceptedCritical;
+      total.acceptedWarning += acceptedWarning;
+      total.resources += rows.length;
+
+      // Both numbers where there are both. "2 critical" alone on a type that
+      // also has nine warnings is a true sentence that hides the larger half,
+      // and the point of the card is to be read without opening it.
+      // What is left to do, then what has been decided about, in brackets.
+      //
+      // "2 critical, 2 warning, 3 accepted" was the first attempt and read as
+      // seven findings without saying which three were spoken for. Attaching
+      // them per severity fixed the ambiguity and still made you subtract in
+      // your head to find the one thing outstanding. Leading with the
+      // outstanding count answers the question the card is actually asked.
+      const outstandingCritical = critical - acceptedCritical;
+      const outstandingWarning = warning - acceptedWarning;
+
+      const parts = [];
+      if (outstandingCritical) parts.push(`${outstandingCritical} critical`);
+      if (outstandingWarning) parts.push(`${outstandingWarning} warning`);
+      // Last, and never omitted: a card reading "clean" over a type where one
+      // resource was never looked at is the verdict this page did not earn.
+      if (unreadable) parts.push(`${unreadable} could not be read`);
+
+      // Abbreviated because the card is 175px and this trails a line that has
+      // already spelled at least one severity out in full.
+      const decided = [];
+      if (acceptedCritical) decided.push(`${acceptedCritical} C`);
+      if (acceptedWarning) decided.push(`${acceptedWarning} W`);
+      const bracket = decided.length ? ` (${decided.join(", ")} accepted)` : "";
+
+      const where = card.querySelector(".dash-state");
+      where.textContent =
+        rows.length === 0 ? "none"
+        // Something to do, and possibly something already decided.
+        : parts.length ? parts.join(", ") + bracket
+        // Nothing outstanding, but findings exist and somebody accepted them.
+        // Deliberately not "clean": there is something here, it has just been
+        // answered, and the two are different states.
+        : decided.length ? `all accepted (${decided.join(", ")})`
+        : "clean";
+
+      // Styled by what is left, for the same reason the words are. A red card
+      // over the word "clean" - or over an outstanding count of zero - is a
+      // contradiction the eye resolves before the text is read.
+      card.classList.toggle("has-critical", outstandingCritical > 0);
+      card.classList.toggle("has-warning",
+        !outstandingCritical && outstandingWarning > 0);
+      // Only where there was genuinely nothing to find. A type whose findings
+      // were all accepted is not clean, and is left neutral instead.
+      card.classList.toggle("clean",
+        rows.length > 0 && !critical && !warning && !unreadable);
+      // Cleared explicitly: loadDashboard's counting pass adds this class when
+      // its own list call fails, and a scan that then succeeds used to leave
+      // the card styled unreachable while printing a real verdict.
+      card.classList.toggle("unreachable", unreadable > 0);
+    } catch (e) {
+      total.unreachable.push(t.short_label || t.label);
+      card.querySelector(".dash-state").textContent = "unreachable";
+      card.classList.add("unreachable");
+    }
+  }));
+
+  if (headline) renderVerdict(headline, total);
+
+  if (when) {
+    when.textContent =
+      `since last scan, ${new Date().toLocaleTimeString()}`;
+  }
+  button.disabled = false;
+  button.textContent = "Scan again";
+}
+
+/* How the account stands, in one sentence.
+
+   The wording is the whole of this function and it is the part that can go
+   wrong quietly. Three rules it must not break:
+
+   A type that could not be read is not a type with nothing wrong in it. If
+   anything was unreachable the headline says so and never claims the account
+   is clean, because a partial scan that reads as a pass is the one way this
+   tool can actively mislead - the same rule the IAM scanner states and the
+   list learned the hard way.
+
+   An empty account is not a safe one, it is an empty one. "Nothing to report"
+   where there is nothing to report at all would be read as a verdict on
+   resources that do not exist.
+
+   And warnings are not hidden behind a clean bill on criticals. No criticals
+   with fourteen warnings is good news and unfinished news, so it says both. */
+function renderVerdict(into, total) {
+  const parent = into.parentElement;
+  parent.classList.remove("is-critical", "is-warning", "is-clean");
+  into.replaceChildren();
+
+  const say = (main, level, note) => {
+    into.textContent = main;
+    if (level) parent.classList.add(level);
+    if (note) {
+      const p = text("p", note, "verdict-note");
+      parent.append(p);
+    }
+  };
+
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const missed = total.unreachable.length
+    ? `${plural(total.unreachable.length, "type")} could not be read `
+      + `(${total.unreachable.join(", ")}), so this is not the whole account.`
+    : null;
+
+  // Outstanding, matching the cards. A headline counting accepted findings
+  // while the grid below leaves them out would be the two halves of one panel
+  // disagreeing, which is worse than either answer on its own.
+  const critical = total.critical - total.acceptedCritical;
+  const warning = total.warning - total.acceptedWarning;
+
+  // "and are not counted above" is the load-bearing half of this sentence.
+  // Without it "1 critical finding" beside "2 critical accepted" leaves the
+  // reader unable to tell whether the 1 includes the 2.
+  const decided = [];
+  if (total.acceptedCritical) decided.push(plural(total.acceptedCritical, "critical"));
+  if (total.acceptedWarning) decided.push(plural(total.acceptedWarning, "warning"));
+  const spokenFor = decided.length
+    ? `${decided.join(" and ")} already accepted, and not counted above.`
+    : null;
+
+  if (critical) {
+    say(plural(critical, "critical finding"), "is-critical",
+        [warning ? `${plural(warning, "warning")} as well.` : null,
+         spokenFor, missed].filter(Boolean).join(" "));
+    return;
+  }
+
+  if (warning) {
+    say(`No critical findings, ${plural(warning, "warning")}`,
+        "is-warning", [spokenFor, missed].filter(Boolean).join(" ") || null);
+    return;
+  }
+
+  if (total.unreachable.length) {
+    // Nothing found, and not everything looked at. That is not a clean
+    // account; it is an unfinished scan, and it says the second thing.
+    say("Scan incomplete", null, missed);
+    return;
+  }
+
+  if (!total.resources) {
+    say("Nothing in this account yet", null,
+        "No resources of any type, so there is nothing to judge.");
+    return;
+  }
+
+  if (total.accepted) {
+    // Everything found has been answered. Not the same as nothing being
+    // found, and it must not borrow that wording: the difference is a set of
+    // decisions somebody made, which are worth going back to.
+    say("Nothing outstanding", null,
+        `${spokenFor} Everything found here has been looked at and accepted.`);
+    return;
+  }
+
+  say("Nothing critical or warning", "is-clean",
+      `Across ${plural(total.resources, "resource")}.`);
+}
+
+async function loadActivity(into) {
+  into.replaceChildren(text("p", "Loading…", "muted"));
+  let body;
+  try {
+    body = await api("/activity?limit=12");
+  } catch (e) {
+    into.replaceChildren(text("p", e.message, "muted"));
+    return;
+  }
+
+  const entries = body.activity || [];
+  if (!entries.length) {
+    // Not an error, and worth saying which. A tool that has changed nothing
+    // has an empty log, and so does one whose log cannot be written.
+    into.replaceChildren(text("p",
+      "Nothing yet. This records what the tool changed and what it refused " +
+      "to do — the refusals leave no trace anywhere else, because nothing " +
+      "happened.", "muted"));
+    return;
+  }
+
+  const list = document.createElement("ul");
+  list.className = "activity";
+  for (const e of entries) {
+    const li = document.createElement("li");
+    li.append(text("span", e.outcome || "—", `outcome ${e.outcome || ""}`));
+    li.append(text("span", `${e.method || ""} ${e.path || ""}`.trim(), "what"));
+    li.append(text("span", (e.at || "").replace("T", " ").slice(0, 19), "when"));
+    if (e.why) li.append(text("span", e.why, "why"));
+    list.append(li);
+  }
+  into.replaceChildren(list);
 }
 
 // ----------------------------------------------------------------- listing
+
+/* The detail panel with nothing chosen.
+
+   Written three times as a bare "Pick something from the list." - which is
+   an instruction with no information in it, on the largest empty area of the
+   page. It says what the panel is for now, which is the thing somebody who
+   has not clicked a row yet does not know. */
+function resetDetail() {
+  const waiting = document.createElement("div");
+  waiting.className = "nothing";
+  waiting.append(text("p", "Nothing selected.", "nothing-line"));
+  waiting.append(text("p",
+    "Pick a row above to see what it is, what is wrong with it, and what "
+    + "this tool can fix without being told how.", "nothing-note"));
+  $("detail-body").replaceChildren(waiting);
+}
 
 async function loadList() {
   const known = currentType();
   $("listing-title").textContent = known.short_label || known.label;
 
+  /* Which type this call is about, remembered before the first await.
+
+     Two loads can be in flight at once - opening the Audit tab selects the
+     first type and a dashboard card then selects a different one - and the
+     slower answer used to render whatever came back against whichever type
+     was current by then. That produced a list of one type's resources under
+     another type's cached verdicts, so every row read "not scanned" beneath
+     a note saying when the scan had been taken. Both halves were true and
+     they were about different things. */
+  const forType = state.type;
+
   const list = $("list");
   list.replaceChildren(text("p", "Loading…", "muted"));
 
-  const onlyOurs = $("only-ours").checked;
-  const withScan = $("with-scan").checked;
+  /* Everything in the account, and never a scan.
 
+     only_ours is false rather than a checkbox. It defaulted to true, so this
+     tab quietly answered a narrower question than the Dashboard beside it -
+     whose counts have always been every resource - and the same account read
+     as two different accounts depending which tab you were on. An audit that
+     hides what this tool did not create is also the wrong default outright:
+     the resources somebody else made are the ones nobody has looked at.
+
+     with_scan is false because this tab reads and the Dashboard scans. The
+     verdicts come from state.scans; a list that scanned on open was a minute
+     of waiting nobody asked for. */
   let body;
   try {
-    body = await api(
-      `/resources/${state.type}?only_ours=${onlyOurs}&with_scan=${withScan}`
-    );
+    body = await api(`/resources/${forType}?only_ours=false&with_scan=false`);
     reportCloudReach(true);
   } catch (e) {
+    if (state.type !== forType) return;
     reportCloudReach(false, e);
     list.replaceChildren(text("p", e.message, "bad"));
     return;
   }
 
+  // Somebody has moved on since this was asked for. Rendering it now would
+  // overwrite the list they are actually looking at.
+  if (state.type !== forType) return;
+
   renderCleanup(known);
 
+  /* An empty list says what is empty, and what that does not mean.
+
+     "Nothing here." sat under a heading naming one resource type, in a tool
+     whose whole job is finding what is wrong, and read as a clean bill on the
+     account. It is not one: it says this account holds no resources of this
+     one kind, which for eleven of the fourteen types is the ordinary state of
+     a demo account and says nothing at all about the other thirteen. */
   if (!body.resources.length) {
-    list.replaceChildren(text("p", "Nothing here.", "muted"));
+    const nothing = document.createElement("div");
+    nothing.className = "nothing";
+    nothing.append(text("p",
+      `No ${(known.short_label || known.label).toLowerCase()} in this ` +
+      `${state.cloud === "azure" ? "subscription" : "account"}.`, "nothing-line"));
+    nothing.append(text("p",
+      known.read_only
+        ? "Nothing to audit here. The other types are unaffected — this is "
+          + "about this one kind of resource, not about the account."
+        : "That is a fact about this one kind of resource, not a verdict on "
+          + "the account. The Create tab makes one.", "nothing-note"));
+    list.replaceChildren(nothing);
     return;
   }
 
+  const scan = state.scans[state.type];
+
+  /* A Name column only where a name is not the id.
+
+     For a bucket, a storage account and every Azure type the id *is* the
+     name, so the table printed "richard-huo-resume-2026" twice across two
+     headed columns and spent a fifth of the width saying the same thing
+     again. Security groups and machines have both and keep both. */
+  const named = body.resources.some((r) => r.name && r.name !== r.id);
+
+  /* And where a name is the id, say where the thing actually is.
+
+     Dropping the duplicate Name column left the Azure table one identifier
+     wide. The two facts that make an Azure name mean anything are its resource
+     group and its location: a security group called "web" says nothing on its
+     own, and two of them in different resource groups are two different
+     firewalls. The readers have always known both.
+
+     Driven by the rows rather than by the cloud, because "does this type carry
+     a resource group" is a question the data answers - matching on provider
+     here would be the page inferring a shape from a naming convention, which
+     is the mistake ResourceType.provider exists to avoid. */
+  const placed = body.resources.some((r) => r.resource_group || r.location);
+
   const table = document.createElement("table");
   const head = document.createElement("tr");
-  for (const h of [known.id_label, "Name", "Worst", "Findings", ""]) {
-    head.append(text("th", h));
-  }
+  const columns = [
+    known.id_label,
+    ...(named ? ["Name"] : []),
+    ...(placed ? ["Resource group", "Location"] : []),
+    "Worst", "Findings", "",
+  ];
+  for (const h of columns) head.append(text("th", h));
   table.append(head);
 
   for (const r of body.resources) {
@@ -363,18 +1075,32 @@ async function loadList() {
     tr.onclick = () => showDetail(r.id);
 
     tr.append(text("td", r.id));
-    tr.append(text("td", r.name || ""));
-    // Not scanned is not clean. counts is the signal, because worst_level is
-    // null for both "nothing was found" and "nothing was looked for" - and
-    // "scan each" is off by default, so the second is what the page shows on
-    // first load. Printing a verdict there labelled a storage account with two
-    // critical findings clean until somebody happened to tick a box. The
-    // Findings column beside this one has always said "—" for the same case.
-    tr.append(text("td", r.unreachable ? "?"
-      : !r.counts ? "not scanned"
-      : (r.worst_level || "clean")));
-    tr.append(text("td", r.counts
-      ? `${r.counts.critical} critical, ${r.counts.warning} warning, ${r.counts.info} info`
+    if (named) tr.append(text("td", r.name || ""));
+    if (placed) {
+      // An em dash rather than a blank: a cell with nothing in it reads as a
+      // rendering fault, and these are read straight off the resource id.
+      tr.append(text("td", r.resource_group || "—"));
+      tr.append(text("td", r.location || "—"));
+    }
+
+    // Not scanned is not clean, and that has not changed by moving where the
+    // scan is started. counts is the signal, because worst_level is null for
+    // both "nothing was found" and "nothing was looked for"; printing a
+    // verdict on the second labelled a storage account with two critical
+    // findings clean.
+    const counts = scan && scan.byId.get(r.id);
+    const worst = counts && (counts.critical ? "critical"
+      : counts.warning ? "warning"
+      : counts.info ? "info" : "clean");
+
+    const verdict = text("td", r.unreachable ? "?"
+      : !counts ? "not scanned"
+      : worst);
+    if (counts && worst !== "clean") verdict.className = `worst ${worst}`;
+    tr.append(verdict);
+
+    tr.append(text("td", counts
+      ? `${counts.critical} critical, ${counts.warning} warning, ${counts.info} info`
       : (r.unreachable || "—")));
 
     const actions = document.createElement("td");
@@ -389,7 +1115,42 @@ async function loadList() {
     table.append(tr);
   }
 
-  list.replaceChildren(table);
+  list.replaceChildren();
+
+  /* Where the verdicts came from, and when.
+
+     Without this the Worst column is an assertion with no provenance: a row
+     saying "clean" cannot be told from one scanned before somebody changed
+     the thing. Saying when is what makes an unscanned list obviously
+     unanswered rather than quietly reassuring - which is the one way this
+     tool can actively mislead, and the reason a scan is never implied. */
+  const provenance = document.createElement("p");
+  provenance.className = "muted scan-note";
+  if (!scan) {
+    provenance.append(document.createTextNode(
+      "These have not been scanned. Findings load when you open one; to judge "
+      + "them all at once, "));
+    const go = document.createElement("button");
+    go.className = "link";
+    go.textContent = "scan from the Dashboard";
+    go.onclick = () => { selectTab("dashboard"); scanEverything(); };
+    provenance.append(go, document.createTextNode("."));
+  } else {
+    provenance.textContent =
+      `Verdicts from the scan at ${scan.at.toLocaleTimeString()}. Anything ` +
+      "changed since is judged again when you open it.";
+  }
+  list.append(provenance, table);
+}
+
+/* Forgets a type's cached verdicts.
+
+   Called wherever this tool changes something. A verdict about a resource
+   that has since been fixed, created or destroyed is not merely old - it is
+   wrong, and it is wrong while carrying a timestamp that makes it look
+   checked. */
+function forgetScan(typeKey) {
+  delete state.scans[typeKey || state.type];
 }
 
 function renderCleanup(known) {
@@ -431,28 +1192,136 @@ async function showDetail(id) {
   // first line of its contents.
   $("detail-id").textContent = `${known.id_label}: ${id}`;
 
-  const counts = data.counts;
-  // The acknowledged tally sits beside the severities, never subtracted from
-  // them. A reader who cannot see that two of these criticals were already
-  // decided on will either act on them again or stop reading the list.
-  body.append(text("p",
-    `${counts.critical} critical, ${counts.warning} warning, ` +
-    `${counts.info} informational` +
-    (counts.acknowledged ? ` — ${counts.acknowledged} acknowledged` : "")));
-
   body.append(text("h3", "Findings"));
   if (!data.warnings.length) {
-    body.append(text("p", "Nothing found.", "muted"));
-  }
-  for (const w of data.warnings) {
-    body.append(renderFinding(w, id));
+    /* The one empty state here that *is* a verdict, and it has been earned:
+       this resource was read just now and every rule ran over it. Saying so
+       is the difference between this and the list above, where nothing found
+       means nothing of that kind exists. */
+    const clean = document.createElement("div");
+    clean.className = "nothing is-clean";
+    clean.append(text("p", "Nothing to report.", "nothing-line"));
+    clean.append(text("p",
+      `Every rule this tool has for a ${(known.short_label || known.label)
+        .toLowerCase()} ran over this one and none of them fired. What it is `
+      + "made of is below.", "nothing-note"));
+    body.append(clean);
+  } else {
+    renderFindingGroups(body, data.warnings, data.counts, id);
   }
 
-  body.append(text("h3", "What it is"));
-  body.append(text("pre", JSON.stringify(data.settings, null, 2), "mono-block"));
+  /* The raw settings, folded away.
+
+     This is what the resource *is*, as opposed to what is wrong with it, and
+     it is worth keeping - the scanner's verdict is only checkable against the
+     thing it judged. But a bucket's settings run to forty lines of JSON, so
+     open by default it was the largest thing on the panel and the findings
+     above it scrolled away beneath it. Findings first; the evidence is one
+     click under them. */
+  const what = document.createElement("details");
+  what.className = "what-it-is";
+  what.append(text("summary", "What it is"));
+  what.append(text("pre", JSON.stringify(data.settings, null, 2), "mono-block"));
+  body.append(what);
+}
+
+/* The severity counts, as tallies rather than a sentence.
+
+   A level with nothing in it is drawn flat and grey rather than dropped. The
+   absence of criticals is a finding in itself, and a row that silently omits
+   the level you were looking for cannot be told from one that never checked -
+   which is the failure this project names as the only way the tool can
+   actively mislead. */
+function renderFindingGroups(body, warnings, counts, resourceId) {
+  const LEVELS = ["critical", "warning", "info"];
+  const named = { critical: "critical", warning: "warning", info: "informational" };
+
+  const grouped = { critical: [], warning: [], info: [] };
+  for (const w of warnings) (grouped[w.level] || grouped.info).push(w);
+
+  const tallies = document.createElement("div");
+  tallies.className = "tallies";
+  const panels = document.createElement("div");
+
+  // Every level's setter, so opening one can shut the rest.
+  const openers = [];
+
+  for (const level of LEVELS) {
+    const found = grouped[level];
+
+    const panel = document.createElement("div");
+    panel.className = "group";
+    panel.id = `findings-${level}`;
+    for (const w of found) panel.append(renderFinding(w, resourceId));
+
+    const tally = document.createElement("button");
+    tally.type = "button";
+    tally.className = `tally ${level}` + (found.length ? "" : " empty");
+    tally.setAttribute("aria-controls", panel.id);
+    tally.append(text("span", String(counts[level] || 0), "n"));
+    tally.append(text("span", named[level], "what"));
+
+    // Criticals are open on arrival. Every other level starts shut, which is
+    // what makes the criticals findable rather than the fourth thing down a
+    // wall - but the most urgent thing this tool can say is never behind a
+    // click. A finding is made quieter and never absent, and one nobody
+    // expanded has been made absent whatever the counts say.
+    const show = (open) => {
+      panel.classList.toggle("open", open);
+      tally.classList.toggle("open", open);
+      tally.setAttribute("aria-expanded", String(open));
+    };
+    show(level === "critical" && found.length > 0);
+
+    // An empty level is not a button. There is nothing behind it, and a
+    // control that responds to a click by doing nothing teaches people that
+    // clicks here do nothing.
+    if (found.length) {
+      tally.onclick = () => {
+        // One level at a time. Two open drawers put a critical and a note on
+        // screen at the same weight and leave the reader to work out where
+        // one list ended, which is the wall this was built to remove - and
+        // the counts stay visible whichever is open, so nothing is lost by
+        // showing one of them.
+        const opening = !panel.classList.contains("open");
+        for (const other of openers) other(false);
+        show(opening);
+      };
+    } else {
+      tally.disabled = true;
+      tally.setAttribute("aria-expanded", "false");
+    }
+
+    openers.push(show);
+    tallies.append(tally);
+    panels.append(panel);
+  }
+
+  // Accepted is a count, not a group, and so is not a button.
+  //
+  // An acknowledged finding keeps its level and its place in the list, so the
+  // three criticals above may include two that somebody has already decided
+  // on. Making this a fourth drawer would mean either listing those findings
+  // twice or subtracting them from their own severity - and subtracting them
+  // is exactly the "suppression that empties the screen" this project refuses
+  // everywhere else.
+  if (counts.acknowledged) {
+    const accepted = document.createElement("div");
+    accepted.className = "tally accepted";
+    accepted.title =
+      "Findings somebody has accepted. They are still counted at their own " +
+      "severity above, and still listed there.";
+    accepted.append(text("span", String(counts.acknowledged), "n"));
+    accepted.append(text("span", "accepted", "what"));
+    tallies.append(accepted);
+  }
+
+  body.append(tallies, panels);
 }
 
 function renderFinding(w, resourceId) {
+  // Not folded itself. Its group is the fold, and folding a finding inside a
+  // folded group means two clicks to read one sentence.
   const box = document.createElement("div");
   box.className = `finding ${w.level}`;
   if (w.acknowledged) box.classList.add("acknowledged");
@@ -467,9 +1336,41 @@ function renderFinding(w, resourceId) {
   // decided to live with this, not that it stopped being true.
   if (w.acknowledged) {
     const a = w.acknowledged;
-    box.append(text("div",
+    const note = text("div",
       `${a.by} accepted this${a.on ? " on " + a.on : ""}` +
-      `${a.until ? ", until " + a.until : ""}: ${a.reason}`, "ack"));
+      `${a.until ? ", until " + a.until : ""}: ${a.reason}`, "ack");
+
+    // Undoing it sits with the decision it undoes, rather than somewhere else
+    // on the page. There is no confirmation step and no form: accepting a
+    // finding is the direction that needs one, because it is the direction
+    // that can hide something. This one only makes a finding louder, and the
+    // state it returns to is the state it started in.
+    if (w.rule_id) {
+      const undo = document.createElement("button");
+      undo.className = "quiet";
+      undo.textContent = "Stop accepting this";
+      undo.onclick = async () => {
+        undo.disabled = true;
+        try {
+          const res = await api(
+            `/acknowledgements/${encodeURIComponent(w.rule_id)}`
+            + `?confirm=${encodeURIComponent(w.rule_id)}`,
+            { method: "DELETE" });
+          toast(res.message);
+          // The counts change, so what the dashboard last measured no longer
+          // describes this type - the same reasoning as a fix or a delete.
+          forgetScan();
+          showDetail(resourceId);
+          loadList();
+        } catch (e) {
+          toast(e.message, true);
+          undo.disabled = false;
+        }
+      };
+      note.append(document.createTextNode(" "), undo);
+    }
+
+    box.append(note);
   }
 
   if (w.control) {
@@ -501,6 +1402,8 @@ function renderFinding(w, resourceId) {
         );
         toast(res.message);
         showDetail(resourceId);
+        // What this just changed is no longer what the last scan judged.
+        forgetScan();
         loadList();
       } catch (e) {
         toast(e.message, true);
@@ -515,76 +1418,105 @@ function renderFinding(w, resourceId) {
       "Change this before creating it, or accept it knowingly.", "muted"));
   }
 
-  // The identifier, and a ready-made entry for acknowledged.json.
+  // The identifier, and the form that accepts the finding.
   //
-  // The page could show acknowledgements and could not help you write one:
-  // the rule_id existed only in the API response, so using the feature meant
-  // leaving the page for curl. This closes that without giving the API a
-  // write path - the snippet is produced here and goes on the clipboard, and
-  // the file is still edited and committed by a person. See
-  // scanner/acknowledged.py for why that stays true.
+  // This used to build a JSON snippet and put it on the clipboard, because
+  // the API had no write path by design - the file was edited and committed
+  // by a person. It writes now, through POST /acknowledgements; see the
+  // header of scanner/acknowledged.py for what that trades away and what
+  // replaced it.
   //
   // Gated on resourceId for the same reason the fix button above is: a
-  // pre-flight finding describes something that does not exist, and offering
-  // to acknowledge it would write an entry naming a resource that may never
-  // be created - which the audit would then report as matching nothing.
+  // pre-flight finding describes something that does not exist, and
+  // acknowledging it would write an entry naming a resource that may never be
+  // created - which the audit would then report as matching nothing. The
+  // server refuses that case as well, on the stronger ground that it re-scans
+  // and finds no such rule.
   if (resourceId && w.rule_id && !w.acknowledged) {
-    box.append(acknowledgeHelp(w));
+    box.append(acknowledgeForm(w, resourceId));
   }
 
   return box;
 }
 
-/* Everything needed to acknowledge one finding, without acknowledging it.
+/* Accepting one finding, knowingly.
 
-   `by` is left as a placeholder rather than guessed at: the browser does not
-   know who is sitting in front of it, and a name this file invented would be
-   worse provenance than a blank somebody has to fill in. The CLI does know,
-   and fills it from git. */
-function acknowledgeHelp(w) {
+   Folded shut by default. An acknowledgement is meant to be a deliberate act,
+   and a reason box sitting open under every finding is an invitation to make
+   it a reflex.
+
+   `by` is a blank rather than a guess: the browser does not know who is
+   sitting in front of it, and a name this file invented would be worse
+   provenance than one somebody typed. The CLI could read git config and no
+   longer runs this, which is the one thing the move cost. */
+function acknowledgeForm(w, resourceId) {
   const wrap = document.createElement("details");
   wrap.className = "ack-help";
-
-  const today = new Date().toISOString().slice(0, 10);
-  const entry = {
-    rule_id: w.rule_id,
-    reason: "why this is intended, in a sentence somebody else can check",
-    by: "your name",
-    on: today,
-  };
-  const snippet = JSON.stringify(entry, null, 2);
-
-  wrap.append(text("summary", w.rule_id));
+  wrap.append(text("summary", `Accept this finding — ${w.rule_id}`));
 
   const body = document.createElement("div");
   body.append(text("p",
-    "Paste this into the acknowledgements list in backend/acknowledged.json " +
-    "and commit it. The finding keeps its severity and its place here; it is " +
-    "dimmed and says who accepted it. Nothing is hidden.", "muted"));
+    "The finding keeps its severity and its place in this list. It is dimmed " +
+    "and says who accepted it and why — nothing is hidden, and the counts " +
+    "still include it.", "muted"));
 
-  const pre = text("pre", snippet, "mono-block");
-  body.append(pre);
+  const reason = document.createElement("textarea");
+  reason.rows = 2;
+  reason.placeholder =
+    "why this is intended, in a sentence somebody else can check";
 
-  const copy = document.createElement("button");
-  copy.className = "quiet";
-  copy.textContent = "Copy";
-  copy.onclick = async () => {
+  const by = document.createElement("input");
+  by.placeholder = "your name";
+  by.size = 18;
+
+  // Six months out, which is scanner/acknowledged.DEFAULT_DAYS. Shown rather
+  // than left implicit: an expiry nobody saw is one nobody expects to arrive.
+  const until = document.createElement("input");
+  until.type = "date";
+  const default_until = new Date();
+  default_until.setDate(default_until.getDate() + 180);
+  until.value = default_until.toISOString().slice(0, 10);
+
+  body.append(
+    labelled("reason", reason),
+    labelled("your name", by),
+    labelled("expires", until),
+  );
+
+  const accept = document.createElement("button");
+  accept.className = "quiet";
+  accept.textContent = "Accept this finding";
+  accept.onclick = async () => {
+    accept.disabled = true;
     try {
-      await navigator.clipboard.writeText(snippet);
-      toast("Entry copied. Paste it into backend/acknowledged.json.");
-    } catch {
-      // A page served over plain HTTP on a machine without clipboard
-      // permission cannot write to it, and failing silently would look like
-      // the button doing nothing.
-      const range = document.createRange();
-      range.selectNodeContents(pre);
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
-      toast("Clipboard unavailable — the entry is selected, copy it.", true);
+      const res = await api("/acknowledgements", {
+        method: "POST",
+        body: JSON.stringify({
+          resource_type: state.type,
+          resource_id: resourceId,
+          rule_id: w.rule_id,
+          reason: reason.value.trim(),
+          by: by.value.trim(),
+          until: until.value || null,
+          // Repeating the id is the server's demand, and it is satisfied here
+          // rather than by a second box for somebody to retype it into. The
+          // guard is against a request forged somewhere else, which would
+          // have to know this id; it is not a test of whether the person
+          // meant it, which the reason and the fold already ask.
+          confirm: w.rule_id,
+        }),
+      });
+      toast(res.message);
+      showDetail(resourceId);
+      // What this just changed is no longer what the last scan judged.
+      forgetScan();
+      loadList();
+    } catch (e) {
+      toast(e.message, true);
+      accept.disabled = false;
     }
   };
-  body.append(copy);
+  body.append(accept);
 
   wrap.append(body);
   return wrap;
@@ -631,6 +1563,12 @@ const FIELDS = {
   "bucket": [
     ["name", "text", "globally unique across all of AWS"],
     ["secure_by_default", "checkbox", true],
+    // Uploaded after the bucket exists, by a second request, not carried in
+    // the spec. See submitSpec: a file is multipart and the spec is JSON.
+    ["files", "files", null,
+     "Uploaded once the bucket exists. This tool refuses to put a file into "
+     + "a bucket that is already readable by the world — upload first and "
+     + "open it afterwards if you are demonstrating an exposure."],
   ],
   "key-pair": [
     ["name", "text", "a name for this key"],
@@ -700,15 +1638,18 @@ const FIELDS = {
     ["name", "text", "a name for this firewall"],
     ["resource_group", "text", "Azure needs one; it is created if it is new"],
     ["location", "text", "eastus, westeurope, uksouth…"],
-    // No rules editor here yet. The AWS "rules" widget produces AWS-shaped
-    // rules - protocol, from_port, to_port, source - and an Azure rule is a
-    // different shape with a priority that decides which of several
-    // overlapping rules wins. Submitting one as the other would be the exact
-    // drift CLAUDE.md records about the TLS dropdown on group/main. So the
-    // page creates an empty group, which Azure's own final rule leaves
-    // denying everything inbound, and create_nsg says so in its problems.
-    // Rules come from the API or the CLI until a widget exists that knows
-    // about priority.
+    // Its own widget, not the AWS one. This entry used to say rules had to
+    // come from the API or the CLI "until a widget exists that knows about
+    // priority", and that had gone stale in a way worth recording: nothing
+    // here needs to know about priority, because az/nsg._priorities_for
+    // decides it from the order of this list. What actually made the AWS
+    // widget unusable is smaller and sharper - an Azure rule carries a name,
+    // a direction, and an access that can be Deny, and a security group rule
+    // carries none of those because every rule in one is an allow. A form
+    // submitting Azure rules in the AWS shape would have sent every rule as
+    // Allow and built a different firewall from the one on screen.
+    ["rules", "azure-rules",
+     "in order — the first rule that matches a packet decides"],
   ],
   "azure-vnet": [
     ["name", "text", "a name for this network"],
@@ -774,21 +1715,40 @@ async function buildCreateForm() {
     const caption = text("label", LABELS[name] || name.replace(/_/g, " "));
     wrap.append(caption);
 
-    if (kind === "rules") {
+    if (kind === "rules" || kind === "azure-rules") {
+      const makeRow = kind === "azure-rules" ? azureRuleRow : ruleRow;
       const rules = document.createElement("div");
       const add = document.createElement("button");
       add.type = "button";
       add.textContent = "add rule";
-      add.onclick = () => rules.append(ruleRow());
+      add.onclick = () => {
+        rules.append(makeRow());
+        if (kind === "azure-rules") refreshPrecedence(rules);
+      };
       wrap.append(add);
       box.append(wrap, rules);
-      rules.append(ruleRow());
+
+      // The hint was being dropped for this field. Every other kind uses it
+      // as a placeholder inside its own input, and a list of rows has no such
+      // box - so "in order — the first rule that matches a packet decides"
+      // was written down, never rendered, and the arrows that act on it had
+      // to be guessed at. Somebody did guess, and asked what they were.
+      if (kind === "azure-rules" && hint) {
+        box.append(text("p", hint, "note"));
+      }
+
+      rules.append(makeRow());
+      if (kind === "azure-rules") refreshPrecedence(rules);
       inputs[name] = { kind, el: rules };
       continue;
     }
 
     let el;
-    if (kind === "checkbox") {
+    if (kind === "files") {
+      el = document.createElement("input");
+      el.type = "file";
+      el.multiple = true;
+    } else if (kind === "checkbox") {
       el = document.createElement("input");
       el.type = "checkbox";
       el.checked = Boolean(hint);
@@ -857,7 +1817,11 @@ async function buildCreateForm() {
   check.textContent = "Check first (creates nothing)";
   check.onclick = () => runLiveCheck(true);
 
+  // The one that builds something is the one that looks like it does. Both
+  // were the same white outlined button, so the pair read as two equal
+  // options and the destructive-by-omission half of that pair is Create.
   const make = document.createElement("button");
+  make.className = "primary";
   make.textContent = "Create";
   make.onclick = () => submitSpec(inputs);
 
@@ -929,6 +1893,155 @@ function ruleRow() {
       from_port: fromPort,
       to_port: toPort,
       source: source.value(),
+    };
+  };
+
+  return row;
+}
+
+/* Keeps the reorder controls honest about what they can do.
+
+   With one rule there is no precedence to arrange, so the whole control is
+   hidden rather than shown doing nothing - a pair of arrows that never move
+   anything is what made somebody ask what they were for. With several, the
+   first row cannot go up and the last cannot go down, and those two are
+   disabled rather than silently ignoring the click.
+
+   Called after every add, remove and move, because all three change which
+   answers are true. */
+function refreshPrecedence(list) {
+  if (!list) return;
+  const rows = [...list.children];
+
+  for (const [at, row] of rows.entries()) {
+    const order = row.querySelector(".rule-actions .labelled");
+    if (order) order.classList.toggle("hidden", rows.length < 2);
+
+    const [up, down] = row.querySelectorAll(".rule-actions button.move");
+    if (up) up.disabled = at === 0;
+    if (down) down.disabled = at === rows.length - 1;
+  }
+}
+
+/* One row of an Azure firewall rule.
+
+   Separate from ruleRow() rather than a flag on it, because the two are not
+   the same shape and pretending otherwise is how a form drifts from the rules
+   that judge it. An AWS rule is protocol, ports and a source, and every rule
+   in a security group is an allow. An Azure rule additionally has a name, a
+   direction, and an access - and access can be Deny, which is what closes a
+   port that a rule below would open.
+
+   No priority field, deliberately. az/nsg._priorities_for assigns one per
+   rule from the order of this list, ten apart so a rule can be inserted in
+   front later. Offering the number would let somebody submit two rules with
+   the same one, which Azure rejects, or an order whose effect is not the
+   order the list reads as, which Azure accepts and nobody notices. The
+   arrows below move a row, and moving a row is what changes precedence. */
+function azureRuleRow(index) {
+  const row = document.createElement("div");
+  // Its own class as well as .rule: six fields where a security group's row
+  // has three, so it cannot share that row's column widths.
+  row.className = "rule azure";
+
+  const name = Object.assign(document.createElement("input"),
+                             { size: 16, placeholder: "allow-ssh" });
+
+  const direction = choice(state.options.rule_direction || [],
+                           { allowOther: false, blank: null });
+  direction.set("Inbound");
+
+  const access = choice(state.options.rule_access || [],
+                        { allowOther: false, blank: null });
+  access.set("Allow");
+
+  const protocol = choice(state.options.rule_protocol || [],
+                          { allowOther: false, blank: null });
+  protocol.set("Tcp");
+
+  const port = choice(state.options.rule_port || [],
+                      { blank: "— port —", other: "Other port or range…" });
+  const source = choice(state.options.rule_source || [],
+                        { blank: "— who can reach it —", other: "Other address…" });
+
+  // Precedence is the list order, so it has to be changeable without
+  // retyping the row. Buttons rather than drag: this page has no drag
+  // anywhere else, and a control that only works with a mouse is worse than
+  // one that works with a keyboard too.
+  //
+  // Captioned, because two bare arrows in a form full of firewall settings do
+  // not say what they move or why it matters - somebody looking at this asked
+  // what they were, which is the whole answer to whether a title attribute is
+  // enough. It is not: it needs a hover to appear and never appears at all on
+  // a touch screen.
+  const up = document.createElement("button");
+  up.type = "button";
+  up.className = "move";
+  up.textContent = "↑";
+  up.title = "Move earlier — this rule is checked before the one above it";
+  up.onclick = () => {
+    const prev = row.previousElementSibling;
+    if (prev) row.parentNode.insertBefore(row, prev);
+    refreshPrecedence(row.parentNode);
+  };
+
+  const down = document.createElement("button");
+  down.type = "button";
+  down.className = "move";
+  down.textContent = "↓";
+  down.title = "Move later — this rule is checked after the one below it";
+  down.onclick = () => {
+    const next = row.nextElementSibling;
+    if (next) row.parentNode.insertBefore(next, row);
+    refreshPrecedence(row.parentNode);
+  };
+
+  const rm = document.createElement("button");
+  rm.type = "button";
+  rm.textContent = "remove";
+  rm.onclick = () => {
+    const list = row.parentNode;
+    row.remove();
+    refreshPrecedence(list);
+  };
+
+  // One grid cell, not three. The row's grid has four columns and the AWS
+  // row puts six things in it; appending nine made these wrap onto their own
+  // line and stretch to a column's full width, so the up arrow rendered as a
+  // large empty box with a tick in the middle of it.
+  const actions = document.createElement("div");
+  actions.className = "rule-actions";
+  actions.append(labelled("order", up, down), rm);
+
+  row.append(
+    labelled("name", name),
+    labelled("direction", direction),
+    labelled("allow or deny", access),
+    labelled("protocol", protocol),
+    labelled("port", port),
+    labelled("source", source),
+    actions,
+  );
+
+  row.value = () => {
+    const chosen = port.querySelector("select").value;
+    const typed = port.querySelector("input");
+    const ports = chosen === "__other__" ? (typed.value.trim() || null)
+                                         : (chosen || null);
+    return {
+      name: name.value.trim(),
+      direction: direction.value() || "Inbound",
+      access: access.value() || "Allow",
+      protocol: protocol.value() || "Tcp",
+      // Azure takes a single port or a range as one string ("22", "80-443"),
+      // which is why this is not the from/to pair the AWS row produces.
+      destination_port_range: ports,
+      // The API's own field name, from models.AzureSecurityRule. Called
+      // `source` here first, which the stub in app.test.mjs accepted and the
+      // real route silently dropped - the group was built with no rules at
+      // all and reported success. A stub written to match the page cannot
+      // disagree with it; only Azure could, and did.
+      source_address_prefix: source.value(),
     };
   };
 
@@ -1013,24 +2126,57 @@ function labelled(caption, ...controls) {
 function collectSpec(inputs) {
   const spec = {};
   for (const [name, { kind, el }] of Object.entries(inputs)) {
+    // Files never enter the spec. The spec is JSON and goes to a route that
+    // creates a resource; a file is multipart and goes to a second, separate
+    // route once the bucket exists. Carrying one inside the other would mean
+    // base64 and a third more bytes, for a request that is already the one
+    // this tool most wants to keep readable in a log.
+    if (kind === "files") continue;
     if (kind === "checkbox") { spec[name] = el.checked; continue; }
 
-    if (kind === "rules") {
+    if (kind === "rules" || kind === "azure-rules") {
       const rules = [];
       for (const row of el.children) {
         const rule = row.value();
-        // A rule with nobody it applies to is an empty row, not a rule.
-        if (!rule.source) continue;
+        // A rule with nobody it applies to is an empty row, not a rule. The
+        // two clouds spell that field differently, which is the whole reason
+        // they are separate models.
+        if (!(kind === "azure-rules" ? rule.source_address_prefix
+                                     : rule.source)) continue;
+        // An Azure rule additionally needs a name and a port. A row missing
+        // either is half-typed rather than a rule somebody meant, and sending
+        // it produces a refusal about a field they can see is empty.
+        if (kind === "azure-rules" &&
+            (!rule.name || !rule.destination_port_range)) continue;
         rules.push(rule);
       }
-      if (rules.length) spec.rules = rules;
+      // Order is precedence: az/nsg assigns priorities from this sequence, so
+      // the array is submitted exactly as the rows sit on screen.
+      //
+      // azure_rules, not rules. api/models.py keeps two lists on purpose -
+      // an Azure rule names a direction and an access and writes ports as a
+      // string, and forcing one model to carry both would leave half the
+      // fields null whichever cloud was in use. The adapter reads
+      // spec["azure_rules"] and ignores the AWS one.
+      if (rules.length) {
+        spec[kind === "azure-rules" ? "azure_rules" : "rules"] = rules;
+      }
       continue;
     }
 
     if (kind === "multi") {
-      const chosen = typeof el.value === "function"
-        ? el.value()
-        : el.value.split(",").map((s) => s.trim()).filter(Boolean);
+      // A real <select multiple> is asked what is selected. Its `value` getter
+      // answers with the FIRST selected option only, so reading that and
+      // splitting it kept one choice out of however many were made - silently,
+      // and identically for the live pre-flight, so nothing anywhere reported
+      // that the request had been truncated. buildCreateForm falls back to a
+      // plain comma-separated <input> when a type has no options to offer, and
+      // that case still needs the split.
+      const chosen = el.multiple
+        ? [...el.selectedOptions].map((o) => o.value)
+        : typeof el.value === "function"
+          ? el.value()
+          : el.value.split(",").map((s) => s.trim()).filter(Boolean);
       if (chosen.length) spec[name] = chosen;
       continue;
     }
@@ -1141,6 +2287,57 @@ async function runLiveCheck(explicit = false) {
   }
 }
 
+/* Sends whatever was attached to the form, once the bucket exists.
+
+   Its own request, and its own line in the audit log. The server refuses to
+   write into a bucket anyone outside the account can read, and that refusal
+   is shown here in full rather than as a toast - it is the interesting thing
+   this feature does, and somebody who hits it should be told why rather than
+   left thinking the upload silently failed.
+
+   A failed upload does not undo the bucket. Nothing in this tool rolls back;
+   partial results report exactly what exists, and a bucket that was created
+   was created. */
+async function uploadAttached(inputs, resourceId, out) {
+  const attached = Object.values(inputs)
+    .find((i) => i.kind === "files");
+  const chosen = attached && attached.el.files;
+  if (!chosen || !chosen.length) return;
+
+  const line = text("p", `Uploading ${chosen.length} file${chosen.length === 1 ? "" : "s"}…`, "muted");
+  out.append(line);
+
+  const form = new FormData();
+  for (const f of chosen) form.append("files", f, f.name);
+
+  try {
+    // Not api(): that sets a JSON content type, and multipart needs the
+    // browser to set its own with the boundary in it. Skipping api() also
+    // skips the region it appends to every other request, so this carries it
+    // by hand: a bucket in eu-west-1 is not there when looked for in
+    // us-east-1, and the upload would report it missing.
+    const res = await fetch(
+      `${API}/resources/bucket/${encodeURIComponent(resourceId)}/objects`
+      + `?region=${encodeURIComponent(state.region)}`,
+      { method: "POST", body: form });
+    const answered = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      const detail = answered.detail;
+      line.textContent = typeof detail === "string" ? detail
+        : (detail && detail.message) || `Upload failed (HTTP ${res.status})`;
+      line.className = "bad";
+      return;
+    }
+    line.textContent = answered.message;
+    line.className = "";
+    showDetail(resourceId);
+  } catch (e) {
+    line.textContent = e.message;
+    line.className = "bad";
+  }
+}
+
 async function submitSpec(inputs, acceptRisk = false) {
   const out = $("create-out");
   out.replaceChildren(text("p", "Creating…", "muted"));
@@ -1188,7 +2385,16 @@ async function submitSpec(inputs, acceptRisk = false) {
 
   out.append(text("p", `Created ${body.resource_id}`));
   for (const p of body.problems || []) out.append(text("p", p, "muted"));
+  // A new resource the last scan never saw, so that scan no longer describes
+  // this type. The create response carries its own findings, which is what
+  // the counts below are.
+  forgetScan();
   loadList();
+
+  // Files go up only after the thing that holds them exists, and only if the
+  // create really succeeded - so a refused create never leaves an upload
+  // looking for a bucket that was never made.
+  await uploadAttached(inputs, body.resource_id, out);
 
   const counts = body.counts;
   out.append(text("p",
@@ -1210,8 +2416,10 @@ async function startDelete(id) {
     const res = await api(`/resources/${state.type}/${encodeURIComponent(id)}`,
                           { method: "DELETE" });
     toast(res.message);
+    // What this just changed is no longer what the last scan judged.
+    forgetScan();
     loadList();
-    $("detail-body").replaceChildren(text("p", "Pick something from the list.", "muted"));
+    resetDetail();
     return;
   } catch (e) {
     if (e.status !== 400) { toast(e.message, true); return; }
@@ -1285,22 +2493,38 @@ async function showCascade(id, refusal, andThen) {
   go.textContent = "Delete";
   go.onclick = async () => {
     go.disabled = true;
+    typed.disabled = true;
+
+    // Progress replaces the plan. Leaving a table of ten things above a live
+    // log reads as a list of what is still to come, when most of it is
+    // already gone.
+    const progress = deleteProgress();
+    body.replaceChildren(progress.el);
+
     try {
-      const res = await api(
+      const res = await apiStream(
         `/resources/${state.type}/${encodeURIComponent(id)}` +
-        `?force=true&confirm=${encodeURIComponent(plan.confirm_with)}`,
-        { method: "DELETE" }
+        `?force=true&confirm=${encodeURIComponent(plan.confirm_with)}&stream=true`,
+        { method: "DELETE" },
+        progress.step,
       );
+      progress.finish();
       toast(res.message);
       closeModal();
+      // What this just changed is no longer what the last scan judged.
+      forgetScan();
       loadList();
-      $("detail-body").replaceChildren(text("p", "Pick something from the list.", "muted"));
+      resetDetail();
       // The blueprint teardown continues here: the key pairs are not in the
       // network and are still there once the cascade has finished.
       if (andThen) await andThen();
     } catch (e) {
+      progress.fail(e.message);
       toast(e.message, true);
-      go.disabled = false;
+      // Not re-enabled. Some of it is destroyed by now, so the plan the
+      // button was built from no longer describes what is there - Cancel and
+      // look again is the honest next step.
+      go.textContent = "Delete";
     }
   };
 
@@ -1364,6 +2588,8 @@ async function startCleanup(known) {
       toast(`${res.results.length - failed.length} removed, ${failed.length} failed`,
             failed.length > 0);
       closeModal();
+      // What this just changed is no longer what the last scan judged.
+      forgetScan();
       loadList();
     } catch (e) {
       toast(e.message, true);
@@ -1549,11 +2775,37 @@ function renderBlueprintResult(out, body) {
 
   if (body.instructions.length) {
     out.append(text("h3", "How to connect"));
-    out.append(text("pre", body.instructions.join("\n"), "mono-block"));
+
+    // The script first, because it is the answer for most people and the six
+    // commands below it are the explanation. A browser cannot move a file,
+    // change its mode, reach an ssh-agent or open a shell - so the nearest
+    // the tool gets to doing this for you is handing over something that
+    // does. It carries no key material; see blueprints/bastion.connect_script.
+    if (body.script && body.script_name) {
+      const row = document.createElement("div");
+      row.className = "row";
+
+      const get = document.createElement("button");
+      get.textContent = "Download connect script";
+      get.onclick = () => {
+        download(body.script_name, body.script);
+        toast(`Downloaded ${body.script_name}. Run: bash ~/Downloads/${body.script_name}`);
+      };
+
+      row.append(get, text("span",
+        `or run the six commands below by hand`, "muted"));
+      out.append(row);
+      out.append(text("p",
+        `It files both keys, makes them readable only by you, and opens a ` +
+        `shell on the private machine through the bastion. It holds no key ` +
+        `material — read it before running it.`, "muted"));
+    }
+
+    out.append(commandBlock(body.instructions));
   }
   if (body.teardown.length) {
     out.append(text("h3", "How to remove it"));
-    out.append(text("pre", body.teardown.join("\n"), "mono-block"));
+    out.append(commandBlock(body.teardown));
     out.append(teardownControls(body.created));
   }
 }
@@ -1568,6 +2820,62 @@ function renderBlueprintResult(out, body) {
    dedicated "remove blueprint" button that skipped that would be the one
    destructive path in the tool without a preview, and it destroys two running
    machines. */
+/* A live log of a delete, plus a clock.
+
+   The clock is not decoration. Nearly all of a cascade is one wait for AWS to
+   detach network interfaces, and during it the server has genuinely nothing
+   new to say for thirty seconds at a time - so a log alone still goes quiet,
+   and quiet is the thing that reads as broken. Something moving every second
+   is the difference between "this is slow" and "this has died".
+
+   The last line stays highlighted rather than the list scrolling away,
+   because what is happening now is the question being asked. */
+function deleteProgress() {
+  const el = document.createElement("div");
+  el.className = "delete-progress";
+
+  const heading = text("p", "Deleting. This can take several minutes.");
+  const clock = text("span", "0:00", "muted mono");
+  const spent = document.createElement("p");
+  spent.className = "muted";
+  spent.append(document.createTextNode("Elapsed "), clock);
+
+  const log = document.createElement("ul");
+  log.className = "steps";
+
+  el.append(heading, spent, log);
+
+  const started = Date.now();
+  const tick = setInterval(() => {
+    const s = Math.floor((Date.now() - started) / 1000);
+    clock.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  }, 1000);
+
+  let current = null;
+
+  return {
+    el,
+    step(line) {
+      if (current) current.className = "done";
+      current = text("li", line, "current");
+      log.append(current);
+    },
+    finish() {
+      clearInterval(tick);
+      if (current) current.className = "done";
+      heading.textContent = "Done.";
+    },
+    fail(why) {
+      clearInterval(tick);
+      if (current) current.className = "failed";
+      heading.textContent = "Stopped.";
+      // What already happened stays on screen. Nothing rolls back here, so
+      // the steps above this line are things that really were destroyed.
+      log.append(text("li", why, "failed"));
+    },
+  };
+}
+
 function teardownControls(created) {
   const box = document.createElement("div");
   box.className = "row";
@@ -1638,11 +2946,15 @@ for (const event of ["input", "change"]) {
 
 $("modal-cancel").onclick = closeModal;
 $("refresh").onclick = loadList;
-$("only-ours").onchange = loadList;
-$("with-scan").onchange = loadList;
 
 $("cloud-toggle").onclick = () =>
   setCloud(state.cloud === "aws" ? "azure" : "aws");
+
+for (const b of $("tabs").children) {
+  b.onclick = () => selectTab(b.dataset.tab);
+}
+$("scan-all").onclick = scanEverything;
+$("dash-refresh").onclick = loadDashboard;
 
 // The create panel folds. Its state is remembered across type changes,
 // because somebody who closed it did so to see the findings above it and

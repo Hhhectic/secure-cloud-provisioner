@@ -147,6 +147,10 @@ def read_nsg_for_scanning(client, name):
     try:
         found = client.network_security_groups.get(group, short)
     except Exception as e:
+        # Refusal before absence, the same order _name_is_taken already uses
+        # below: "not allowed" is not "not there".
+        if denied(e):
+            raise not_allowed_to_look(group, "network security groups") from e
         # The SDK raises ResourceNotFoundError, which lives behind an import
         # this module deliberately does not make. Matching on the status code
         # keeps the lazy-import property.
@@ -516,6 +520,13 @@ def apply_fix(client, name, warning):
     try:
         found = client.network_security_groups.get(group, short)
     except Exception as e:
+        # Refusal before absence, the same order and the same call as
+        # read_nsg_for_scanning above - which had the denied() check and this
+        # did not, so the identical read answered a 403 with a traceback here
+        # and a 403 there. _locate returns immediately when handed a full
+        # resource id, so there is no listing pass to absorb it first.
+        if denied(e):
+            raise not_allowed_to_look(group, "network security groups") from e
         if getattr(e, "status_code", None) == 404:
             return False, f"No network security group named '{short}'."
         raise

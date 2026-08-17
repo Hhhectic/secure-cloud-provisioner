@@ -11,7 +11,9 @@ Keys are generated into a temporary directory so a test run never writes to
 
 import os
 import shutil
+import subprocess
 import tempfile
+from pathlib import Path
 
 import boto3
 import pytest
@@ -62,6 +64,71 @@ def test_it_builds_every_piece(ec2, keys):
         "vpc", bastion.BASTION_KEY, bastion.PRIVATE_KEY,
         "bastion_sg", "private_sg", "bastion_instance", "private_instance",
     }
+
+
+def test_a_build_that_stops_partway_keeps_what_it_learned(ec2, keys, monkeypatch):
+    """Every failure return answered with one fresh sentence and dropped
+    `problems`, at the moment it was worth most.
+
+    The identifiers survived - `created` is returned either way, and this
+    module's own docstring promises a caller can tell exactly what exists - but
+    the caveats about those identifiers did not. A network that really was
+    built, and whose DNS attribute really could not be set, came back as
+    "vpc-1" and one unrelated error: the caller was told the network exists and
+    not what is wrong with it.
+
+    The same defect CLAUDE.md records for the Azure machine create, where
+    `problems` was thrown away by the one caller that could have shown it.
+    """
+    monkeypatch.setattr(bastion.vpcs, "create_vpc", lambda *a, **k: (
+        True, "vpc-1",
+        ["Could not enable EnableDnsSupport: not authorized. Names inside "
+         "this network will not resolve."]))
+    monkeypatch.setattr(bastion.vpcs, "read_vpc_for_scanning", lambda *a, **k: {
+        "subnets": [
+            {"subnet_id": "subnet-pub", "declared_role": "public",
+             "cidr": "10.0.1.0/24", "reaches_internet": True},
+            {"subnet_id": "subnet-priv", "declared_role": "private",
+             "cidr": "10.0.2.0/24", "reaches_internet": False},
+        ]})
+    # And then a later step fails, as any of them might.
+    monkeypatch.setattr(bastion.kp, "import_key_pair",
+                        lambda *a, **k: (False, "throttled", []))
+
+    ok, created, problems = _build(ec2, keys, public_keys={
+        bastion.BASTION_KEY: "ssh-ed25519 AAAA one",
+        bastion.PRIVATE_KEY: "ssh-ed25519 AAAA two"})
+
+    assert not ok
+    assert created["vpc"] == "vpc-1", "the caller is told the network exists"
+    assert any("EnableDnsSupport" in p for p in problems), (
+        "and is told what is wrong with it")
+    assert any("throttled" in p for p in problems), (
+        "as well as what stopped the build")
+    assert problems.index(next(p for p in problems if "EnableDnsSupport" in p)) \
+        < problems.index(next(p for p in problems if "throttled" in p)), (
+        "in the order they happened")
+
+
+def test_a_missing_subnet_is_explained_rather_than_restated(ec2, keys,
+                                                            monkeypatch):
+    """create_vpc reports a subnet it could not build and still returns the
+    network as created, so the reason is already in hand here. Dropping it
+    replaced the explanation with a restatement of the symptom."""
+    monkeypatch.setattr(bastion.vpcs, "create_vpc", lambda *a, **k: (
+        True, "vpc-1",
+        ["'10.1.0.0/16' is too small to divide into two subnets, so none "
+         "were created."]))
+    monkeypatch.setattr(bastion.vpcs, "read_vpc_for_scanning",
+                        lambda *a, **k: {"subnets": []})
+
+    ok, _, problems = _build(ec2, keys)
+
+    assert not ok
+    assert any("too small" in p for p in problems), (
+        "the sentence saying why is kept")
+    assert any("missing a subnet" in p for p in problems), (
+        "alongside the one saying what")
 
 
 def test_the_private_machine_is_in_the_private_subnet(ec2, keys):
@@ -247,6 +314,332 @@ def test_connection_instructions_use_proxyjump_and_say_why(ec2, keys):
     assert details["bastion_public_ip"] in lines
     assert details["private_ip"] in lines
     assert "worse" in lines
+
+
+def test_the_instructions_start_by_making_the_keys_private(ec2, keys):
+    """ssh refuses a key other people on the machine could read, and a browser
+    downloads one as exactly that - 0644, every time, by the route this tool
+    recommends.
+
+    These instructions went straight to ssh-add, so anyone who followed them
+    got a wall of hashes about an unprotected key file instead of a shell. The
+    keygen panel said chmod 600 and this did not, so generating the keys here
+    and then reading this gave you the half without it.
+
+    Asserted before ssh-add rather than merely present: an order that puts the
+    fix after the thing it fixes is the same failure with more words.
+    """
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    lines = bastion.connection_instructions(details, key_directory=keys)
+    joined = "\n".join(lines)
+
+    assert "chmod 600" in joined
+    assert joined.index("chmod 600") < joined.index("ssh-add")
+
+
+def test_downloaded_keys_are_filed_before_anything_expects_them_there(ec2, keys):
+    """The step before the chmod, and the same shape of gap.
+
+    Every command in these instructions names ~/.ssh, and a browser cannot put
+    anything there - it downloads to wherever downloads go. So somebody
+    generating key pairs with frontend/keygen.js and building from the page
+    got a chmod and two ssh-adds aimed at a directory the files were not in.
+
+    Ordered rather than merely present, for the reason the chmod test gives:
+    a move that happens after the chmod is a chmod against nothing.
+    """
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    joined = "\n".join(bastion.connection_instructions(
+        details, key_directory=keys, keys_were_downloaded=True))
+
+    assert "mv ~/Downloads/" in joined
+    assert joined.index("mv ~/Downloads/") < joined.index("chmod 600")
+    # Both key filenames travel with the move, not just the bastion's.
+    assert details["bastion_key"] in joined
+    assert details["private_key"] in joined
+
+
+def test_the_move_step_is_absent_for_keys_that_were_never_downloaded(ec2, keys):
+    """The CLI writes its pairs straight to disk with ssh-keygen, so telling it
+    to move them out of ~/Downloads would name a path that does not exist."""
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    joined = "\n".join(bastion.connection_instructions(details,
+                                                       key_directory=keys))
+
+    assert "~/Downloads" not in joined
+    assert "chmod 600" in joined
+
+
+def test_the_instructions_keep_the_tilde_rather_than_this_machine_s_home(ec2, keys):
+    """The path belongs to whoever runs these, not to whoever generated them.
+
+    `Path("~/.ssh").expanduser()` resolves against the *server's* HOME, and
+    these lines are then shown to whoever is reading the page. That is right
+    only while the two are the same person on the same machine, and wrong the
+    moment the server runs in a container, under a service account, or on a
+    machine somebody reached over the network. It also printed the operator's
+    username into every copy, which is how it was noticed - in a screenshot.
+
+    A tilde is expanded by the shell that runs the command, against the HOME
+    of the person running it, which is correct without this code knowing
+    anything.
+    """
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    joined = "\n".join(bastion.connection_instructions(
+        details, keys_were_downloaded=True))
+
+    assert "~/.ssh/" in joined
+    assert str(Path.home()) not in joined, "the server's home leaked into them"
+
+
+def test_an_explicit_directory_is_still_used_as_given(ec2, keys):
+    """Somebody who names an absolute path meant it. The CLI passes one."""
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    joined = "\n".join(bastion.connection_instructions(details,
+                                                       key_directory=keys))
+
+    assert f"{keys}/" in joined
+
+
+def test_the_script_resolves_the_directory_where_it_runs(ec2, keys):
+    """A tilde inside quotes is four literal characters and a slash.
+
+    So the script cannot simply carry `'~/.ssh'` the way the printed
+    instructions carry `~/.ssh` - quoting it would defeat exactly the property
+    that made keeping it symbolic worth doing. $HOME inside double quotes does
+    expand, and survives a directory with a space in it.
+    """
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    script = bastion.connect_script(details)
+
+    assert 'KEYS="$HOME/.ssh"' in script
+    assert str(Path.home()) not in script
+    # Not the quoted-tilde form, which would look right and expand to nothing.
+    assert "'~/.ssh'" not in script
+
+
+def test_the_default_script_files_keys_under_the_running_user_s_home(ec2, keys,
+                                                                     tmp_path):
+    """The $HOME branch, run rather than inspected.
+
+    The other execution tests pass an absolute directory, so they exercise the
+    quoted path and would pass just as happily if the tilde form expanded to
+    nothing. This one takes the default - the form every caller of
+    POST /blueprints/bastion actually gets - and runs it with HOME set
+    somewhere else, which is exactly the case the expansion was moved for.
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("no bash on this machine")
+
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+
+    home = tmp_path / "someone-else"
+    downloads = home / "Downloads"
+    downloads.mkdir(parents=True)
+    for which in ("bastion_key", "private_key"):
+        (downloads / details[which]).write_text("placeholder\n")
+
+    script = tmp_path / "connect.sh"
+    script.write_text(bastion.connect_script(details))  # the default ~/.ssh
+
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "ssh").write_text("#!/bin/sh\necho stub-ssh-reached\n")
+    (stub / "ssh").chmod(0o755)
+
+    ran = subprocess.run(
+        [bash, str(script)], capture_output=True, text=True, cwd=downloads,
+        env={"PATH": f"{stub}:/usr/bin:/bin", "HOME": str(home)},
+    )
+
+    assert ran.returncode == 0, ran.stderr
+    assert "stub-ssh-reached" in ran.stdout
+
+    # Filed under the *running* user's home, not the one that generated it.
+    for which in ("bastion_key", "private_key"):
+        filed = home / ".ssh" / details[which]
+        assert filed.exists(), f"{which} did not land in $HOME/.ssh"
+        assert filed.stat().st_mode & 0o777 == 0o600
+
+
+def test_the_connect_script_holds_no_key_material(ec2, keys):
+    """The property the whole key-pair design exists to protect.
+
+    A private half goes from WebCrypto to a download and nowhere else. This
+    server has never held one, so a script it generates cannot contain one -
+    but the check is worth making directly rather than inferring it, because
+    the failure would be silent and total: a private key in a response body is
+    in the logs, in the proxy, and in everything between.
+    """
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    script = bastion.connect_script(details, key_directory=keys)
+
+    assert "PRIVATE KEY" not in script
+    assert "BEGIN OPENSSH" not in script
+    # The filenames are in there; the contents are not.
+    assert details["bastion_key"] in script
+    assert details["private_key"] in script
+
+
+def test_the_connect_script_needs_no_ssh_agent(ec2, keys):
+    """ssh-add inside a script adds to an agent that dies with the script.
+
+    The printed instructions start an agent because a person runs them in a
+    shell that outlives them. A script cannot, so it gives each hop its own
+    key with -i - which is also why it works on a machine with no agent at
+    all.
+    """
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    script = bastion.connect_script(details, key_directory=keys)
+
+    assert "ssh-agent" not in script
+    assert "ssh-add" not in script
+    assert "IdentitiesOnly=yes" in script
+    # Each hop names its own key, which is the point of building two.
+    assert "ProxyCommand" in script
+
+
+def test_the_connect_script_is_valid_shell(ec2, keys):
+    """Parsed by bash rather than eyeballed.
+
+    A generated script is assembled from an f-string carrying braces, quotes
+    and backslashes, all of which mean something to both languages. `bash -n`
+    catches an unbalanced one; nothing else here would until somebody ran it.
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("no bash on this machine")
+
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    script = Path(keys) / "connect.sh"
+    script.write_text(bastion.connect_script(details, key_directory=keys))
+
+    checked = subprocess.run([bash, "-n", str(script)],
+                             capture_output=True, text=True)
+    assert checked.returncode == 0, checked.stderr
+
+
+def test_the_connect_script_files_the_keys_and_makes_them_private(ec2, keys,
+                                                                  tmp_path):
+    """The half that can be tested without a machine to connect to.
+
+    Runs the real script against real files, with the final ssh replaced, and
+    checks it does what the instructions promise: finds the keys wherever the
+    browser left them, moves them into place, and leaves them readable only by
+    the owner. That last one is what ssh refuses over, and it is the reason
+    any of this exists.
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("no bash on this machine")
+
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+
+    # Where the browser put them: not the target directory.
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    target = tmp_path / "dot-ssh"
+    for which in ("bastion_key", "private_key"):
+        made = downloads / details[which]
+        made.write_text("not a real key, and the script never reads one\n")
+        made.chmod(0o644)  # exactly what a browser download is
+
+    script = tmp_path / "connect.sh"
+    script.write_text(bastion.connect_script(details, key_directory=target))
+
+    # A stub ssh on PATH, so the script's exec lands somewhere harmless. The
+    # script is run from the downloads directory, which is where its own
+    # search is meant to find the keys.
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "ssh").write_text("#!/bin/sh\necho stub-ssh-reached\n")
+    (stub / "ssh").chmod(0o755)
+
+    ran = subprocess.run(
+        [bash, str(script)], capture_output=True, text=True, cwd=downloads,
+        env={"PATH": f"{stub}:/usr/bin:/bin", "HOME": str(tmp_path)},
+    )
+
+    assert ran.returncode == 0, ran.stderr
+    assert "stub-ssh-reached" in ran.stdout, ran.stdout
+
+    for which in ("bastion_key", "private_key"):
+        filed = target / details[which]
+        assert filed.exists(), f"{which} was not filed into {target}"
+        assert not (downloads / details[which]).exists(), "and was moved, not copied"
+        assert filed.stat().st_mode & 0o777 == 0o600, "ssh refuses anything looser"
+
+    assert target.stat().st_mode & 0o777 == 0o700
+
+
+def test_running_the_connect_script_twice_still_works(ec2, keys, tmp_path):
+    """Somebody will. The first run moves the keys, so a second one has to
+    find them where the first put them rather than fail on an absent file."""
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("no bash on this machine")
+
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    target = tmp_path / "dot-ssh"
+    for which in ("bastion_key", "private_key"):
+        (downloads / details[which]).write_text("placeholder\n")
+
+    script = tmp_path / "connect.sh"
+    script.write_text(bastion.connect_script(details, key_directory=target))
+
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "ssh").write_text("#!/bin/sh\necho stub-ssh-reached\n")
+    (stub / "ssh").chmod(0o755)
+    env = {"PATH": f"{stub}:/usr/bin:/bin", "HOME": str(tmp_path)}
+
+    first = subprocess.run([bash, str(script)], capture_output=True, text=True,
+                           cwd=downloads, env=env)
+    assert first.returncode == 0, first.stderr
+
+    second = subprocess.run([bash, str(script)], capture_output=True, text=True,
+                            cwd=downloads, env=env)
+    assert second.returncode == 0, second.stderr
+    assert "stub-ssh-reached" in second.stdout
+
+
+def test_the_connect_script_says_what_is_missing_rather_than_failing_oddly(
+        ec2, keys, tmp_path):
+    """A key that is nowhere is the likeliest failure: somebody cleared their
+    downloads, or ran this on a different machine from the one that built it.
+
+    `set -e` alone would exit on the mv with a message about a file, naming
+    neither which key nor where it was looked for.
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("no bash on this machine")
+
+    details = bastion.connection_details(ec2, created=_build(ec2, keys)[1])
+    script = tmp_path / "connect.sh"
+    script.write_text(bastion.connect_script(
+        details, key_directory=tmp_path / "dot-ssh"))
+
+    ran = subprocess.run(
+        [bash, str(script)], capture_output=True, text=True, cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+    )
+
+    assert ran.returncode != 0
+    assert details["bastion_key"] in ran.stderr
+    assert "Looked in" in ran.stderr
+
+
+def test_no_script_before_the_addresses_exist(ec2, keys):
+    """The same silence connection_instructions keeps, for the same reason: a
+    script naming an empty address would fail in a way that looks like the
+    machine refusing rather than the machine not being ready."""
+    assert bastion.connect_script(
+        {"bastion_public_ip": None, "private_ip": None,
+         "bastion_key": "k", "private_key": "k2"}) is None
 
 
 def test_instructions_are_honest_when_addresses_are_not_ready():

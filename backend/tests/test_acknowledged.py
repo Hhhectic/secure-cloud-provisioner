@@ -173,40 +173,239 @@ def test_entries_without_a_rule_id_are_dropped(tmp_path):
     assert [e["rule_id"] for e in entries] == ["bucket:public_policy"]
 
 
-# --------------------------------------------------- nothing writes it
+# ------------------------------------------- only one place writes it
+
+# This section used to assert that *nothing* in api/ wrote an acknowledgement,
+# and that the writer lived in main.py where no route could reach it. That was
+# a real constraint and it has been deliberately reversed: the CLI's option 15
+# is gone and POST /acknowledgements writes instead, because a tool whose only
+# route to a documented feature is a terminal is a tool that feature does not
+# reach. What replaces the constraint is that the write is guarded and that
+# the file is still the record - see scanner/acknowledged.check_entry, and the
+# refusals exercised further down.
 
 
-def test_no_part_of_the_api_writes_acknowledgements():
-    """The constraint that makes the rest of this safe.
+def test_the_api_reaches_the_writer_through_exactly_one_function():
+    """Not "nothing writes", but "one thing writes, and it validates first".
 
-    An endpoint that created acknowledgements would be a remote "stop
-    reporting this" API on a service that holds credentials and has no login.
-    Combined with a cross-site POST it would be a drive-by suppression of a
-    critical finding, which is the one thing the middleware in app.py was
-    added to prevent.
+    The old assertion was that api/ contained no write path at all. Now that
+    it does, what matters is that there is one of them: a second place
+    assembling this file's JSON is how a guard gets bypassed by the route that
+    forgot to call it.
     """
     api = Path(__file__).resolve().parent.parent / "api"
     source = "\n".join(f.read_text() for f in api.glob("*.py"))
 
-    assert "acknowledged" in source, "the API should be reading them"
+    assert "acknowledged.record(" in source, "the API writes through record()"
+    assert "acknowledged.check_entry(" in source, "and validates before it"
 
-    for writes in ("acknowledged.json", "SCP_ACKNOWLEDGED",
-                   "acknowledged.path()", ".write_text", "open("):
-        if writes in source:
-            # open() and write_text may appear for other reasons; only their
-            # use anywhere near acknowledgements is the problem.
-            for line in source.splitlines():
-                if writes in line:
-                    assert "acknowledg" not in line.lower(), line
+    # Nothing in api/ opens the file itself. The route hands an entry to
+    # scanner/acknowledged.py and that module owns the format.
+    for line in source.splitlines():
+        if "acknowledg" not in line.lower():
+            continue
+        for writes in ("acknowledged.json", "SCP_ACKNOWLEDGED",
+                       ".write_text", "open("):
+            assert writes not in line, line
+
+
+def test_an_acknowledgement_can_be_taken_back(tmp_path):
+    """The counterpart of record(). A decision somebody made has to be one
+    somebody can unmake, or the only way out of a stale entry is a text
+    editor."""
+    where = tmp_path / "acknowledged.json"
+    where.write_text(json.dumps({"acknowledgements": [
+        {"rule_id": "bucket:public_policy", "reason": "the CV site, on purpose",
+         "by": "ada", "on": "2026-01-01", "until": "2026-12-01"},
+        {"rule_id": "bucket:encryption_kms", "reason": "kms costs money here",
+         "by": "ada", "on": "2026-01-01", "until": "2026-12-01"},
+    ]}))
+
+    removed, path_used = acknowledged.remove("bucket:public_policy", where)
+
+    assert [e["rule_id"] for e in removed] == ["bucket:public_policy"]
+    assert path_used == where
+    # What it said comes back with it: the file no longer holds the reason,
+    # and the caller is the last place it exists.
+    assert removed[0]["reason"] == "the CV site, on purpose"
+
+    left, _ = acknowledged.load(where)
+    assert [e["rule_id"] for e in left] == ["bucket:encryption_kms"], (
+        "and nothing else in the file is touched")
+
+
+def test_taking_back_something_that_was_never_accepted_changes_nothing(tmp_path):
+    where = tmp_path / "acknowledged.json"
+    where.write_text(json.dumps({"acknowledgements": [
+        {"rule_id": "bucket:public_policy", "reason": "on purpose", "by": "ada"},
+    ]}))
+    before = where.read_text()
+
+    removed, _ = acknowledged.remove("bucket:nothing_like_this", where)
+
+    assert removed == []
+    assert where.read_text() == before, "the file is not rewritten for nothing"
+
+
+def test_every_entry_for_one_rule_is_taken_back_not_just_the_first(tmp_path):
+    """record() appends and does not look, so the file can hold two for one
+    rule. Leaving one behind would answer "no longer accepted" while the
+    finding stayed dimmed, which is the one result that would make this
+    untrustworthy."""
+    where = tmp_path / "acknowledged.json"
+    where.write_text(json.dumps({"acknowledgements": [
+        {"rule_id": "bucket:public_policy", "reason": "first", "by": "ada"},
+        {"rule_id": "bucket:encryption_kms", "reason": "unrelated", "by": "ada"},
+        {"rule_id": "bucket:public_policy", "reason": "written twice", "by": "bo"},
+    ]}))
+
+    removed, _ = acknowledged.remove("bucket:public_policy", where)
+
+    assert len(removed) == 2
+    left, _ = acknowledged.load(where)
+    assert [e["rule_id"] for e in left] == ["bucket:encryption_kms"]
+
+
+def test_a_removed_acknowledgement_stops_dimming_the_finding(tmp_path):
+    """End to end over the two functions that matter: apply() marks it, remove()
+    unmarks it, and nothing else about the finding changes."""
+    where = tmp_path / "acknowledged.json"
+    where.write_text(json.dumps({"acknowledgements": [
+        {"rule_id": "bucket:public_policy", "reason": "the CV site, on purpose",
+         "by": "ada", "on": "2026-01-01", "until": "2026-12-01"},
+    ]}))
+
+    def scan():
+        return [_warning(CRITICAL, "anyone can read it",
+                         {"rule_id": "bucket:public_policy",
+                          "resource_id": "bucket", "setting": "public_policy"})]
+
+    before = acknowledged.apply(scan(), acknowledged.load(where)[0], today=TODAY)
+    assert before[0].get("acknowledged")
+    assert acknowledged.count(before) == 1
+
+    acknowledged.remove("bucket:public_policy", where)
+
+    after = acknowledged.apply(scan(), acknowledged.load(where)[0], today=TODAY)
+    assert not after[0].get("acknowledged"), "it speaks at full volume again"
+    assert after[0]["level"] == CRITICAL, "and at the severity it always had"
+    assert acknowledged.count(after) == 0
+
+
+def test_the_write_is_refused_without_the_rule_id_repeated():
+    """The same demand every forced delete here makes.
+
+    A boolean is one character from being set by a copied example. Repeating
+    the id is not something a request does by accident, which is the property
+    wanted against a forged one.
+    """
+    problem = acknowledged.check_entry(
+        rule_id="bucket:public_policy", reason="a personal CV site, on purpose",
+        by="richard", until="2027-01-01", confirm="",
+        live_rule_ids={"bucket:public_policy"}, today=TODAY)
+
+    assert problem and "confirm" in problem
+
+
+def test_a_rule_nothing_reports_cannot_be_acknowledged():
+    """The strongest of the guards, and the one with no CLI equivalent.
+
+    The route re-scans and passes what it found. An acknowledgement written
+    against a finding that does not exist is one nobody can check, and it
+    would sit in the file until the audit reported it as matching nothing.
+    """
+    problem = acknowledged.check_entry(
+        rule_id="bucket:invented", reason="this finding is not real at all",
+        by="richard", until="2027-01-01", confirm="bucket:invented",
+        live_rule_ids={"bucket:public_policy"}, today=TODAY)
+
+    assert problem and "Nothing in the current scan" in problem
+
+
+def test_a_wildcard_is_refused_rather_than_matched_loosely():
+    """There are no patterns, and a request that tries one is told so.
+
+    apply() matches exactly, so a wildcard entry would silence nothing while
+    looking like it silenced a class. Refusing it is the difference between a
+    mistake and a mistake nobody notices.
+    """
+    problem = acknowledged.check_entry(
+        rule_id="bucket:*", reason="everything about this bucket is fine",
+        by="richard", until="2027-01-01", confirm="bucket:*",
+        live_rule_ids={"bucket:public_policy"}, today=TODAY)
+
+    assert problem and "not a rule id" in problem
+
+
+def test_a_security_group_rule_id_is_acceptable_despite_having_no_colon():
+    """The shape that broke the first version of the colon check.
+
+    Every other rule id here is `<resource>:<setting>`, so requiring a colon
+    looked like a free sanity check. A security group's per-rule finding uses
+    the SecurityGroupRuleId straight from AWS, which is a bare `sgr-...`, and
+    that finding is an administration port open to the internet - the single
+    thing this tool most exists to report, and therefore the one most likely
+    to be deliberate on a jump box and want acknowledging.
+    """
+    assert acknowledged.check_entry(
+        rule_id="sgr-0a1b2c3d4e5f", reason="deliberate jump box, reviewed Aug",
+        by="richard", until="2027-01-01", confirm="sgr-0a1b2c3d4e5f",
+        live_rule_ids={"sgr-0a1b2c3d4e5f"}, today=TODAY) is None
+
+
+def test_an_expiry_beyond_a_year_is_refused():
+    """The expiry is what makes these self-limiting.
+
+    A far-future date turns the mechanism off while leaving it looking on.
+    Enforced on the way in only: an entry already committed with a longer date
+    keeps it, because re-interpreting somebody's recorded decision is worse
+    than the date is.
+    """
+    problem = acknowledged.check_entry(
+        rule_id="bucket:public_policy", reason="a personal CV site, on purpose",
+        by="richard", until="2100-06-07", confirm="bucket:public_policy",
+        live_rule_ids={"bucket:public_policy"}, today=TODAY)
+
+    assert problem and str(acknowledged.MAX_DAYS) in problem
+
+
+def test_a_reason_too_short_and_an_author_missing_are_both_refused():
+    """Both survive from the CLI, which had them and was the only way in."""
+    common = dict(rule_id="bucket:public_policy", until="2027-01-01",
+                  confirm="bucket:public_policy",
+                  live_rule_ids={"bucket:public_policy"}, today=TODAY)
+
+    assert "not one" in acknowledged.check_entry(reason="ok", by="richard",
+                                                 **common)
+    assert "anonymous" in acknowledged.check_entry(
+        reason="a personal CV site, on purpose", by="   ", **common)
+
+
+def test_a_good_entry_passes_every_check():
+    """The one that would catch a guard tightened until nothing gets through."""
+    assert acknowledged.check_entry(
+        rule_id="bucket:public_policy", reason="a personal CV site, on purpose",
+        by="richard", until="2027-01-01", confirm="bucket:public_policy",
+        live_rule_ids={"bucket:public_policy"}, today=TODAY) is None
 
 
 def test_the_committed_file_parses_and_names_real_rule_ids():
-    """A typo here is an acknowledgement that silently covers nothing."""
+    """A typo here is an acknowledgement that silently covers nothing.
+
+    This used to require a colon in every rule id, on the belief that they are
+    all `<resource>:<setting>`. Most are, but a security group's per-rule
+    findings carry the SecurityGroupRuleId from AWS - a bare `sgr-...` - so
+    acknowledging an open SSH port, which is this tool's flagship finding,
+    produces an entry that assertion would have failed. What actually matters
+    is that an entry names something and says who and why, which is what is
+    checked now.
+    """
     entries, problem = acknowledged.load()
     assert problem is None
 
     for entry in entries:
-        assert ":" in entry["rule_id"], entry
+        assert entry["rule_id"].strip(), entry
+        assert "*" not in entry["rule_id"], f"{entry['rule_id']} is a pattern"
         assert entry.get("reason"), f"{entry['rule_id']} gives no reason"
         assert entry.get("by"), f"{entry['rule_id']} names nobody"
         assert entry.get("on"), f"{entry['rule_id']} has no date"
@@ -294,42 +493,25 @@ def test_no_scope_still_audits_everything():
     assert len(found) == 1
 
 
-def _cli():
-    """backend/main.py, loaded by path rather than by name.
 
-    `import main` is ambiguous in this repository and resolves to the *wrong*
-    one under pytest: there is a main.py at the root - the older Azure app -
-    and it wins. Same shape of trap as backend/az/ not being called
-    backend/azure/, and worth the four lines to be unambiguous about which
-    program is under test.
+
+# ------------------------------------------------- writing one, through the API
+
+
+def test_record_writes_an_entry_the_reader_then_honours(tmp_path, monkeypatch):
+    """The round trip, which is the whole point of the file.
+
+    This used to load the CLI by path and call main._append_acknowledgement.
+    The writer is scanner.acknowledged.record now, reached by
+    POST /acknowledgements, and the CLI no longer has an acknowledge option at
+    all.
     """
-    import importlib.util
-
-    where = Path(__file__).resolve().parent.parent / "main.py"
-    spec = importlib.util.spec_from_file_location("scp_cli", where)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-# ----------------------------------------------- writing one, from the CLI only
-
-
-def test_the_cli_writes_an_entry_the_reader_then_honours(tmp_path, monkeypatch):
-    """The round trip. Written by hand until now, which meant leaving the tool.
-
-    The writer lives in main.py rather than anywhere api/ can reach, and that
-    placement is the security argument rather than an accident of layout: a
-    person at a terminal is already authenticated by having the shell, where
-    the HTTP API has no login at all.
-    """
-    main = _cli()
-
     where = tmp_path / "acknowledged.json"
     monkeypatch.setenv("SCP_ACKNOWLEDGED", str(where))
 
     entry = {"rule_id": "bucket:public_policy", "reason": "a personal CV site",
              "by": "richard", "on": "2026-08-14", "until": "2027-02-14"}
-    main._append_acknowledgement(entry)
+    acknowledged.record(entry)
 
     entries, problem = acknowledged.load()
     assert problem is None
@@ -345,8 +527,6 @@ def test_writing_a_second_entry_keeps_the_first_and_the_comment(tmp_path, monkey
     """Read-modify-write, not append: the file carries a comment block
     explaining itself and an append would either destroy it or produce
     something that is not JSON."""
-    main = _cli()
-
     where = tmp_path / "acknowledged.json"
     where.write_text(json.dumps({
         "_comment": ["why this file exists"],
@@ -355,8 +535,8 @@ def test_writing_a_second_entry_keeps_the_first_and_the_comment(tmp_path, monkey
     }, indent=2))
     monkeypatch.setenv("SCP_ACKNOWLEDGED", str(where))
 
-    main._append_acknowledgement({"rule_id": "second:setting", "by": "else",
-                                  "on": "2026-08-14"})
+    acknowledged.record({"rule_id": "second:setting", "by": "else",
+                         "on": "2026-08-14"})
 
     document = json.loads(where.read_text())
     assert document["_comment"] == ["why this file exists"]
@@ -364,22 +544,18 @@ def test_writing_a_second_entry_keeps_the_first_and_the_comment(tmp_path, monkey
         "first:setting", "second:setting"]
 
 
-def test_the_writer_is_not_reachable_from_the_api(tmp_path):
-    """The other half of test_no_part_of_the_api_writes_acknowledgements.
+def test_the_cli_no_longer_writes_acknowledgements():
+    """The other half of the move, asserted rather than assumed.
 
-    That one reads api/*.py. This one says the writer is somewhere api/ does
-    not import: main.py is the CLI entrypoint and nothing under api/ imports
-    it, so no HTTP route can reach the function however it is called.
+    Leaving the CLI writer in place beside the new route would be two ways to
+    write this file with one set of guards between them - which is the failure
+    test_the_api_reaches_the_writer_through_exactly_one_function describes,
+    arrived at from the other direction. The demo feedback was that CLI
+    functions should be minimal; this is the one that moved.
     """
-    api = Path(__file__).resolve().parent.parent / "api"
-    source = "\n".join(f.read_text() for f in api.glob("*.py"))
+    cli = (Path(__file__).resolve().parent.parent / "main.py").read_text()
 
-    assert "import main" not in source
-    assert "from main" not in source
-    assert "_append_acknowledgement" not in source
-
-    # And scanner/acknowledged.py, which api/ *does* import, still only reads.
-    reader = (Path(__file__).resolve().parent.parent
-              / "scanner" / "acknowledged.py").read_text()
-    for writes in (".write_text", ".write(", "json.dump("):
-        assert writes not in reader, writes
+    assert "_append_acknowledgement" not in cli
+    assert "def acknowledge_menu" not in cli
+    # And the menu does not offer an option that no longer exists.
+    assert "Acknowledge a finding" not in cli

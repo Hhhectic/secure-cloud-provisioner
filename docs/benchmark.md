@@ -436,3 +436,167 @@ produced by the suffix method, so the ones not re-measured since may be
 understated in the same way.
 
 [cg]: https://github.com/RhinoSecurityLabs/cloudgoat
+
+
+# Benchmarked against Prowler, on Azure
+
+The first external benchmark of the Azure rules. Until this run, everything
+known about their quality came from tests written by the people who wrote the
+rules — the gap CLAUDE.md had been calling the more honest of the two.
+
+It was also cheaper to close than the note implied. Prowler is not an AWS tool
+that happens to have been pointed at AWS: it covers Azure, Google Cloud,
+Kubernetes and M365, and `prowler azure` is one word different from the command
+this repository already documented. Nobody had run it.
+
+```bash
+uv python install 3.12
+uv venv --python 3.12 /tmp/prowler && VIRTUAL_ENV=/tmp/prowler uv pip install prowler
+prowler azure --sp-env-auth --subscription-id <id>
+```
+
+`--sp-env-auth` reads `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and
+`AZURE_CLIENT_SECRET`, which are the four variables already in `.env` minus the
+subscription. No extra credential, and the run is read-only.
+
+Prowler 5.37.1, subscription `74baf379…`, 55 findings: 45 fail, 10 pass, across
+storage (36), monitor (13), defender (3), network (2) and appinsights (1). The
+two storage accounts scanned are a teammate's, made in the portal — which makes
+them the better test, because nothing in this project created them.
+
+## Where the two agree, which is everywhere they overlap
+
+Five checks exist on both sides, and the verdict matches on all five. Three are
+agreements that nothing is wrong, which are the easier ones to get wrong
+silently.
+
+| Prowler | this tool | both say |
+|---|---|---|
+| `storage_account_key_access_disabled` | `shared_key_allowed` | problem |
+| `storage_account_public_network_access_disabled`, `storage_default_network_access_rule_is_denied` | `reachable_from_anywhere` | problem |
+| `storage_blob_public_access_level_is_disabled` | `public_blob_access` | fine |
+| `storage_ensure_minimum_tls_version_12` | `insecure_tls_version` | fine |
+| `storage_secure_transfer_required_is_enabled` | `no_https_only` | fine |
+
+No disagreement, in either direction. The Azure rules are narrower than
+Prowler's, not wrong.
+
+## What Prowler covers that this does not
+
+Eleven storage checks, and they are not all the same kind of thing. Worth
+separating before anyone files eleven tickets:
+
+**Security-relevant and plausible additions.** Soft delete on blobs, key
+rotation older than 90 days, private endpoints, and defaulting to Entra
+authorization rather than the account key. The last is the other half of a
+finding this tool already has — it reports that the key *works*, and Prowler
+also reports that Entra is not the default.
+
+**Durability rather than exposure.** Blob versioning and geo-redundancy. Real,
+and arguably outside what this tool says it does: the README scope is
+configuration that is *unsafe*, and an account with no geo-redundancy is not
+reachable by anyone it should not be. Adding them would widen the claim.
+
+**Defence in depth, debatable.** Customer-managed keys, infrastructure
+encryption, trusted Azure services, and SMB channel encryption algorithms.
+Each is a real hardening step and none of them is the thing that gets an
+account read by a stranger.
+
+## Four services this tool does not scan at all
+
+Monitor is the largest single block Prowler reports (13 checks), and it is
+activity-log alerting: alerts on creating or updating a network security
+group, a public IP rule, a policy assignment, a security solution. That is the
+Azure counterpart of the alarm scanner on the AWS side, which exists and has
+never had an Azure equivalent.
+
+Defender (3), Network Watcher and bastion host (2) and Application Insights
+(1) are the rest. None is a gap in the rules that exist; they are services
+nobody has written rules for.
+
+## The other four types, with resources built for the purpose
+
+The first run scanned two storage accounts and nothing else, which left the
+four types this project spent most effort on unexercised. So a vault, a
+security group, a virtual network and a machine were built deliberately weak,
+Prowler was run again — 79 findings, 61 fail — and everything was destroyed.
+
+The pattern held. Every check the two tools share agrees, and there is still
+no contradiction in either direction.
+
+| Prowler | this tool | both say |
+|---|---|---|
+| `network_ssh_internet_access_restricted` (both groups) | `open_22`, critical | problem |
+| `network_subnet_nsg_associated` | `subnet_without_firewall` | problem |
+| `network_vnet_ddos_protection_enabled` | `no_ddos_protection` | problem |
+| `keyvault_recoverable` | `no_purge_protection` | problem |
+| `network_http/rdp/udp_internet_access_restricted` | silence | fine |
+| `vm_linux_enforce_ssh_authentication` | silence | fine |
+| `vm_ensure_using_managed_disks` | silence | fine |
+
+`keyvault_rbac_enabled` and `access_policies_empty` are the same fact seen from
+opposite ends — Prowler reports that role-based authorization is off, this
+reports that the policy list nobody replaced it with is empty.
+
+**Two findings are this tool's alone.** A security group attached to nothing
+(`unused`) has no Prowler equivalent, and neither does a machine carrying a
+public address (`has_public_address`) — Prowler reports the open port on the
+group rather than the exposure on the machine. That is the same fact reached
+from the other side, and it is the one place this tool's model is arguably the
+more useful: `read_vm_for_scanning` reads the groups on the card *and* the
+subnet and judges the machine, which is what somebody looking at a machine
+wants to know.
+
+**What Prowler has that this does not, on these four types.** Key vaults:
+logging, private endpoints. Machines: backup, JIT access, trusted launch,
+approved images, disk encryption with customer-managed keys, and a size
+policy. All real; none of them is the thing that gets a machine reached from
+the internet, which is what this tool reports first and loudest.
+
+## What this measurement still does not say
+
+One subscription, one region, one service principal, and resources this
+project built. A storage account somebody made in the portal years ago is
+still the case least covered — the two that exist here were a teammate's, and
+they are the only thing in this benchmark that nothing in this repository
+created.
+
+
+## What was taken from that benchmark, and what was left
+
+Two of Prowler's eleven storage checks are implemented here now. The other
+nine were declined, and the reasons are worth keeping so nobody re-files them.
+
+**Container soft delete and blob soft delete, as two findings.** Azure keeps
+them as separate settings and so does this: an account with blob retention on
+still loses everything if somebody deletes the container, and the container
+setting is the less well known of the two. Both are warnings, not criticals -
+severity here means how reachable something is, and a thing that cannot be got
+back is a different axis. This is the same reasoning the key vault rules
+already use.
+
+**Key age, which is not quite Prowler's check.** `storage_key_rotation_90_days`
+reports whether a key *expiration policy* is configured; this reports how long
+the keys have actually gone unchanged, read from `key_creation_time`. The
+second is a fact about the account and the first is a reminder somebody set,
+and the fact is the more useful of the two - the AWS half made the same choice
+about root MFA, preferring `GetAccountSummary` over a report that could be four
+hours stale. Ninety days is Prowler's threshold and is kept, stated as the
+convention it is.
+
+**Declined: private endpoints and defaulting to Entra.** Both would be second
+findings about something already reported. `reachable_from_anywhere` says the
+account is open to any network, and `shared_key_allowed` says the account key
+is still accepted - the stronger statement in each pair. Adding Prowler's
+version alongside would put two entries in front of a reader for one decision,
+which is how a findings list stops being read.
+
+**Declined: geo-redundancy and blob versioning.** Durability rather than
+exposure. The README says this tool flags configuration that is unsafe, and an
+account without geo-redundancy is not reachable by anyone who should not reach
+it. Adding them would widen the claim rather than fill a gap in it.
+
+**Declined for now: customer-managed keys, infrastructure encryption, trusted
+Azure services, SMB channel algorithms.** Each is a real hardening step. None
+is the thing that gets an account read by a stranger, and this tool reports
+that first and loudest on purpose.

@@ -23,11 +23,30 @@ screen.
 There are no patterns. An acknowledgement names one rule_id exactly, because
 one wildcard entry silencing a whole class of finding is how these go wrong.
 
-Nothing in this tool writes this file. It is edited by hand and committed, so
-every acknowledgement is a diff with an author on it. An endpoint that created
-acknowledgements would be a remote "stop reporting this" API on a service that
-holds credentials and has no login, which is the opposite of what the rest of
-api/app.py spends its time preventing.
+Who may write this file, and what that costs
+--------------------------------------------
+This module used to say nothing in the tool wrote this file at all, and that
+the write belonged in the CLI because an endpoint would be a remote "stop
+reporting this" API on a service holding credentials with no login. The write
+is now `record()` below, reached by `POST /acknowledgements`.
+
+The reason the old argument does not survive contact with the rest of this
+program: the same API already exposes `DELETE /resources/{type}/{id}` with
+force, which destroys infrastructure. If the guards on that path are trusted
+for deletion they are trusted for suppression, and suppression is the smaller
+of the two - it dims a finding rather than removing a machine. The middleware
+in api/app.py refuses any write carrying another site's Origin and any request
+whose Host is not this machine, which is the cross-site POST the old note was
+written against.
+
+What the move does cost is that an acknowledgement is no longer necessarily a
+commit with an author on it. That was real provenance and a browser cannot
+reproduce it, so the guards below stand in for it: `by` is required and cannot
+be blank, a reason under fifteen characters is refused, an entry must name a
+rule id that already exists, `confirm` must repeat that id, and every
+acknowledgement now expires within a year whatever the request asks for. The
+file is still a diff somebody has to commit for the decision to reach anybody
+else's checkout.
 
 And the acknowledgements are themselves audited: one that has expired, or that
 matches nothing in the account any more, is reported as a finding. A skipped
@@ -48,6 +67,20 @@ DEFAULT_PATH = Path(__file__).resolve().parent.parent / "acknowledged.json"
 # Applied when an entry gives no "until" of its own: an acknowledgement with no
 # end date is a decision nobody ever revisits.
 DEFAULT_DAYS = 180
+
+# The longest any *newly written* acknowledgement may run.
+#
+# Enforced on the write path only, never on read: an entry already in the file
+# with a longer date keeps it, because silently re-interpreting somebody's
+# committed decision is worse than the long date is. The cap exists because an
+# expiry is the only thing making these self-limiting, and a far-future one
+# turns the mechanism off while looking like it is on - a working tree here
+# carried `"until": "2100-06-07"` on a finding somebody was mid-debugging.
+MAX_DAYS = 365
+
+# The shortest reason that is one. A reason is read by somebody deciding
+# whether the decision still holds, and "ok" does not survive that reading.
+MIN_REASON = 15
 
 
 def path():
@@ -218,3 +251,149 @@ def audit(warnings, entries=None, today=None, problem=None, scanned=None):
 def count(warnings):
     """How many of these findings somebody has already decided to live with."""
     return sum(1 for w in warnings if w.get("acknowledged"))
+
+
+# ------------------------------------------------------------- writing one
+
+
+def check_entry(rule_id, reason, by, until, confirm, live_rule_ids, today=None):
+    """Whether this may be written. Returns an error sentence, or None.
+
+    Separate from `record` so a caller can be refused before anything is
+    opened, and so the refusals are testable without a filesystem. Every one
+    of them is a sentence aimed at the person who typed the thing, which is
+    the same standard the warnings themselves are held to.
+    """
+    today = today or date.today()
+
+    # Named twice, the demand every forced delete already makes. A boolean is
+    # one character from being set by a copied example; repeating the id is
+    # not something a request makes by accident.
+    if confirm != rule_id:
+        return (
+            "To acknowledge a finding, confirm has to repeat its rule id "
+            f"exactly. Expected '{rule_id}'."
+        )
+
+    # No wildcards, ever. One entry silencing a class of finding is how these
+    # go wrong, and the reader matches exactly - so a pattern would not work
+    # anyway, it would just look like it had.
+    #
+    # Deliberately not a check that the id contains a colon. Most rule ids are
+    # `<resource>:<setting>`, but a security group's per-rule findings use the
+    # SecurityGroupRuleId straight from AWS - a bare `sgr-...` - and that is
+    # the flagship finding of the whole tool. Requiring the colon refused an
+    # open SSH port, which is the thing this most exists to report. The real
+    # guard against a made-up id is the live_rule_ids check below; this one
+    # only has to stop somebody reaching for a glob.
+    if "*" in rule_id:
+        return (
+            f"'{rule_id}' is not a rule id. An acknowledgement names one "
+            "finding exactly, and there are no patterns - the reader matches "
+            "exactly, so a wildcard would silence nothing while looking as "
+            "though it had."
+        )
+
+    # The finding has to exist. Without this the API accepts an entry for
+    # anything at all, including a rule id somebody expects to see later -
+    # which is an acknowledgement written before the thing it excuses.
+    if rule_id not in live_rule_ids:
+        return (
+            f"Nothing in the current scan reports '{rule_id}'. An "
+            "acknowledgement is written against a finding that exists; "
+            "scan the resource first."
+        )
+
+    if len((reason or "").strip()) < MIN_REASON:
+        return (
+            "A reason this short is not one. Somebody else has to be able to "
+            "read it later and decide whether it still holds."
+        )
+
+    if not (by or "").strip():
+        return "An acknowledgement with no author is anonymous."
+
+    try:
+        expires = date.fromisoformat(until)
+    except (TypeError, ValueError):
+        return f"'{until}' is not a date in YYYY-MM-DD form."
+
+    if expires <= today:
+        return f"{until} has already passed, so that entry would do nothing."
+
+    if expires.toordinal() - today.toordinal() > MAX_DAYS:
+        latest = date.fromordinal(today.toordinal() + MAX_DAYS)
+        return (
+            f"{until} is further out than {MAX_DAYS} days. An acknowledgement "
+            "that outlives everyone's memory of writing it is the thing the "
+            f"expiry exists to prevent. The latest allowed is {latest}."
+        )
+
+    return None
+
+
+def record(entry, source=None):
+    """Writes one entry into the file, preserving everything already there.
+
+    Read, modify, write rather than append: the file is JSON carrying a
+    comment block that explains itself, and an append would either destroy it
+    or produce something that no longer parses.
+
+    Validation is `check_entry`, which the caller runs first. This function
+    writes what it is given.
+    """
+    where = Path(source) if source else path()
+
+    if where.exists():
+        document = json.loads(where.read_text())
+    else:
+        document = {"acknowledgements": []}
+
+    # The file is allowed to be a bare list; normalising here means the shape
+    # written is always the documented one.
+    if isinstance(document, list):
+        document = {"acknowledgements": document}
+
+    document.setdefault("acknowledgements", []).append(entry)
+    where.write_text(json.dumps(document, indent=2) + "\n")
+    return where
+
+
+def remove(rule_id, source=None):
+    """Takes one rule's acknowledgements back out. Returns (removed, path).
+
+    `removed` is the entries that were dropped, so the caller can say what the
+    decision was rather than only that there is no longer one. That matters
+    more here than it would for most deletes: the thing being thrown away is
+    somebody's written reason, and echoing it back is the only record left of
+    what it said once the file no longer holds it.
+
+    Deliberately lighter guards than `check_entry`. Everything that function
+    protects is about *quietening* a finding - the direction that can hide a
+    live exposure, on a service holding credentials with no login. This is the
+    other direction: the worst a wrong call here can do is report something at
+    full volume that somebody had already decided about, which is the state the
+    tool starts in and the one it is safe to be wrong towards.
+
+    Removes every entry for the id rather than the first. Nothing stops the
+    file holding two for one rule - `record` appends and does not look - and
+    leaving one behind would answer "un-accepted" while the finding stayed
+    dimmed, which is the one outcome that would make this untrustworthy.
+    """
+    where = Path(source) if source else path()
+    if not where.exists():
+        return [], where
+
+    document = json.loads(where.read_text())
+    if isinstance(document, list):
+        document = {"acknowledgements": document}
+
+    entries = document.get("acknowledgements", [])
+    removed = [e for e in entries if isinstance(e, dict)
+               and e.get("rule_id") == rule_id]
+    if not removed:
+        return [], where
+
+    document["acknowledgements"] = [e for e in entries if e not in removed]
+    where.write_text(json.dumps(document, indent=2) + "\n")
+    return removed, where

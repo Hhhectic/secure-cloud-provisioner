@@ -7,6 +7,8 @@ DependencyViolation naming nothing, so a half-deleted network that will not
 finish dying is the characteristic failure. The tests below pin the ordering.
 """
 
+import ipaddress
+
 import boto3
 import pytest
 from botocore.exceptions import ClientError
@@ -15,6 +17,7 @@ from moto import mock_aws
 from api import registry
 from aws import vpcs
 from aws import instances as ec2i
+from aws.s3_buckets import PermissionDenied
 from scanner.vpc_rules import check_vpc
 from scanner.common import CRITICAL, WARNING, INFO, cited, fixable
 
@@ -63,12 +66,20 @@ def test_a_nat_gateway_is_refused_with_the_price_named():
         ec2 = boto3.client("ec2", region_name=REGION)
         ok, message, _ = vpcs.create_vpc(ec2, "demo", with_nat_gateway=True)
 
+        # Inside the mock, and it was not. This line sat after the block, so
+        # the client it used was talking to real AWS: the call failed with
+        # AuthFailure, list_vpcs swallowed every ClientError into an empty
+        # list, and the assertion passed without ever looking at the network
+        # the test had just refused to build. It only surfaced when that
+        # swallow was removed. The third time this project has found an
+        # offline test quietly reaching the network.
+        assert vpcs.list_vpcs(ec2, only_ours=True) == []
+
     assert not ok
     assert "$32" in message
     # The point that makes it dangerous: stopping your machines does not stop
     # this bill. Only deleting the gateway does.
     assert "until it is deleted" in message
-    assert vpcs.list_vpcs(ec2, only_ours=True) == []
 
 
 # ------------------------------------------------------------ Build, over moto
@@ -90,6 +101,53 @@ def test_a_created_network_has_a_public_and_a_private_subnet(ec2):
     assert set(by_role) == {"public", "private"}
     assert by_role["public"]["reaches_internet"] is True
     assert by_role["private"]["reaches_internet"] is False
+
+
+@pytest.mark.parametrize("cidr", ["10.0.0.0/16", "10.1.0.0/16",
+                                  "172.31.0.0/16", "192.168.0.0/16"])
+def test_every_cidr_the_form_offers_gets_both_its_subnets(ec2, cidr):
+    """The subnets have to be inside the network somebody chose.
+
+    They were the constants 10.0.1.0/24 and 10.0.2.0/24, which are inside
+    10.0.0.0/16 and inside none of the other three the page's menu offers. So
+    three of four choices failed both create_subnet calls with "The CIDR
+    '10.0.1.0/24' is invalid" and returned a VPC with nothing in it - reported
+    as created, with the failures relegated to `problems`, which is how it
+    survived: a network you cannot put a machine in, that answers ok.
+
+    Parametrized over the menu rather than over one awkward value, because the
+    bug was not that some exotic CIDR broke - it was that the default was the
+    only one that worked.
+    """
+    ok, vpc_id, problems = vpcs.create_vpc(ec2, "demo", cidr=cidr, region=REGION)
+    assert ok, vpc_id
+    assert not [p for p in problems if "invalid" in p.lower()], problems
+
+    settings = vpcs.read_vpc_for_scanning(ec2, vpc_id)
+    by_role = {s["declared_role"]: s for s in settings["subnets"]}
+    assert set(by_role) == {"public", "private"}, problems
+
+    network = ipaddress.ip_network(cidr)
+    for role in ("public", "private"):
+        subnet = ipaddress.ip_network(by_role[role]["cidr"])
+        assert subnet.subnet_of(network), f"{role} {subnet} is outside {network}"
+    assert by_role["public"]["cidr"] != by_role["private"]["cidr"]
+
+
+def test_the_default_network_keeps_the_subnets_it_always_had(ec2):
+    """The derivation is not an excuse to move the default's addresses.
+
+    Anything already running in a 10.0.0.0/16 built by this tool sits in
+    10.0.1.0/24 or 10.0.2.0/24, and a security group written against those
+    ranges by hand should not quietly start pointing at nothing.
+    """
+    assert vpcs.subnet_cidrs("10.0.0.0/16") == ("10.0.1.0/24", "10.0.2.0/24")
+
+
+def test_a_network_too_small_to_divide_says_so_rather_than_failing_twice(ec2):
+    """A /28 has nothing to carve, and one clear sentence beats two AWS errors."""
+    public, private = vpcs.subnet_cidrs("10.0.0.0/28")
+    assert public is None and private is None
 
 
 def test_the_private_subnet_has_no_internet_route_at_all(ec2):
@@ -154,6 +212,51 @@ def test_dns_is_enabled_so_instances_get_names(ec2):
             VpcId=vpc_id, Attribute=attribute
         )[attribute[0].upper() + attribute[1:]]["Value"]
         assert value is True, f"{attribute} should be on"
+
+
+def test_a_refused_listing_is_not_an_account_with_no_networks():
+    """It answered a denial with an empty list, which is the one wrong answer
+    that reassures.
+
+    The route hands that back as HTTP 200 with nothing in it and the page
+    prints "none" - the single word meaning somebody looked and there was
+    nothing there. Every other type reports "unreachable" when its read is
+    refused, because every other list either raises or lets the error out;
+    networks alone went quiet, and an account whose networks could not be read
+    was indistinguishable from one that has none.
+
+    aws/snapshots.py writes the rule down for itself and it is the same rule:
+    something this tool was not allowed to ask about must never be reported as
+    the safe answer.
+    """
+    denied = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "not authorized"}},
+        "DescribeVpcs")
+
+    class _Refusing:
+        def describe_vpcs(self, **kwargs):
+            raise denied
+
+    with pytest.raises(PermissionDenied) as raised:
+        vpcs.list_vpcs(_Refusing())
+
+    assert raised.value.permission == "ec2:DescribeVpcs"
+
+
+def test_a_listing_that_fails_for_another_reason_still_propagates():
+    """Only a refusal becomes PermissionDenied. Anything else keeps its own
+    identity rather than being relabelled as a missing permission, which would
+    send somebody to fix an IAM policy that was never wrong."""
+    other = ClientError(
+        {"Error": {"Code": "RequestLimitExceeded", "Message": "slow down"}},
+        "DescribeVpcs")
+
+    class _Throttled:
+        def describe_vpcs(self, **kwargs):
+            raise other
+
+    with pytest.raises(ClientError):
+        vpcs.list_vpcs(_Throttled())
 
 
 def test_a_created_network_is_tagged_and_findable(ec2):
@@ -614,3 +717,117 @@ def test_the_full_lifecycle_through_the_registry(ec2):
 
 def test_checking_a_spec_that_asks_for_a_nat_gateway_warns_first():
     assert registry.VPC.check_spec({"name": "demo"}) == []
+
+
+# ------------------------------------------------- saying what it is doing
+
+
+def test_a_cascade_names_each_step_as_it_takes_it(ec2):
+    """The steps were always named; the names were thrown away.
+
+    delete_vpc has had a list of labelled steps since it was written and
+    reported none of them, so a caller got one answer four or five minutes
+    after asking and nothing in between. That is the same shape as the
+    `problems` list a failed create discarded: the information existed at the
+    only point it was useful and was dropped there.
+    """
+    _, made, _ = vpcs.create_vpc(ec2, "progress-demo", "10.30.0.0/16")
+    said = []
+
+    ok, _ = vpcs.delete_vpc(ec2, made, force=True, report=said.append)
+    assert ok
+
+    joined = "\n".join(said)
+    for expected in ("subnets", "route tables", "internet gateways",
+                     "security groups", "the network itself"):
+        assert expected in joined, f"no step mentioned {expected}"
+
+
+def test_a_cascade_without_a_report_is_unchanged(ec2):
+    """Every existing caller passes nothing. The CLI, the smoke test and the
+    rest of this file must not have to learn about progress to keep working."""
+    _, made, _ = vpcs.create_vpc(ec2, "silent-demo", "10.31.0.0/16")
+
+    ok, message = vpcs.delete_vpc(ec2, made, force=True)
+
+    assert ok
+    assert made in message
+
+
+class _InterfacesThatLinger:
+    """describe_network_interfaces that answers "still attached" a few times.
+
+    moto detaches instantly, so the wait this narrates never actually waits
+    against the fake - and it is where a real cascade spends nearly all of its
+    four or five minutes. Without a stub the one thing worth reporting is the
+    one thing no test would see.
+    """
+
+    def __init__(self, counts):
+        # One answer per poll, so a test can make the count fall the way a
+        # real one does rather than only switch off.
+        self.counts = list(counts)
+
+    def describe_network_interfaces(self, **kwargs):
+        left = self.counts.pop(0) if self.counts else 0
+        return {"NetworkInterfaces": [{"NetworkInterfaceId": f"eni-{n}"}
+                                      for n in range(left)]}
+
+
+def test_the_long_wait_speaks_once_rather_than_once_per_poll():
+    """The first version reported every time round and it was wrong.
+
+    Polling every five seconds for four minutes is about fifty lines, of which
+    forty-nine repeat the one before them - so the log scrolls, the earlier
+    steps leave the screen, and the one genuinely new fact arrives looking
+    like more of the same. Whether the thing is alive is a different question
+    from what it is doing, and the page answers it with a clock.
+    """
+    said = []
+    cleared = vpcs.wait_for_interfaces_to_clear(
+        _InterfacesThatLinger([2, 2, 2, 2, 2, 0]), "vpc-1",
+        attempts=10, delay=0, report=said.append)
+
+    assert cleared
+    assert len(said) == 2, f"one line for the wait, one for the all-clear: {said}"
+    assert "2 network connections" in said[0]
+    assert said[-1] == "Network connections are clear."
+
+
+def test_the_wait_speaks_again_when_the_count_actually_changes():
+    """A change is news. Two machines releasing one interface each is the
+    difference between "still waiting" and "halfway", and it is the only thing
+    during this wait that is worth a new line."""
+    said = []
+    vpcs.wait_for_interfaces_to_clear(
+        _InterfacesThatLinger([3, 3, 2, 2, 1, 0]), "vpc-1",
+        attempts=10, delay=0, report=said.append)
+
+    assert len(said) == 4, said
+    assert "3 network connections" in said[0]
+    assert "2 network connections" in said[1]
+    assert "1 network connection " in said[2]
+    assert said[3] == "Network connections are clear."
+
+
+def test_the_wait_carries_no_clock_of_its_own():
+    """Two timers started at different moments disagree by however long the
+    earlier steps took, which reads as one of them being broken rather than as
+    them measuring different things. The page has the clock; this has the
+    facts."""
+    said = []
+    vpcs.wait_for_interfaces_to_clear(
+        _InterfacesThatLinger([2, 2, 0]), "vpc-1",
+        attempts=10, delay=30, report=said.append)
+
+    assert not any("0m" in line or "1m" in line for line in said), said
+
+
+def test_one_remaining_interface_is_not_described_in_the_plural():
+    said = []
+    vpcs.wait_for_interfaces_to_clear(
+        type("One", (), {"describe_network_interfaces":
+                         lambda self, **k: {"NetworkInterfaces": [{"x": 1}]}})(),
+        "vpc-1", attempts=1, delay=0, report=said.append)
+
+    assert "1 network connection " in said[0]

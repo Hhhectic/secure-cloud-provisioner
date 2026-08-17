@@ -145,14 +145,32 @@ def smoke_security_group(region):
     group_id = None
 
     try:
+        # The network is chosen, not assumed. _sg_create used to fall back to
+        # the account's default VPC and now refuses a spec without a vpc_id,
+        # because placement cannot be changed afterwards and decides more about
+        # a group's reach than any rule in it. This section never passed one,
+        # so when that refusal landed it landed here - three checks failing
+        # against real AWS while the offline suite stayed green, which is the
+        # whole reason this script exists.
+        #
+        # Read off the registry's own options, the same list the page and the
+        # CLI choose from, so this cannot drift from what a person is offered.
+        networks = resource.options(client).get("vpc_id") or []
+        if not check(bool(networks),
+                     f"there is a network in {region} to put a group in"):
+            return
+        vpc_id = networks[0]["value"]
+
         spec = {
             "name": name,
+            "vpc_id": vpc_id,
             "description": "Created by the smoke test. Safe to delete.",
             "rules": [{"protocol": "tcp", "from_port": 22, "to_port": 22,
                        "source": "0.0.0.0/0"}],
         }
 
         print(f"  {DIM}group name: {name}{RESET}")
+        print(f"  {DIM}network:    {vpc_id}{RESET}")
 
         created, group_id, problems = resource.create(client, spec)
         if not check(created, "created a group with SSH open to the world"):
@@ -1286,8 +1304,14 @@ def smoke_api(region):
         # will do quietly, so the refusal is asserted first and the create then
         # says out loud that it means it. Asking for the open group without the
         # flag and getting it would be the failure.
+        # vpc_id off the menu asserted just above, because the route refuses a
+        # spec without one. Over HTTP that refusal is the whole point - a
+        # script is the caller least likely to notice a group landing in a
+        # network it did not choose - so the section that exercises the HTTP
+        # layer has to pass one the way any other caller would.
         spec = {
             "name": name,
+            "vpc_id": options["vpc_id"][0]["value"],
             "description": "smoke test of the HTTP layer",
             "rules": [{"protocol": "tcp", "from_port": 22, "to_port": 22,
                        "source": "0.0.0.0/0"}],

@@ -157,5 +157,13 @@ def test_an_untouched_rule_row_sends_no_rule(page_run):
 @needs_jsdom
 def test_the_page_offers_no_create_form_for_an_audited_type(page_run):
     """read_only travels all the way to the interface, so a button that could
-    only ever be refused is never drawn."""
-    assert "an audited type offers no create form and says why" in page_run.stdout
+    only ever be refused is never drawn.
+
+    It used to be drawn and then explained: an audited type appeared in the
+    one list of resources and answered with a panel saying it had nothing to
+    create. The page has three tabs now, and the same fact is stated earlier
+    and more cheaply - the type is not offered on Create at all. Still
+    `read_only` reaching the interface; one step further up.
+    """
+    assert ("an audited type is absent from Create rather than explaining "
+            "itself there") in page_run.stdout

@@ -43,12 +43,18 @@ _RULES = {
     ),
     "azure-keyvault": (
         r"[A-Za-z][A-Za-z0-9-]{1,22}[A-Za-z0-9]",
-        "3 to 24 characters of letters, numbers and hyphens, starting with a "
-        "letter and not ending with a hyphen. The name is global to all of "
-        "Azure.",
+        "3 to 24 characters of letters, numbers and single hyphens, starting "
+        "with a letter and not ending with a hyphen. The name is global to "
+        "all of Azure.",
     ),
+    # The tail is optional, which is what lets a one-character name through.
+    # Without it the pattern needs a first character and a last one, so the
+    # shortest name it accepts is two - and the sentence underneath promises
+    # one. Azure takes a single character here; verified by creating a group
+    # called "a" against a real subscription and deleting it again. The
+    # refusal used to name the rule the name already satisfied.
     "azure-nsg": (
-        r"[A-Za-z0-9][A-Za-z0-9._\-]{0,78}[A-Za-z0-9_]",
+        r"[A-Za-z0-9]([A-Za-z0-9._\-]{0,78}[A-Za-z0-9_])?",
         "1 to 80 characters of letters, numbers, underscores, periods and "
         "hyphens, starting with a letter or number and ending with a letter, "
         "number or underscore.",
@@ -118,10 +124,16 @@ def check(kind, name):
             "cannot end with a period."
         )
 
-    if kind == "container" and "--" in name:
+    # Two kinds forbid doubled hyphens and no pattern above says so, because
+    # expressing it inside a length-bounded pattern costs more than it saves.
+    # The vault half was missing: Azure answers check_name_availability for
+    # 'scp-edge--probe' with available=False, reason=Invalid, while this
+    # module accepted it - so the refusal arrived from Azure, after the round
+    # trip, in the same generic words it uses for a name somebody else owns.
+    if kind in ("container", "azure-keyvault") and "--" in name:
         return False, (
-            f"Azure will not accept '{name}' as a container name: hyphens "
-            "cannot be doubled."
+            f"Azure will not accept '{name}' as a {_label(kind)} name: "
+            "hyphens cannot be doubled."
         )
 
     return True, None

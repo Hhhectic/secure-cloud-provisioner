@@ -42,6 +42,7 @@ from aws.s3_buckets import (
     cleanup_all_managed_buckets,
     PermissionDenied,
 )
+from aws import instances as ec2i
 from aws import key_pairs
 from aws import security_groups
 from aws import snapshots
@@ -50,7 +51,6 @@ from aws import vpcs
 from api import registry
 from az.common import AzureNotConfigured
 from blueprints import bastion
-from scanner import acknowledged
 from scanner.rules import check_firewall_rules
 from scanner.s3_rules import check_bucket_settings
 from scanner.common import (print_warnings, fixable, summarize, worst_level,
@@ -371,7 +371,11 @@ def security_group_menu(ec2):
         if not rules:
             print("No rules given. The group will allow nothing inbound.")
 
-        warnings = check_firewall_rules(rules)
+        # Through the registry rather than calling check_firewall_rules here,
+        # so this menu cannot judge a group by a different rule set than the
+        # page does. The two are the same call today; keeping a second copy of
+        # which scanner belongs to which type is how they stop being.
+        warnings = registry.SECURITY_GROUP.check_spec({"rules": rules})
         if warnings:
             _report(warnings)
             if input("\nCreate anyway? (y/N): ").strip().lower() != "y":
@@ -439,10 +443,31 @@ def bucket_menu(s3):
         default_name = f"scp-test-{suffix}"
         name = input(f"Bucket name [{default_name}]: ").strip() or default_name
 
-        if not secure:
-            print("\nThis bucket will be created with no encryption, no versioning,")
-            print("and no public access block. That is the point of this option.")
-            if input("Continue? (y/N): ").strip().lower() != "y":
+        # The same pre-flight the API runs, and for the reason every other menu
+        # here already had one. This used to be three sentences naming what the
+        # weak option builds - no encryption, no versioning, no public access
+        # block - and by the time anybody read it back the scanner reported
+        # five findings, two of them critical. The one it had stopped
+        # mentioning was that the bucket accepts plain unencrypted connections.
+        #
+        # A description of what a rule set says, written by hand beside the
+        # rule set, goes stale the moment a rule is added and nothing fails
+        # when it does. Showing the findings is the thing this tool exists to
+        # do, and it cannot drift from them.
+        spec = {"name": name, "region": REGION, "secure_by_default": secure}
+        planned = registry.BUCKET.check_spec(spec)
+        if planned:
+            print("\nBefore building it, this is what it would be:")
+            _report(planned)
+
+        if worst_level(planned) == CRITICAL:
+            # POST /resources/bucket refuses this outright and needs
+            # accept_risk=true to proceed. The CLI asks instead, because there
+            # is a person here to ask - but it does have to ask, and it did
+            # not, which meant the same tool refused a configuration on one
+            # surface and built it quietly on the other.
+            if input("\nCreate it anyway? (y/N): ").strip().lower() != "y":
+                print("Stopped. Nothing was created.")
                 return
 
         ok, res, problems = create_bucket(
@@ -829,7 +854,33 @@ def instance_menu(ec2):
             print("why the tool always states the answer rather than leaving")
             print("it to the subnet.")
 
+        # The allowlist, off the registry rather than written out again here -
+        # the same arrangement the Azure machine menu already used, and the
+        # reason it cannot offer a size the tool would then refuse.
+        #
+        # This menu did not ask at all until now. It built a spec with no
+        # instance_type in it, launch_instance fell through to
+        # DEFAULT_INSTANCE_TYPE, and every machine the CLI has ever started has
+        # been a t3.micro. Harmless - that is the smallest size on the
+        # allowlist - but the page offers all of them and this offered one, and
+        # the paragraph in CLAUDE.md justifying why the AWS menus each ask
+        # something different named the instance size as its example.
+        sizes = resource.options(ec2)["instance_type"]
+        print("\nSizes this tool will build. Anything else is refused outright,")
+        print("because a typo should not be able to spend a hundred times more.")
+        for index, size in enumerate(sizes, 1):
+            print(f"  {index}. {size['label']}")
+        default_index = next(
+            (i for i, s in enumerate(sizes, 1)
+             if s["value"] == ec2i.DEFAULT_INSTANCE_TYPE), 1)
+        picked = input(f"Size [{default_index}]: ").strip() or str(default_index)
+        if not picked.isdigit() or not 1 <= int(picked) <= len(sizes):
+            print("Not a valid selection.")
+            return
+        instance_type = sizes[int(picked) - 1]["value"]
+
         spec = {"name": name, "region": REGION, "key_name": key_name,
+                "instance_type": instance_type,
                 "security_group_ids": group_ids or None,
                 "subnet_id": subnet["subnet_id"],
                 "assign_public_ip": public}
@@ -1497,143 +1548,6 @@ def azure_menu(resource, client):
 # ------------------------------------------------------------------------- Entry
 
 
-def _git_name():
-    """Who git thinks you are, for the `by` field.
-
-    Better provenance than a typed name, and much better than one this file
-    invents: the same identity that will be on the commit is the one recorded
-    in the entry. Falls back to the OS user, then to asking.
-    """
-    import subprocess
-
-    try:
-        found = subprocess.run(["git", "config", "user.name"],
-                               capture_output=True, text=True, timeout=5)
-        if found.returncode == 0 and found.stdout.strip():
-            return found.stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return os.environ.get("USER") or os.environ.get("USERNAME") or ""
-
-
-def _append_acknowledgement(entry):
-    """Writes one entry into acknowledged.json, preserving what is there.
-
-    This lives in the CLI and not in `api/`, and that placement is the whole
-    security argument. The HTTP API has no login and a cross-site POST to a
-    "stop reporting this" endpoint would be drive-by suppression of a critical
-    finding - which is what the middleware in api/app.py exists to prevent, and
-    what test_no_part_of_the_api_writes_acknowledgements pins. A person at a
-    terminal is a different proposition: they are already authenticated by
-    having the shell, the file is theirs, and the change still has to be
-    committed to take effect for anybody else.
-
-    Read, modify, write rather than append, because the file is JSON with a
-    comment block at the top that has to survive.
-    """
-    where = acknowledged.path()
-    if where.exists():
-        document = json.loads(where.read_text())
-    else:
-        document = {"acknowledgements": []}
-
-    if isinstance(document, list):
-        document = {"acknowledgements": document}
-    document.setdefault("acknowledgements", []).append(entry)
-
-    where.write_text(json.dumps(document, indent=2) + "\n")
-    return where
-
-
-def acknowledge_menu():
-    """Records that somebody has looked at a finding and decided to live with it.
-
-    Asks rather than guesses, and writes the answer down. The alternative -
-    a rule that infers intent from configuration - is a guess dressed as a
-    fact, and attackers turn on website hosting too.
-    """
-    print("\n--- Acknowledge a finding ---")
-    print("This does not hide anything. The finding keeps its severity and")
-    print("its place in every scan; it is marked as accepted, by whom, and")
-    print("why. Entries expire, and a stale one is itself reported.")
-
-    keys = list(registry.REGISTRY)
-    for index, key in enumerate(keys, start=1):
-        print(f"{index}. {registry.REGISTRY[key].label}")
-    chosen = input(f"\nWhich resource type (1-{len(keys)})? ").strip()
-    if not chosen.isdigit() or not 1 <= int(chosen) <= len(keys):
-        print("Not a valid selection.")
-        return
-
-    known = registry.REGISTRY[keys[int(chosen) - 1]]
-    resource_id = input(f"{known.id_label}: ").strip()
-    if not resource_id:
-        print("Nothing to scan.")
-        return
-
-    client = known.get_client(REGION)
-    settings = known.read(client, resource_id)
-    if settings is None:
-        print(f"No {known.label.lower()} with that id.")
-        return
-
-    warnings = [w for w in known.check(settings) if w.get("rule_id")]
-    if not warnings:
-        print("Nothing to acknowledge: this scan found no findings with an id.")
-        return
-
-    print()
-    for index, w in enumerate(warnings, start=1):
-        mark = " (already acknowledged)" if w.get("acknowledged") else ""
-        print(f"{index}. [{w['level']}] {w['rule_id']}{mark}")
-        print(f"   {w['message'][:110]}")
-
-    picked = input(f"\nWhich finding (1-{len(warnings)})? ").strip()
-    if not picked.isdigit() or not 1 <= int(picked) <= len(warnings):
-        print("Not a valid selection.")
-        return
-    finding = warnings[int(picked) - 1]
-
-    print("\nWhy is this intended? Somebody else has to be able to check it.")
-    reason = input("Reason: ").strip()
-    if len(reason) < 15:
-        print("Refused: a reason this short is not one. Nothing was written.")
-        return
-
-    suggested = _git_name()
-    by = input(f"Your name [{suggested}]: ").strip() or suggested
-    if not by:
-        print("Refused: an acknowledgement with no author is anonymous.")
-        return
-
-    today = date.today()
-    default_until = date.fromordinal(today.toordinal() + acknowledged.DEFAULT_DAYS)
-    until = input(f"Expires [{default_until.isoformat()}]: ").strip() \
-        or default_until.isoformat()
-    try:
-        if date.fromisoformat(until) <= today:
-            print("Refused: that date has already passed.")
-            return
-    except ValueError:
-        print("Refused: not a date in YYYY-MM-DD form.")
-        return
-
-    entry = {"rule_id": finding["rule_id"], "reason": reason, "by": by,
-             "on": today.isoformat(), "until": until}
-
-    print("\nThis is what will be written:")
-    print(json.dumps(entry, indent=2))
-    if input("\nWrite it? (yes/no): ").strip().lower() not in ("yes", "y"):
-        print("Nothing was written.")
-        return
-
-    where = _append_acknowledgement(entry)
-    print(f"\nWritten to {where}.")
-    print("It applies to your next scan immediately. Commit it so it applies")
-    print("to everybody else's - an acknowledgement is a decision with an")
-    print("author, and the commit is where that is recorded.")
-
-
 def main():
     print("=== Secure Cloud Provisioner ===")
     print("1. Security Groups (network)")
@@ -1650,8 +1564,7 @@ def main():
     print("12. Azure network security groups (the Azure firewall)")
     print("13. Azure virtual networks")
     print("14. Azure servers (compute) - these cost money")
-    print("15. Acknowledge a finding - records intent, hides nothing")
-    resource = input("\nSelect resource type (1-15): ").strip()
+    resource = input("\nSelect resource type (1-14): ").strip()
 
     try:
         if resource == "1":
@@ -1687,8 +1600,6 @@ def main():
         elif resource == "14":
             azure_vm_menu(registry.AZURE_VM,
                           registry.AZURE_VM.get_client(REGION))
-        elif resource == "15":
-            acknowledge_menu()
         else:
             print("Not a valid selection.")
     except AzureNotConfigured as e:

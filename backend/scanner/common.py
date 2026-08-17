@@ -8,6 +8,8 @@ warning about either looks identical to the caller.
 No cloud SDK imports belong in this file, or in anything that imports it.
 """
 
+import ipaddress
+
 from scanner.controls import control as _control
 
 CRITICAL = "critical"
@@ -15,6 +17,131 @@ WARNING = "warning"
 INFO = "info"
 
 _ORDER = {CRITICAL: 0, WARNING: 1, INFO: 2}
+
+# What Azure writes instead of a range. AWS has no equivalent; a security group
+# source is always a CIDR or another group.
+EVERYONE_TAGS = {"*", "any", "internet"}
+
+# How much public address space stops being an allowlist and starts being a
+# region of the internet.
+#
+# Both clouds decided this by string equality against "0.0.0.0/0" and "::/0"
+# until now, and that is exactly the shape of check somebody puts a backdoor
+# around: `0.0.0.0/1` and `128.0.0.0/1` are two rules covering every address
+# there is, and both were silent, on both clouds. So were `0.0.0.0/4` and
+# `::/1`. Azure was worse than silent - its evaluator answered DenyByDefault
+# about a port it would in fact have allowed from two billion hosts.
+#
+# A /16 is 65,536 addresses. A real allowlist is an office, a VPN endpoint or
+# one machine, which is a /24 or smaller in practice; nothing legitimately
+# permits SSH from sixty-five thousand arbitrary public hosts, and anything
+# larger is not a list of chosen machines. Somebody who genuinely means it can
+# acknowledge the finding - that mechanism exists precisely so this file does
+# not have to guess at intent.
+#
+# IPv6 is set at /32 because the scales do not correspond: a site is given a
+# /48 and an internet provider a /32, so /32 is "an entire provider" and /48 is
+# "one organisation".
+#
+# Both numbers were judgement calls with nothing behind them, and this file
+# used to say so. They have now been checked against ranges organisations
+# actually publish and firewalls actually name, and both survive - but not for
+# the reason originally written down.
+#
+# The claim that nothing real exceeds a /16 is simply false. Cloudflare
+# publishes 104.16.0.0/12 and egresses from 172.64.0.0/13; MIT holds 18.0.0.0/8.
+# All three are legitimate, all three are named in real allowlists, and all
+# three fire here. So the threshold does not separate "a real allowlist" from
+# "a region of the internet" the way the first version of this comment claimed.
+#
+# What makes it right anyway is where it is consulted. The architecture that
+# allowlists a /12 is an origin lock - a web server accepting 443 only from its
+# CDN - and rules.py returns silently on 443 whatever the source is, so that
+# case produces nothing regardless of this number. What fires is 104.16.0.0/12
+# on port 22, and firing is correct: anyone who can put a site behind that CDN
+# can reach an SSH port trusting all of it. A large range is not dangerous
+# because it is large, it is dangerous because nobody chose who is in it, and
+# an admin port is where that distinction costs something. Verified by calling
+# the rules directly - see test_broad_ranges_are_judged_by_what_they_open.
+#
+# One trap, met while checking this. 2001:db8::/32 is the documentation range
+# and is_global already excludes it, so testing the IPv6 threshold with it
+# proves nothing and looks like a pass. The boundary has to be probed with
+# globally routable space - 2606:4700::/32 is a provider allocation and fires,
+# 2606:4700:4700::/48 is one site inside it and does not.
+#
+# Measured since, against 17,662 IPv4 ranges published by AWS, Cloudflare,
+# GitHub and Google Cloud: 8.2% are /16 or wider and fire, and 55.7% sit
+# between /17 and /24 and are silent on every port. The gate does not see most
+# of what these organisations publish. Worth knowing rather than assuming.
+#
+# The sharper result is Cloudflare's own list, which is short, canonical, and
+# what somebody actually pastes. All fifteen ranges express one decision -
+# "anyone who can put a site behind this CDN" - and this gate calls four of
+# them critical on port 22 and eleven of them nothing at all. One decision, two
+# verdicts, settled by which line you happen to look at.
+#
+# That is not an argument for a different number. /22 would make Cloudflare
+# coherent and would then fire on an office /22, which is a range somebody does
+# control; /20 just splits the list somewhere else. **Width is a proxy for
+# "nobody chose who is inside this", and the two come apart** - an office /22
+# and a CDN /22 are the same size and opposite decisions, and nothing in a CIDR
+# says which is which. No threshold separates them, so this is a pragmatic cut
+# and not a principled boundary, and is better described that way than defended
+# as though it were derived.
+#
+# It stays at /16 because the port axis carries the real judgement - see
+# test_broad_ranges_are_judged_by_what_they_open - and because moving it trades
+# a quiet failure for a noisy one on every correctly configured group, which
+# test_an_allowlist_is_still_an_allowlist exists to prevent.
+BROAD_PREFIX_V4 = 16
+BROAD_PREFIX_V6 = 32
+
+
+def open_to_strangers(source):
+    """Whether a rule's source lets in hosts nobody chose. (open, description).
+
+    `description` is the phrase the scanners put in a finding, and is None when
+    open is False.
+
+    Private, reserved, loopback, carrier-grade-NAT and documentation ranges are
+    never open however large: 10.0.0.0/8 is sixteen million addresses and not
+    one of them is a stranger. Python's `is_global` draws that line and draws
+    it in one place, which is better than this module keeping its own list of
+    what RFC1918 says.
+
+    Anything that will not parse is not open. That keeps the property
+    azure_nsg_effective states for itself - it can never manufacture an Allow
+    the cloud would not make - and it is what leaves `sg:sg-1234` and any Azure
+    service tag this does not know to the callers that handle them.
+    """
+    text = str(source or "").strip()
+    if not text:
+        return False, None
+
+    if text.lower() in EVERYONE_TAGS:
+        return True, "the entire internet"
+
+    try:
+        network = ipaddress.ip_network(text, strict=False)
+    except ValueError:
+        return False, None
+
+    if not network.is_global:
+        return False, None
+
+    limit = BROAD_PREFIX_V6 if network.version == 6 else BROAD_PREFIX_V4
+    if network.prefixlen > limit:
+        return False, None
+
+    if network.prefixlen == 0:
+        return True, ("the entire internet (over IPv6)" if network.version == 6
+                      else "the entire internet")
+
+    # Named rather than called "the internet", because it is not, and a person
+    # checking this against their own firewall needs to recognise what they
+    # wrote. The count is what makes the point: nobody reads /12 as a million.
+    return True, f"{network.with_prefixlen} — {network.num_addresses:,} addresses"
 
 
 def warning(level, message, rule=None, fix=None, resource_id=None, control=None):
@@ -53,12 +180,23 @@ def summarize(warnings):
     alongside the severities rather than being subtracted from them: an
     acknowledged critical is still a critical, and a tally that quietly
     excluded it would be the thing scanner/acknowledged.py exists to avoid.
+
+    "accepted" is the same total broken down by severity, and exists because
+    the flat one could not be rendered without ambiguity. "2 critical, 2
+    warning, 3 accepted" reads as seven findings, and does not say which three
+    were accepted - so a reader cannot tell whether anything is outstanding
+    without opening the type. Both are kept: the flat count is what the detail
+    panel's fourth tally shows, and the breakdown is what lets a summary say
+    which severities are spoken for.
     """
-    counts = {CRITICAL: 0, WARNING: 0, INFO: 0, "acknowledged": 0}
+    counts = {CRITICAL: 0, WARNING: 0, INFO: 0, "acknowledged": 0,
+              "accepted": {CRITICAL: 0, WARNING: 0, INFO: 0}}
     for w in warnings:
-        counts[w["level"]] = counts.get(w["level"], 0) + 1
+        level = w["level"]
+        counts[level] = counts.get(level, 0) + 1
         if w.get("acknowledged"):
             counts["acknowledged"] += 1
+            counts["accepted"][level] = counts["accepted"].get(level, 0) + 1
     return counts
 
 
