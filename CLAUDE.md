@@ -30,11 +30,13 @@ Read it in this order, which is roughly hardest-to-undo first:
 - This repository scaffolded `backend/providers/aws.py`, one module per
   provider. The AWS work is arranged as `backend/aws/` with a module per
   resource type and `backend/scanner/` beside it, because the rules have to
-  stay free of boto3 to be testable without an account. `providers/aws.py` is
-  left empty and untouched. Which shape Azure adopts is a conversation.
+  stay free of boto3 to be testable without an account. Both questions here
+  have since been answered rather than discussed: Azure took the same shape as
+  `backend/az/`, and the empty `providers/` scaffold has been deleted.
 - The Azure scanner and `scanner/` are solving the same problem twice. The
   warning contract in `scanner/common.py` was built to be provider-agnostic
-  and nothing about it is AWS-specific.
+  and nothing about it is AWS-specific. Settled the same way — the root Azure
+  scanner is gone and `scanner/` judges both clouds.
 
 **One operational hazard, worth agreeing on before a demo.** We share one AWS
 account, and cleanup deletes by *tag*, not by author: `make_vulnerable.py
@@ -188,16 +190,18 @@ here is re-run rather than carried forward, which is how two of them were once
 found to be one low — and re-running is also how the 977 that sat here was
 found to be two short of what the suite actually reports.
 
-All of it is committed and pushed on `aws-provisioner-and-web-interface`, to
-`origin` (Hhhectic) and `group` (gavingonzo). The last substantive commit is
-`55ce458`; anything after it on that branch is this paragraph correcting
-itself, which is why no tip hash is named here — the previous two attempts
-both named one and both were stale the moment they were written. The working
-tree is clean and a fresh clone gets everything this file describes — the
-surface audit, the three Prowler rules, the placement refusal, the threshold
-evidence, the CLI fixes and the tests behind them. The paragraph that used to
-sit here said the opposite at some length, because for a stretch the most
-recent work existed on one machine only.
+**`main` on `origin` (Hhhectic) is now the branch to read.** Everything this
+file describes was developed on `aws-provisioner-and-web-interface` and merged
+to `origin/main` through pull request #1, which is also where the root
+application was retired. `group` (gavingonzo) has the work up to that merge on
+`aws-provisioner-and-web-interface` and has **not** received the retirement —
+that was deliberately kept to one repository so a deletion of this size could
+not disturb the shared one. Whoever reconciles the two should read *There is
+one application now* first, because the merge will present as "deleted by us,
+modified by them" rather than as a conflict between two versions of a file.
+
+No tip hash is named here on purpose. The previous three attempts each named
+one and each was stale the moment it was written, this paragraph included.
 
 The junk acknowledgement is gone. `backend/acknowledged.json` carried an entry
 for `richard-huo-resume-2026:deny_http` whose reason and author were keyboard
@@ -261,6 +265,29 @@ Nothing was left running afterwards: no instances, no non-default networks, no
 NAT gateways and no unattached elastic addresses in either region, checked
 independently of the smoke test's own leftover assertions. `scp-billing-5-usd`
 remains, deliberately.
+
+**And then every route was driven directly, on `main` after the merge.** The
+smoke test drives the registry and a good deal of HTTP; this went through the
+routes themselves for each type in turn — options, pre-flight, create, read
+back, scan, fix, deletion plan, delete, verify gone — plus the audit-only
+refusals, cleanup plans, the blueprint and the acknowledgement routes. **88
+passed and then 16 passed, 0 failed, nothing left behind.**
+
+Three things it established that nothing had before. **The fix path works on
+every type that offers one**, against both clouds: a security group narrowed
+to one address, an Azure storage account's public access closed, an NSG rule
+flipped to Deny, each re-scanning clean afterwards. **The acknowledgement
+routes round-trip** — written, the finding kept at full severity while tallied
+as accepted, an invented rule id refused, then taken back and the finding loud
+again. And **the blueprint builds and reports all five of its pieces** through
+the route, with instructions and a teardown script.
+
+**One hazard, worth knowing before a demo.** The first attempt to start the
+server on the merged tree failed with *address already in use*: an older
+uvicorn from earlier in the day still held port 8000, running the pre-merge
+code. It errored, which is the only reason it was caught — a stale process that
+binds successfully would have served the old application to every one of these
+checks and passed. Kill the old server before trusting a run.
 
 **The smoke test broke when the placement refusal landed, and nobody re-ran
 it.** `_sg_create` stopped falling back to the account's default VPC — rightly,
@@ -535,9 +562,10 @@ docs/          IAM policy (three files, see iam-setup.md), bastion walkthrough,
                benchmark.md: what Prowler finds that this does not
 ```
 
-`backend/providers/aws.py` is the empty placeholder this repository scaffolded
-before the AWS work started. It stayed empty; `backend/aws/` is where the code
-went. Deleting it is a five-second job nobody has wanted to do unilaterally.
+`backend/providers/` no longer exists. It held one empty file, `aws.py`, which
+this repository scaffolded before the AWS work started and which stayed empty
+for the whole project — the code went to `backend/aws/` instead. It was removed
+along with the root application, and the directory went with its only file.
 
 `scanner/` must never import from `aws/`. That separation is what lets the
 rules be tested without an account, and what would make a second cloud
@@ -1605,8 +1633,13 @@ time this file has had to record it.
   worth recording so nobody repeats it: `create_vpc` takes a `region` argument
   and never uses it, and `create_alarm` already did `region or
   cloudwatch.meta.region_name`, which resolves to the same value either way.
-  Pinned by a test that spies on the region reaching `launch_instance`, rather
-  than by launching anything.
+  Pinned by a test that spies on the region reaching `launch_instance` rather
+  than by launching anything — and **since proved against AWS**: a `t3.micro`
+  was launched, scanned and terminated in `us-west-2` through the HTTP routes,
+  which is precisely the case that used to answer `InvalidAMIID.NotFound`. It
+  is the only one of the seven whose fix went that long on offline evidence
+  alone, for the same reason the defect hid in the first place — it is the type
+  that costs money to check.
 
 - **Three of the four networks the menu offers had no subnets.**
   `PUBLIC_SUBNET_CIDR`/`PRIVATE_SUBNET_CIDR` were constants inside
