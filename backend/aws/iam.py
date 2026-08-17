@@ -385,6 +385,36 @@ def root_uses_hardware_mfa(iam):
     return True
 
 
+def users_with_virtual_mfa(iam):
+    """The names of users whose second factor is an app rather than a device.
+
+    The same inference root_uses_hardware_mfa makes, pointed at everybody else:
+    AWS will not say what kind of device a user has, but it will list the
+    virtual ones, so a user holding MFA who does not appear here is holding
+    hardware.
+
+    Returned as the names with virtual devices rather than as a verdict per
+    user, because the caller already knows which users have MFA at all and the
+    two questions fail independently - this read can be refused while the
+    credential report still says who has a second factor.
+    """
+    try:
+        devices = iam.list_virtual_mfa_devices()["VirtualMFADevices"]
+    except ClientError as e:
+        _denied(e, "iam:ListVirtualMFADevices")
+
+    names = set()
+    for device in devices:
+        user = device.get("User") or {}
+        name = user.get("UserName")
+        # Root has no UserName, only an ARN ending ":root". It is reported by
+        # root_uses_hardware_mfa and does not belong in a per-user set.
+        if name:
+            names.add(name)
+
+    return names
+
+
 def read_analyzers(iam_region):
     """How many Access Analyzer analyzers exist in one region.
 
@@ -736,6 +766,9 @@ def read_account_for_scanning(iam, resource_id=None, now=None,
                 lambda: root_uses_hardware_mfa(iam))
     else:
         settings["root_hardware_mfa"] = None
+
+    attempt("virtual_mfa_users", "iam:ListVirtualMFADevices",
+            lambda: users_with_virtual_mfa(iam))
 
     attempt("credential_report", "iam:GetCredentialReport",
             lambda: fetch_credential_report(

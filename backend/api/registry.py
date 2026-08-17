@@ -307,11 +307,28 @@ class ResourceType:
 
 
 def _sg_create(client, spec):
+    """Creates a group in the network the caller named, and only there.
+
+    This used to fall back to the account's default VPC when a spec omitted
+    vpc_id. That contradicted the rule the rest of this program is built on -
+    placement is asked for, never assumed - and it was only ever reachable over
+    HTTP, because the CLI and the page both ask. So the one caller who could
+    hit it was a script, which is the caller least likely to notice that its
+    group went somewhere it did not choose.
+
+    A network cannot be changed after creation and it decides more about a
+    group's reach than any rule in it, so guessing is the expensive kind of
+    wrong. The menu is served by _sg_options; a caller with no vpc_id in hand
+    can read it from GET /resources/security-group/options.
+    """
     vpc_id = spec.get("vpc_id")
     if not vpc_id:
-        vpc_id, err = sg.get_default_vpc(client)
-        if err:
-            return False, err, []
+        return False, (
+            "Which network this group belongs to has to be chosen, because it "
+            "cannot be changed afterwards and it decides what the group can "
+            "reach. Pass vpc_id; GET /resources/security-group/options lists "
+            "the networks in this account."
+        ), []
 
     return sg.create_security_group(
         client,
@@ -1199,8 +1216,18 @@ def _az_summary(resources):
     The name is unique per resource group rather than per subscription for
     every type but storage, so this is the same ambiguity the routes already
     had by taking a name at all; it is not introduced here.
+
+    Which is why the resource group and the location travel alongside it. The
+    readers have always known both, and dropping them here left the page
+    printing the name in both of its two columns - a table saying one thing
+    twice. They are also the two facts that make the name legible: a group
+    called `web` means nothing on its own, and two of them in different
+    resource groups are two different firewalls.
     """
-    return [{"id": r["name"], "name": r["name"]} for r in resources]
+    return [{"id": r["name"], "name": r["name"],
+             "resource_group": r.get("resource_group"),
+             "location": r.get("location")}
+            for r in resources]
 
 
 def _az_nsg_list(client, only_ours):

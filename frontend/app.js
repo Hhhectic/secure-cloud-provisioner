@@ -1044,11 +1044,28 @@ async function loadList() {
      again. Security groups and machines have both and keep both. */
   const named = body.resources.some((r) => r.name && r.name !== r.id);
 
+  /* And where a name is the id, say where the thing actually is.
+
+     Dropping the duplicate Name column left the Azure table one identifier
+     wide. The two facts that make an Azure name mean anything are its resource
+     group and its location: a security group called "web" says nothing on its
+     own, and two of them in different resource groups are two different
+     firewalls. The readers have always known both.
+
+     Driven by the rows rather than by the cloud, because "does this type carry
+     a resource group" is a question the data answers - matching on provider
+     here would be the page inferring a shape from a naming convention, which
+     is the mistake ResourceType.provider exists to avoid. */
+  const placed = body.resources.some((r) => r.resource_group || r.location);
+
   const table = document.createElement("table");
   const head = document.createElement("tr");
-  const columns = named
-    ? [known.id_label, "Name", "Worst", "Findings", ""]
-    : [known.id_label, "Worst", "Findings", ""];
+  const columns = [
+    known.id_label,
+    ...(named ? ["Name"] : []),
+    ...(placed ? ["Resource group", "Location"] : []),
+    "Worst", "Findings", "",
+  ];
   for (const h of columns) head.append(text("th", h));
   table.append(head);
 
@@ -1059,6 +1076,12 @@ async function loadList() {
 
     tr.append(text("td", r.id));
     if (named) tr.append(text("td", r.name || ""));
+    if (placed) {
+      // An em dash rather than a blank: a cell with nothing in it reads as a
+      // rendering fault, and these are read straight off the resource id.
+      tr.append(text("td", r.resource_group || "—"));
+      tr.append(text("td", r.location || "—"));
+    }
 
     // Not scanned is not clean, and that has not changed by moving where the
     // scan is started. counts is the signal, because worst_level is null for

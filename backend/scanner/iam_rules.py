@@ -60,6 +60,8 @@ CHECK_LABELS = {
     "cloudshell_full_access": "who can use the browser-based shell",
     "root_hardware_mfa": "whether the root user's second login step is a "
                          "physical device",
+    "virtual_mfa_users": "whether each person's second login step is an app "
+                         "or a physical device",
     "credential_report": "passwords, keys and when they were last used",
 }
 
@@ -255,6 +257,37 @@ def _check_password_policy(settings, account, unreadable):
             control="PASSWORD_REUSE",
         ))
 
+    # Expiry. Read since this module was written and never judged: the value
+    # was sitting in settings and nothing looked at it, which is the quietest
+    # way to have a gap - the read succeeds, nothing lands in `unreadable`, and
+    # the scan reports a policy it only half examined.
+    #
+    # Uncited, deliberately. CIS AWS Foundations carried a password-expiry
+    # recommendation in v1.2 and dropped it by v3.0.0, on the reasoning that
+    # forced rotation pushes people towards predictable variations. It is not
+    # in v5.0.0 either, so citing this would attribute a control to a document
+    # that consciously removed it - the fabrication scanner/controls.py warns
+    # about, in its most tempting form, because a plausible number exists.
+    #
+    # It is reported anyway, at INFO, because this account is shared and an
+    # unexpiring console password outlives whoever is still on the team. INFO
+    # rather than WARNING for the same reason CIS dropped it: the guidance is
+    # genuinely contested, and a contested finding at warning level spends
+    # attention this tool would rather keep for the exposures.
+    max_age = policy.get("max_age_days")
+
+    if not max_age:
+        warnings.append(_warning(
+            INFO,
+            "Console passwords in this account never expire. That is defensible "
+            "- forced rotation tends to produce predictable variations, which "
+            "is why the benchmark stopped asking for it - but it means a "
+            "password set by somebody who has since left stays valid until "
+            "their user is removed. Worth pairing with a look at who still "
+            "has one.",
+            _target(account, "password_never_expires"),
+        ))
+
     return warnings
 
 
@@ -287,6 +320,36 @@ def _check_users(settings, account):
                 "email, and there is nothing else in the way.",
                 _target(account, "user_mfa", user=name),
                 control="USER_MFA",
+            ))
+
+        # ---- What kind of second factor, once there is one -------------------
+        #
+        # Prowler asks this and nothing here did. Uncited: CIS 1.6 asks for
+        # hardware MFA on the *root* user only, and stretching it to cover
+        # everybody would be citing a control for a population it does not
+        # name - the same reasoning that leaves an exposed MySQL port
+        # uncited under CIS 5.3.
+        #
+        # INFO, because virtual MFA is a real second factor and the gap
+        # between it and hardware is narrow: it is phone-based compromise and
+        # SIM-swap, not password guessing. Reporting it at warning level
+        # alongside "this person has no second factor at all" would flatten a
+        # distinction that matters.
+        # A refused read leaves virtual_mfa_users as None, which falls to an
+        # empty set and reports nothing - the right direction, because the
+        # "could not check" warning for it is already raised in check_account
+        # and saying it twice per user would bury the rest.
+        elif (user.get("password_enabled") and user.get("mfa_enabled")
+                and name in (settings.get("virtual_mfa_users") or set())):
+            warnings.append(_warning(
+                INFO,
+                f"{name}'s second step is an authenticator app rather than a "
+                "physical key. That is a genuine second factor and most "
+                "accounts stop there. A physical key is the stronger option "
+                "because it cannot be handed over by somebody who has been "
+                "talked into reading out a code, and cannot be moved by "
+                "persuading a phone company to transfer a number.",
+                _target(account, "user_virtual_mfa", user=name),
             ))
 
         # ---- Credentials nobody is using. CIS 1.11 ---------------------------

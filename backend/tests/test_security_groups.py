@@ -139,6 +139,55 @@ def test_a_broad_ipv6_range_is_caught_the_same_way():
     assert "::/1" in warnings[0]["message"]
 
 
+def test_the_ipv6_threshold_sits_between_a_provider_and_a_site():
+    """Where BROAD_PREFIX_V6 actually falls, probed with routable space.
+
+    The obvious range to test this with is 2001:db8::/32, and it proves
+    nothing: that is the documentation range, is_global excludes it before the
+    prefix is looked at, and the assertion passes for the wrong reason. It has
+    to be real space.
+
+    A provider is given a /32 and a site a /48, which is why the line is drawn
+    between them rather than at some count of addresses - a /48 is 2^80 hosts
+    and is still one organisation.
+    """
+    provider = check_firewall_rules([_rule(22, source="2606:4700::/32")])
+    assert provider and provider[0]["level"] == CRITICAL, \
+        "an entire provider allocation is not an allowlist"
+
+    site = check_firewall_rules([_rule(22, source="2606:4700:4700::/48")])
+    assert site == [], "one organisation's allocation is a choice somebody made"
+
+    assert check_firewall_rules(
+        [_rule(22, source="2606:4700:4700::1111/128")]) == []
+
+    assert check_firewall_rules([_rule(22, source="2001:db8::/32")]) == [], \
+        "documentation space is excluded before the prefix matters"
+
+
+def test_broad_ranges_are_judged_by_what_they_open():
+    """The threshold's real justification, which is not the one first written.
+
+    Ranges broader than /16 are published and legitimately named in real
+    allowlists - Cloudflare's 104.16.0.0/12 among them - so "nothing real is
+    this big" was simply false. What makes firing correct is the port: the
+    architecture that trusts a whole CDN is an origin lock on 443, and 443
+    returns silently whatever the source. The same range on 22 is somebody
+    trusting every host that can rent space behind that CDN.
+    """
+    cdn = "104.16.0.0/12"
+
+    assert check_firewall_rules([_rule(443, source=cdn)]) == [], \
+        "an origin lock is the reason a range this size is ever named"
+
+    admin = check_firewall_rules([_rule(22, source=cdn)])
+    assert admin and admin[0]["level"] == CRITICAL, \
+        "and the same range on an admin port is not that"
+
+    ordinary = check_firewall_rules([_rule(8080, source=cdn)])
+    assert ordinary and ordinary[0]["level"] == WARNING
+
+
 def test_an_allowlist_is_still_an_allowlist():
     """The other half, and the one that decides whether this is usable. A real
     allowlist is an office, a VPN endpoint or one machine; reporting those
@@ -342,6 +391,50 @@ def test_created_group_is_tagged_and_findable(ec2, vpc_id):
 
     everything = sg.list_security_groups(ec2)
     assert len(everything) > 1, "the VPC default group should also be present"
+
+
+def test_a_listed_group_can_be_fed_straight_to_the_reader(ec2, vpc_id):
+    """The two functions a script composes first, composed.
+
+    list_security_groups returns AWS's own dicts and everything downstream is
+    documented as taking an ID, so the obvious loop handed a dict to a filter
+    value and botocore rejected it as a malformed parameter - naming the
+    parameter, not the mistake. The page never hit it because the registry's
+    list adapter reshapes first; anything reaching for the two directly did.
+    """
+    sg_id, _ = _make(ec2, vpc_id, [_rule(22, source="0.0.0.0/0")])
+
+    for group in sg.list_security_groups(ec2, only_ours=True):
+        rules = sg.read_group_for_scanning(ec2, group)
+        assert [r["source"] for r in rules] == ["0.0.0.0/0"]
+
+
+def test_every_spelling_of_a_group_id_reaches_the_same_group(ec2, vpc_id):
+    """Three shapes are in circulation and all three have to work.
+
+    GroupId comes off the API, group_id out of read_group_usage, and id out of
+    the registry's list adapter. A caller holding any of them is holding a
+    security group, and which spelling it happens to carry is an accident of
+    where it came from.
+    """
+    sg_id, _ = _make(ec2, vpc_id, [_rule(22, source="0.0.0.0/0")])
+
+    for shape in ({"GroupId": sg_id}, {"group_id": sg_id}, {"id": sg_id}, sg_id):
+        assert sg.group_id_of(shape) == sg_id
+        assert len(sg.read_group_for_scanning(ec2, shape)) == 1
+
+
+def test_a_dict_carrying_no_group_id_is_a_caller_error_not_a_missing_group(ec2):
+    """Refuse loudly rather than resolving to "no such group".
+
+    Returning None here would send a dict somebody built wrong down the same
+    path as a group that does not exist, and answer 404 about a group that is
+    sitting there.
+    """
+    with pytest.raises(ValueError) as raised:
+        sg.group_id_of({"VpcId": "vpc-1", "GroupName": "web"})
+
+    assert "GroupId" in str(raised.value)
 
 
 def test_create_reports_rule_failure_without_losing_the_group(ec2, vpc_id):

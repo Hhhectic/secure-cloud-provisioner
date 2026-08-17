@@ -162,21 +162,35 @@ into the page, and the bastion instructions' second gap, take it to 878.
 
 Then twenty-five commits rebuilding the page — see *The page is three tabs
 now* — plus bucket contents, took it to 915 from `backend/`. Then root
-collection and the six create-path defects took it to 929. Then the audit pass
+collection and the seven create-path defects took it to 929. Then the audit pass
 below — see *What reading the scanner found that driving it could not* — takes
-it to **964 from `backend/`** and **970 from the repository root**, 0 skipped,
-plus **234 checks** across the two Node suites in `frontend/`. Every figure
+it to 964 from `backend/` and 970 from the repository root. Then the pass over
+the four surfaces nobody had audited — see *What comparing the two surfaces
+found* — and the instance-size gap a second look at the CLI turned up, take it
+to **979 from `backend/`** and **985 from the repository root**, 0 skipped,
+plus **237 checks** across the two Node suites in `frontend/`. Every figure
 here is re-run rather than carried forward, which is how two of them were once
-found to be one low.
+found to be one low — and re-running is also how the 977 that sat here was
+found to be two short of what the suite actually reports.
 
-All of it is pushed, on `aws-provisioner-and-web-interface`, to `origin`
-(Hhhectic) and `group` (gavingonzo), both at `5058d92`. One thing is
-deliberately not in it: `backend/acknowledged.json` carries an entry for
-`richard-huo-resume-2026:deny_http` whose reason and author are keyboard
-mash, written while trying the feature out. Committing it would suppress a
-real finding for a year on the strength of nothing, so it stays in the working
-tree until somebody either writes it properly or takes it back — which the
-page can now do.
+Everything through `cb0be20` is pushed on `aws-provisioner-and-web-interface`
+to `origin` (Hhhectic) and `group` (gavingonzo). **Everything after it is
+uncommitted and lives only in this working tree** — the surface audit, the
+three Prowler rules, the placement refusal and the threshold evidence are all
+sitting there unpushed, so a fresh clone has none of it.
+
+The junk acknowledgement is gone. `backend/acknowledged.json` carried an entry
+for `richard-huo-resume-2026:deny_http` whose reason and author were keyboard
+mash, written while trying the feature out, and this file spent a paragraph
+explaining why it was being kept out of the commit. It has been taken back
+rather than left in limbo. The two entries that remain are the real ones, for
+the public CV site, and they are committed.
+
+That file's own `_comment` was also stale in the way this file keeps warning
+about: it still said "nothing in this tool writes this file. It is edited by
+hand and committed", which stopped being true when `POST /acknowledgements`
+landed. Prose next to a mechanism, describing the mechanism, with nothing
+failing when they disagree.
 
 **Nothing in that stretch was found by a test.** Every one of those defects
 came from opening the page and looking at it, or from measuring something in
@@ -223,8 +237,8 @@ machines. What that found is the section below, and it is the reason the
 Node suites are not the whole story: `app.test.mjs` answers a stub, and a stub
 written to match the code cannot disagree with it.
 
-**The root suite collects now, and `pytest` from the repository root is 970
-passed** — the 964 from `backend/` plus the six Azure tests at the root, which
+**The root suite collects now, and `pytest` from the repository root is 985
+passed** — the 979 from `backend/` plus the six Azure tests at the root, which
 had not run since `ebdb579`.
 
 The entry that used to sit here said the breakage was a rename and that it
@@ -287,7 +301,7 @@ cd backend
 source /home/huori/scp-venv/bin/activate     # not ../.venv: see below
 
 pytest -v                                   # offline, moto, no credentials
-                                            # 964 here; 970 from the repository
+                                            # 979 here; 985 from the repository
                                             # root, which collects again
 python main.py                              # the CLI, both clouds, 14 options
 uvicorn api.app:app --reload --host 127.0.0.1   # API, /docs and the page at /ui
@@ -760,13 +774,32 @@ at two subscriptions without editing anything.
 
 **The CLI's Azure menu is generic; the AWS menus are not.** That is not
 inconsistency for its own sake. Each AWS menu asks for something genuinely
-different — a network to place a group in, an instance size, a metric and a
-threshold — while every Azure type takes the same four answers: a name, a
-resource group, a location, and whether to build it safely. So the next Azure
-type needs a registry entry and no menu at all. What the deliberately-weak
-option would build is shown by running `check_spec` and printing the findings
-rather than by a sentence per type, because a sentence goes stale the moment a
-rule is added, and showing the findings is the thing this tool exists to do.
+different — a network to place a group in, a subnet and a key for a machine, a
+metric and a threshold — while every Azure type takes the same four answers: a
+name, a resource group, a location, and whether to build it safely. So the next
+Azure type needs a registry entry and no menu at all. What the
+deliberately-weak option would build is shown by running `check_spec` and
+printing the findings rather than by a sentence per type, because a sentence
+goes stale the moment a rule is added, and showing the findings is the thing
+this tool exists to do.
+
+This paragraph named **an instance size** in that list for a long time while
+the instance menu did not ask for one, which is worth keeping because of how it
+hid. `instance_menu` asked for a network, a subnet, a key pair, security groups
+and a public address, then built a spec with no `instance_type` in it, so
+`launch_instance` fell through to `DEFAULT_INSTANCE_TYPE` and every machine the
+CLI ever started was a `t3.micro` while the page offered twelve. Harmless in
+itself — that is the smallest size on the allowlist, and the refusal above it
+still held — but it is the third instance of one surface being quietly narrower
+than the other, after the alarm metric and the bucket pre-flight.
+
+`azure_vm_menu` had always asked, off `resource.options`, and that is what made
+it invisible: the CLI looked as though both machine menus offered a size. The
+AWS one now reads the same allowlist the same way, and marks the default rather
+than assuming position one. Both are pinned by one parametrized test, which
+fails for `instance_menu` and passes for `azure_vm_menu` against the old code —
+the discrimination is the point, since a test that passed for both would prove
+nothing about the one that was broken.
 
 **The Azure package cannot be called `azure`, and the SDK is imported lazily.**
 Two constraints, both invisible until they bite, both verified rather than
@@ -1467,14 +1500,16 @@ install chromium` once. It is not in `npm test`, because it needs a running
 server and a real account; run it before believing the page works, the same way
 the smoke test is run before believing the API does.
 
-## Six things the create path got wrong, and none of them had a test
+## Seven things the create path got wrong, and none of them had a test
 
 Found by starting the server and creating every type through its own routes,
 against both real clouds — nine of the eleven creatable types, all of it
 deleted afterwards. `instance` and `azure-vm` were left out as the two that
-cost money; their guardrails were exercised instead.
+cost money; their guardrails were exercised instead. The seventh was then
+found in `instance` anyway, by reading the code the first fix had touched
+rather than by building a machine.
 
-The suites were green throughout. Four of the six live on the page/API seam,
+The suites were green throughout. Four of the seven live on the page/API seam,
 which is the same lesson as *What driving the page found* and is now the third
 time this file has had to record it.
 
@@ -1490,6 +1525,32 @@ time this file has had to record it.
   bucket-specific. The upload route's hardcoded `us-east-1` went with it: it
   was unreachable only because no bucket could exist anywhere else.
 
+- **A server could only be launched in `us-east-1`, for exactly the same
+  reason, and nobody had ever seen it.** `launch_instance` calls
+  `latest_ami(region)`, and an AMI id is region-specific — so with `region`
+  missing from the create's spec it was pinned to `DEFAULT_REGION` while the
+  EC2 client was built for the region actually chosen, and `RunInstances` was
+  handed an image belonging to somewhere else. AWS answers
+  `InvalidAMIID.NotFound`.
+
+  The same shared dict fixed it, but it is listed separately because of *why*
+  it went unseen. Machines **have** been launched here — `--with-instances`
+  does it, and the browser sweep did it — and every one of them was launched in
+  `us-east-1`, where the pinned `DEFAULT_REGION` happens to equal the region
+  the client was built for. The defect is invisible at the default and total
+  everywhere else, so the more a thing is exercised in one region the better it
+  hides. That is the same shape as the `resource_skus` timing and the
+  `/home/user` virtualenv: something true of one setting, mistaken for a
+  property of the system.
+
+  It surfaced only when the two remaining adapters that read `region` were
+  checked for fallout from the bucket fix. Both were fine, and the check is
+  worth recording so nobody repeats it: `create_vpc` takes a `region` argument
+  and never uses it, and `create_alarm` already did `region or
+  cloudwatch.meta.region_name`, which resolves to the same value either way.
+  Pinned by a test that spies on the region reaching `launch_instance`, rather
+  than by launching anything.
+
 - **Three of the four networks the menu offers had no subnets.**
   `PUBLIC_SUBNET_CIDR`/`PRIVATE_SUBNET_CIDR` were constants inside
   `10.0.0.0/16` and inside none of the other three choices, so both
@@ -1497,6 +1558,13 @@ time this file has had to record it.
   failures in `problems`. `subnet_cidrs` derives them from the CIDR asked for,
   and still answers `10.0.1.0/24` and `10.0.2.0/24` for the default so nothing
   already running moves.
+
+  The two constants are **deleted**, not left beside it. Nothing referenced
+  them once the function existed, and a module-level name reading
+  `PUBLIC_SUBNET_CIDR` asserts that the public subnet has one address range —
+  true of one network in four and false of the rest. An orphan that
+  authoritative is worth more than the line it costs to remove, and it is the
+  kind of thing a later reader imports precisely because it looks settled.
 
 - **Every Azure create stranded its own resource.** The create answered with
   the full ARM path, and a route takes an id as one path segment — so read,
@@ -1672,6 +1740,133 @@ The `unreadable` discipline is genuinely consistent: where a check fires on
 *absence* the guard is there. That asymmetry looks like an oversight and is
 not.
 
+## What comparing the two surfaces found
+
+The four surfaces this file listed as never systematically audited — fix,
+delete/cleanup/deletion-plan, the bastion blueprint and the CLI — have now had
+the treatment the create path got: not driving them, but sitting down and
+comparing what each side sends against what the other reads.
+
+Three of the four came back clean, and that is worth stating as plainly as the
+defect below, because a section that only lists faults reads as though the
+package is riddled with them. **The fix path** re-derives its action from the
+server's own current scan and refuses a rule id that scan does not report;
+the three Azure types that decline to fix are wired up and return a reason
+rather than doing nothing quietly. **The delete path** enforces `confirm`
+repeating the resource's own id before `force` does anything, on the streaming
+route as well as the plain one, and takes both the flat AWS plan and the
+`{"items", "destroys", "message"}` Azure one. **The blueprint** routes all ten
+of its failure returns through one helper that concatenates the accumulated
+problems with the failing step's own, so the fix recorded earlier in this file
+held everywhere rather than at the places somebody remembered.
+
+**The CLI was the one that had drifted, exactly as this file guessed it would.**
+The entry predicting it was right about the surface and wrong about the
+mechanism — it expected another namespace/metric pairing, and what was there
+was a menu with no pre-flight at all.
+
+- **`bucket_menu` never ran `check_spec`.** Every other creating menu does. It
+  described the deliberately-weak option in a hand-written sentence naming
+  three problems — no encryption, no versioning, no public access block — and
+  the scanner reports **five** for that spec, two of them critical. The
+  sentence had quietly stopped mentioning that the bucket accepts plain
+  unencrypted connections.
+
+  Which is the failure this file already describes, in the entry explaining why
+  the Azure menus show `check_spec` output rather than a sentence per type: *a
+  sentence goes stale the moment a rule is added, and showing the findings is
+  the thing this tool exists to do*. The reasoning was written down, applied to
+  Azure, and never applied to the older menu it was learned from.
+
+  The seam half is worse than the staleness. `POST /resources/bucket` runs
+  `_bucket_check_spec` and **refuses** a critical spec unless `accept_risk` is
+  passed. The CLI printed its three sentences and took a y/N. So the same tool
+  declined a configuration on one surface and built it on the other, which is
+  precisely the divergence the alarm bug was, running the other way.
+
+- **`security_group_menu` kept its own copy of which scanner belongs to the
+  type**, calling `check_firewall_rules` directly where the registry has
+  `_sg_check_spec`. The same call today, so nothing was wrong — and the same
+  shape as the alarm defect, which was also two places agreeing until one of
+  them changed. It goes through the registry now.
+
+- **`instance_menu` never asked which size to build**, found on a second pass
+  over the same surface. It asked for a network, a subnet, a key pair, security
+  groups and a public address, then built a spec with no `instance_type` in it
+  — so `launch_instance` fell through to `DEFAULT_INSTANCE_TYPE` and every
+  machine the CLI has ever started has been a `t3.micro`, against twelve on the
+  page. It reads `resource.options` now, the way `azure_vm_menu` always has.
+
+  Harmless on its own: the smallest size on the allowlist, and the refusal that
+  makes the allowlist matter was never in question. It is listed because of the
+  pattern it completes. Three defects on this surface now — the alarm metric,
+  the bucket pre-flight, and this — and all three are the same sentence: two
+  front ends over one registry, and the older one quietly does less. None of
+  them was a wrong answer. Each was an answer the CLI never asked for.
+
+  It also corrected something this file was asserting. The paragraph explaining
+  why the AWS menus are bespoke and the Azure ones generic gave "an instance
+  size" as an example of what an AWS menu asks, and that example was the one
+  thing in the list that had never been true.
+
+**The CLI had no tests at all**, which is uncomfortable for the surface most
+likely to drift and is most of why this went unseen. `backend/tests/test_cli.py`
+exists now. It does not drive the menus, which read from stdin; it parses
+`main.py` and asserts that every function reaching a create call also reaches
+`check_spec`. Two menus are exempt, and the exemption is written so it cannot
+rot: a second test re-derives that `key-pair` and `network` really do return
+nothing from `check_spec` for any spec, so adding a rule to either scanner
+fails the suite rather than letting the omission go quiet.
+
+**Two smaller things, both found by probing rather than reading.**
+
+- A rule can produce several findings sharing one `rule_id` — a port range of
+  3306 to 3389 covers two entries in `RISKY_PORTS` and is under the hundred-port
+  width that would have caught it earlier. `POST /fix` resolves a rule id with
+  `next()`, so it acts on the first. Checked rather than assumed: every finding
+  from that path carries the same `narrow_to_my_ip` action, so first-match and
+  best-match are the same thing. Not a defect, recorded because the next person
+  to read that `next()` will wonder.
+- `_sg_create` no longer falls back to the account's default VPC. This was the
+  last place in the program that guessed where to put something, it contradicted
+  *placement is asked for, never assumed*, and it was only reachable over HTTP
+  because both interactive surfaces ask — so the one caller who could hit it was
+  a script, the caller least likely to notice its group had landed somewhere it
+  did not choose. Removing it broke twenty API tests, all of which had been
+  riding the fallback; the fixture chooses a network explicitly now, which is
+  the right end for a test about routes to make the choice.
+
+## The two threshold numbers, checked at last
+
+`common.BROAD_PREFIX_V4` is 16 and `BROAD_PREFIX_V6` is 32. This file listed
+them as judgement calls with the reasoning written beside them that nobody had
+checked against a real allowlist. They have been checked. **Both survive, and
+the reasoning written beside them was wrong.**
+
+The claim was that nothing legitimate exceeds a /16 — that a real allowlist is
+an office or a VPN endpoint, a /24 or smaller. That is simply false.
+Cloudflare publishes `104.16.0.0/12` and egresses from `172.64.0.0/13`; MIT
+holds `18.0.0.0/8`. All three are real, all three get named in real firewall
+rules, and all three fire here.
+
+What makes firing correct is not the size but **where the judgement is
+consulted**. The architecture that names a range that large is an origin lock —
+a web server accepting 443 only from its CDN — and `rules.py` returns silently
+on 443 whatever the source is, so that case produces nothing regardless of this
+number. What fires is `104.16.0.0/12` on port 22, and that is somebody trusting
+every host that can rent space behind that CDN. A broad range is not dangerous
+because it is broad; it is dangerous because nobody chose who is inside it, and
+an administration port is where that distinction costs something.
+
+**One trap, met while checking it, and now written into the code.** The obvious
+range to probe the IPv6 threshold with is `2001:db8::/32`, and it proves
+nothing: that is the documentation range, `is_global` excludes it before the
+prefix is looked at, and the assertion passes for a reason that has nothing to
+do with the number being tested. It has to be routable space —
+`2606:4700::/32` is a provider allocation and fires, `2606:4700:4700::/48` is
+one site inside it and does not. The boundary had never been pinned in either
+address family; it is now.
+
 ## Style
 
 Comments explain *why*, not what. Test names are sentences describing the
@@ -1780,6 +1975,26 @@ the file does. If a change does not appear, that is now a real bug rather than
 caching.
 
 ## Not done
+
+- **The four surfaces have now been audited.** See *What comparing the two
+  surfaces found*. The fix, delete/cleanup/deletion-plan and blueprint paths
+  came back clean against the specific claims this file makes about them; the
+  CLI held one real defect and one latent copy, both fixed, and gained the
+  first tests it has ever had.
+
+  What this entry used to say — that an audit was started, ran out of capacity
+  partway and returned nothing for or against — happened a second time and is
+  worth keeping as a note about method. The audit was first handed to a fan-out
+  of parallel readers, one per surface, and was stopped on cost before any of
+  them returned. The finished version was done inline, one surface at a time,
+  by grepping for the specific claim and then calling the code with the values
+  that reach it. That was cheaper and is the approach to repeat.
+
+  It is a narrower pass than the create-path audit, and the difference is worth
+  being honest about: that one traced every form field of every type to the
+  adapter reading it. This one checked the properties this file asserts, plus
+  whatever the probes turned up around them. A field-by-field trace of the fix
+  and delete paths would still be a different and more thorough exercise.
 
 - **The page shows one cloud at a time, and builds firewalls with rules in
   them.** A toggle in the header switches between AWS and Azure and the
@@ -1993,17 +2208,22 @@ refinement, and the largest is that monitor and defender have no rules at all
 
 **One small thing first, and it is known and one-line.**
 
-0. **Root collection is fixed — `pytest` from the repository root is 970
+0. **Root collection is fixed — `pytest` from the repository root is 985
    passed.** See *The root suite collects now*. It was not the rename this
    file called it, and the branch it was waiting on would have conflicted
    rather than resolved it.
 
-   There is still a live bug nobody has hit yet: `sg.list_security_groups`
-   returns raw AWS keys (`GroupId`), and `read_group_for_scanning` expects a
-   lowercase `group_id`, so feeding one straight to the other raises
-   `ParamValidationError`. The page does not hit it because the list adapter
-   reshapes first; a script using the two together will. It is the last thing
-   in this file recorded as broken and not fixed, and it is still one line.
+   **The `GroupId`/`group_id` composition bug is fixed, and this entry was the
+   last thing here still calling it open.** `sg.group_id_of` normalises all
+   three spellings in circulation — `GroupId` off the API, `group_id` out of
+   `read_group_usage`, and `id` out of the registry's list adapter — and
+   `list_rules` calls it, so `read_group_for_scanning` now takes any of them.
+   Verified by composing the two functions the way a script would: the raw dict
+   `list_security_groups` returns reads its rules. A dict carrying none of the
+   three raises rather than returning None, which is the right half to fail on:
+   returning None would send a group that exists down the "no such group" path
+   and answer 404 about it. `test_every_spelling_of_a_group_id_reaches_the_same_group`
+   pins it.
 
    Two numbers to revisit rather than inherit. `common.BROAD_PREFIX_V4` is 16
    and `BROAD_PREFIX_V6` is 32 — the point where public address space stops

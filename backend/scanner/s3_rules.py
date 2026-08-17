@@ -205,6 +205,43 @@ def check_bucket_settings(settings):
             },
         ))
 
+    # ---- Who else was let in on purpose --------------------------------------
+    #
+    # The gap Prowler covers as s3_bucket_cross_account_access, and the only
+    # rule here that asks who can reach *into* a bucket rather than what it
+    # exposes outward. It matters because it is invisible from every other
+    # angle: an account named in the policy is not public, survives all four
+    # public access blocks, does not appear in the console's public/not-public
+    # summary, and looks identical to a correctly locked-down bucket.
+    #
+    # Uncited. CIS has no control for cross-account bucket access, and the
+    # recommendation usually quoted at it belongs to a different AWS standard
+    # than either of the two cited in this package.
+    #
+    # WARNING rather than CRITICAL, and this is the judgement in it: naming
+    # another account is how legitimate sharing is *supposed* to be done, so
+    # this is not a mistake in the way a public bucket is. What makes it worth
+    # reporting is that nobody re-reads these, and the accounts stay long after
+    # the arrangement ends. An acknowledgement is the right home for one that
+    # is meant.
+    others = settings.get("other_accounts")
+
+    if "other_accounts" not in unreadable and others:
+        named = ", ".join(others)
+        how_many = ("one AWS account" if len(others) == 1
+                    else f"{len(others)} AWS accounts")
+        warnings.append(_warning(
+            WARNING,
+            f"This bucket's policy lets {how_many} outside this "
+            f"one reach it: {named}. That is the correct way to share with a "
+            "partner or another team, so it may be exactly right - but it is "
+            "not visible as sharing anywhere in the console, and it keeps "
+            "working long after whoever arranged it has moved on. Check the "
+            "arrangement still holds, and that the permissions granted are "
+            "only the ones it needs.",
+            _target(bucket, "cross_account_policy"),
+        ))
+
     # ---- Transport security --------------------------------------------------
     if "policy_denies_http" in unreadable:
         pass

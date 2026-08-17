@@ -41,9 +41,22 @@ def vpc_id():
     return found
 
 
-def _open_ssh_spec(name="api-test-sg"):
+def _open_ssh_spec(name="api-test-sg", vpc_id=None):
+    """A group these tests can create, in a network chosen here rather than guessed.
+
+    This used to omit vpc_id entirely and _sg_create fell back to the account
+    default. Now that it refuses - placement is asked for, never assumed - the
+    choice has to be made by somebody, and a test making it explicitly is the
+    right end: these tests are about the routes, not about where a group lands.
+    """
+    if vpc_id is None:
+        ec2 = boto3.client("ec2", region_name="us-east-1")
+        vpc_id, err = sg.get_default_vpc(ec2)
+        assert err is None, err
+
     return {
         "name": name,
+        "vpc_id": vpc_id,
         "rules": [{"protocol": "tcp", "from_port": 22, "to_port": 22,
                    "source": WORLD}],
     }
@@ -331,6 +344,39 @@ def test_scanning_something_that_does_not_exist_is_a_404(client, resource_type,
 
     assert resp.status_code == 404, resp.text
     assert resource_id in resp.json()["detail"]
+
+
+# ------------------------------------------------------------ Placement
+
+
+def test_a_group_with_no_network_named_is_refused(client, vpc_id):
+    """The last place in this program that guessed where to put something.
+
+    A network cannot be changed after creation and it decides more about what
+    a group can reach than any rule in it. The CLI and the page both ask, so
+    the only caller who could reach the old default-VPC fallback was a script -
+    the one least likely to notice its group had gone somewhere it did not
+    choose.
+    """
+    spec = _open_ssh_spec()
+    del spec["vpc_id"]
+
+    resp = client.post("/resources/security-group?accept_risk=true", json=spec)
+
+    assert resp.status_code == 400
+    detail = str(resp.json()["detail"])
+    assert "vpc_id" in detail, "the refusal has to name the field that is missing"
+
+
+def test_the_refused_group_is_not_created_anyway(client, vpc_id):
+    """A refusal that still builds the thing is not a refusal."""
+    spec = _open_ssh_spec("placeless")
+    del spec["vpc_id"]
+
+    client.post("/resources/security-group?accept_risk=true", json=spec)
+
+    listed = client.get("/resources/security-group").json()["resources"]
+    assert not any(g["name"] == "placeless" for g in listed)
 
 
 # ------------------------------------------------- The pre-flight refusal
@@ -1184,9 +1230,17 @@ def test_an_azure_row_is_keyed_by_the_identifier_the_routes_accept(
     known = registry.get(key)
     rows = known.list_all(object(), False)
 
-    assert rows == [{"id": "thing-one", "name": "thing-one"}], (
+    assert rows[0]["id"] == "thing-one", (
         f"{key} keyed its row by {rows[0]['id']!r}, which no route accepts"
     )
+    assert "/" not in rows[0]["id"], "an id has to be one path segment"
+
+    # Where the thing is travels with it, so the table has something to show
+    # besides the name. Asserted as keys rather than values because this stub
+    # hands back a resource id with no resource group in it - what matters
+    # here is that the adapter carries the fields through rather than
+    # dropping them, which is what left the page printing the name twice.
+    assert set(rows[0]) == {"id", "name", "resource_group", "location"}
 
 
 # --------------------------------------------- a deletion plan in either shape

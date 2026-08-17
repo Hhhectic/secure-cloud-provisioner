@@ -546,6 +546,87 @@ def put_objects(s3, bucket_name, files):
     return True, f"Uploaded {len(written)} to {bucket_name}.", written
 
 
+def _principal_accounts(principal):
+    """Every AWS account id named by one statement's Principal.
+
+    A Principal arrives in four shapes - "*", {"AWS": "*"}, {"AWS": "<one>"}
+    and {"AWS": [...]} - and each entry is either a bare twelve-digit account
+    id or an ARN carrying the account in its fifth colon-separated field.
+
+    Service principals ({"Service": "cloudtrail.amazonaws.com"}) name no
+    account and are skipped: AWS reaching into a bucket on your own
+    instruction is how logging, replication and half of everything else works,
+    and reporting it would put a finding on every correctly wired account.
+    """
+    if isinstance(principal, str):
+        entries = [principal]
+    elif isinstance(principal, dict):
+        aws = principal.get("AWS", [])
+        entries = [aws] if isinstance(aws, str) else list(aws)
+    else:
+        return set()
+
+    accounts = set()
+    for entry in entries:
+        if not isinstance(entry, str) or entry == "*":
+            # "*" is public, which policy_is_public already reports as
+            # critical. Naming it here as well would put one exposure in two
+            # findings at two severities, and the public reading is the graver
+            # of the two.
+            continue
+        if entry.startswith("arn:"):
+            parts = entry.split(":")
+            if len(parts) > 4 and parts[4]:
+                accounts.add(parts[4])
+        elif entry.isdigit():
+            accounts.add(entry)
+
+    return accounts
+
+
+def _this_account(s3):
+    """This account's id via STS, or None if it cannot be established."""
+    try:
+        sts = _client("sts", s3.meta.region_name)
+        return sts.get_caller_identity()["Account"]
+    except (ClientError, KeyError):
+        return None
+
+
+def policy_grants_other_accounts(s3, bucket_name):
+    """Account ids other than this one that the bucket policy lets in.
+
+    The other direction from every other rule here. They all ask what a bucket
+    exposes to the world; this asks who has been let in deliberately. That is
+    invisible in the console's public/not-public summary, survives every one of
+    the four public access blocks, and is how data reaches a partner, a
+    contractor, or an account somebody stopped working with two years ago.
+
+    None means there is no policy at all, which is not the same as an empty
+    list: no policy means nothing was ever granted, and an empty list means a
+    policy was read and named nobody outside the account. The rule only speaks
+    for the case it can actually see.
+    """
+    document = get_bucket_policy_document(s3, bucket_name)
+    if document is None:
+        return None
+
+    mine = _this_account(s3)
+    if mine is None:
+        # Without knowing which account this is, every principal looks foreign
+        # and the finding would fire on every correctly written policy. An
+        # unanswerable question is recorded as unanswered.
+        raise PermissionDenied("sts:GetCallerIdentity")
+
+    others = set()
+    for statement in document.get("Statement", []):
+        if statement.get("Effect") != "Allow":
+            continue
+        others |= _principal_accounts(statement.get("Principal"))
+
+    return sorted(others - {mine})
+
+
 _READERS = {
     "public_access_block": get_public_access_block,
     "encryption": get_encryption,
@@ -555,6 +636,7 @@ _READERS = {
     "policy_denies_http": policy_denies_http,
     "logging_enabled": logging_enabled,
     "objects": list_objects,
+    "other_accounts": policy_grants_other_accounts,
 }
 
 

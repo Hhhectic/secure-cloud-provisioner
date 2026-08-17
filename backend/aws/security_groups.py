@@ -26,6 +26,42 @@ def get_default_vpc(ec2):
         return None, e.response["Error"]["Message"]
 
 
+def group_id_of(group):
+    """The group ID, from whichever of the three shapes the caller is holding.
+
+    list_security_groups deliberately returns AWS's own dicts: read_group_usage
+    needs the whole thing, and the registry's list adapter reshapes it into
+    {"id", "name", "vpc_id"}. So there are three spellings of the same value in
+    circulation - GroupId off the API, group_id out of read_group_usage, and id
+    out of the adapter - and the two obvious ways to compose the listing with
+    anything downstream hand one of those dicts to a function documented as
+    taking an ID.
+
+    Doing that used to reach botocore, which rejects it as a malformed
+    parameter and names the parameter rather than the mistake. Normalising here
+    is cheaper than a rule about which spelling each function takes, and the
+    raw key is tried first because that is what comes straight off the API.
+
+    A dict carrying none of the three is a caller error rather than a missing
+    group, so it raises instead of returning None: returning None would send it
+    down the "no such group" path, and a 404 about a group that exists is the
+    reassuring answer this project spends `unreadable` on avoiding everywhere
+    else.
+    """
+    if not isinstance(group, dict):
+        return group
+
+    for key in ("GroupId", "group_id", "id"):
+        found = group.get(key)
+        if found:
+            return found
+
+    raise ValueError(
+        "Expected a security group ID or a dict carrying one under GroupId, "
+        f"group_id or id; got keys {sorted(group)}"
+    )
+
+
 # ---------------------------------------------------------------- CRUD Operations
 
 
@@ -96,6 +132,7 @@ def _without_duplicates(rules):
 
 def add_rules(ec2, group_id, rules):
     """Authorizes ingress rules on an existing group."""
+    group_id = group_id_of(group_id)
     if not rules:
         return True, "No rules to add."
 
@@ -190,6 +227,7 @@ def list_security_groups(ec2, only_ours=False, vpc_id=None):
 
 def list_rules(ec2, group_id):
     """Returns each rule with its SecurityGroupRuleId for targeted remediation."""
+    group_id = group_id_of(group_id)
     rules = []
     paginator = ec2.get_paginator("describe_security_group_rules")
     for page in paginator.paginate(
@@ -201,6 +239,7 @@ def list_rules(ec2, group_id):
 
 def delete_security_group(ec2, group_id):
     """Deletes a specific security group by ID."""
+    group_id = group_id_of(group_id)
     try:
         ec2.delete_security_group(GroupId=group_id)
         return True, f"Deleted {group_id}"
@@ -314,6 +353,7 @@ def my_public_ip():
 
 def remove_rule(ec2, group_id, rule_id, direction="inbound", dry_run=False):
     """Deletes one rule by ID, supporting both inbound and outbound rules."""
+    group_id = group_id_of(group_id)
     try:
         if direction == "outbound":
             ec2.revoke_security_group_egress(
@@ -349,6 +389,7 @@ def narrow_rule_to_ip(ec2, group_id, rule, new_cidr=None):
     revoke succeeds and the authorize fails, the result is no access rather than
     the original wide-open access.
     """
+    group_id = group_id_of(group_id)
     is_ipv6_rule = ":" in (rule.get("source") or "")
 
     if new_cidr is None:

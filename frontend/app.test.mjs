@@ -111,9 +111,13 @@ function fakeApi(overrides = {}) {
       },
     }),
     "/resources/alarm": () => ({ resource_type: "alarm", resources: [] }),
+    // resource_group and location are on the row because _az_summary puts them
+    // there. An Azure name is only unique inside its resource group, so a row
+    // without one is an identifier that cannot be resolved by a reader.
     "/resources/azure-storage": () => ({
       resource_type: "azure-storage",
-      resources: [{ id: "demostorage", name: "demostorage" }],
+      resources: [{ id: "demostorage", name: "demostorage",
+                    resource_group: "scp-demo", location: "eastus" }],
     }),
     // Shaped like what scanner/azure_storage_rules.py actually returns: no
     // control, because CIS AWS Foundations does not govern Azure.
@@ -1015,6 +1019,21 @@ check(document.body.classList.contains("cloud-azure"),
 
 const azRow = document.querySelector("#list tr.clickable");
 if (check(Boolean(azRow), "the account is listed")) {
+  /* An Azure row's id is its name, so the duplicate Name column was dropped
+   * and the table went one identifier wide. What replaces it is where the
+   * thing is: two resources can share a name in different resource groups,
+   * and until this landed the page could not tell you which one you had. */
+  const azHeads = [...document.querySelectorAll("#list th")]
+    .map((h) => h.textContent);
+  check(azHeads.includes("Resource group") && azHeads.includes("Location"),
+        "with columns saying where it is, not the name printed twice");
+  check(azHeads.filter((h) => h === "Name").length === 0,
+        "and no Name column, because the id already is the name");
+
+  const azCells = [...azRow.querySelectorAll("td")].map((d) => d.textContent);
+  check(azCells.includes("scp-demo") && azCells.includes("eastus"),
+        "carrying the values the list adapter sent");
+
   await azRow.click();
   await new Promise((r) => setTimeout(r, 60));
 

@@ -42,8 +42,6 @@ MANAGED_TAG_KEY = "ManagedBy"
 MANAGED_TAG_VALUE = "secure-cloud-provisioner"
 
 DEFAULT_CIDR = "10.0.0.0/16"
-PUBLIC_SUBNET_CIDR = "10.0.1.0/24"
-PRIVATE_SUBNET_CIDR = "10.0.2.0/24"
 
 ANYWHERE = "0.0.0.0/0"
 
@@ -51,13 +49,20 @@ ANYWHERE = "0.0.0.0/0"
 def subnet_cidrs(cidr):
     """The two subnet ranges to carve out of `cidr`, as (public, private).
 
-    These used to be the constants above, which sit inside 10.0.0.0/16 and
+    These were the module constants PUBLIC_SUBNET_CIDR = "10.0.1.0/24" and
+    PRIVATE_SUBNET_CIDR = "10.0.2.0/24", which sit inside 10.0.0.0/16 and
     inside none of the other three networks the page's own menu offers. A
     subnet has to be inside its VPC, so picking 10.1.0.0/16, 172.31.0.0/16 or
     192.168.0.0/16 - three of four choices - failed both create_subnet calls
     with "The CIDR '10.0.1.0/24' is invalid" and produced a VPC with nothing
     in it. The problems were reported honestly and the VPC was still returned
     as created, so the failure read as a network you could put a machine in.
+
+    The constants are gone rather than left beside this. Nothing referenced
+    them once this existed, and a module-level name reading PUBLIC_SUBNET_CIDR
+    states that the public subnet has one address range - which is now true of
+    one network in four and false of the rest. Something that authoritative and
+    that wrong is worth more than the line it saves.
 
     The second and third block rather than the first and second, because that
     is what the constants were and it keeps 10.0.0.0/16 building exactly the

@@ -42,6 +42,33 @@ EVERYONE_TAGS = {"*", "any", "internet"}
 # IPv6 is set at /32 because the scales do not correspond: a site is given a
 # /48 and an internet provider a /32, so /32 is "an entire provider" and /48 is
 # "one organisation".
+#
+# Both numbers were judgement calls with nothing behind them, and this file
+# used to say so. They have now been checked against ranges organisations
+# actually publish and firewalls actually name, and both survive - but not for
+# the reason originally written down.
+#
+# The claim that nothing real exceeds a /16 is simply false. Cloudflare
+# publishes 104.16.0.0/12 and egresses from 172.64.0.0/13; MIT holds 18.0.0.0/8.
+# All three are legitimate, all three are named in real allowlists, and all
+# three fire here. So the threshold does not separate "a real allowlist" from
+# "a region of the internet" the way the first version of this comment claimed.
+#
+# What makes it right anyway is where it is consulted. The architecture that
+# allowlists a /12 is an origin lock - a web server accepting 443 only from its
+# CDN - and rules.py returns silently on 443 whatever the source is, so that
+# case produces nothing regardless of this number. What fires is 104.16.0.0/12
+# on port 22, and firing is correct: anyone who can put a site behind that CDN
+# can reach an SSH port trusting all of it. A large range is not dangerous
+# because it is large, it is dangerous because nobody chose who is in it, and
+# an admin port is where that distinction costs something. Verified by calling
+# the rules directly - see test_broad_ranges_are_judged_by_what_they_open.
+#
+# One trap, met while checking this. 2001:db8::/32 is the documentation range
+# and is_global already excludes it, so testing the IPv6 threshold with it
+# proves nothing and looks like a pass. The boundary has to be probed with
+# globally routable space - 2606:4700::/32 is a provider allocation and fires,
+# 2606:4700:4700::/48 is one site inside it and does not.
 BROAD_PREFIX_V4 = 16
 BROAD_PREFIX_V6 = 32
 

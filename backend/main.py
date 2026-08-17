@@ -42,6 +42,7 @@ from aws.s3_buckets import (
     cleanup_all_managed_buckets,
     PermissionDenied,
 )
+from aws import instances as ec2i
 from aws import key_pairs
 from aws import security_groups
 from aws import snapshots
@@ -370,7 +371,11 @@ def security_group_menu(ec2):
         if not rules:
             print("No rules given. The group will allow nothing inbound.")
 
-        warnings = check_firewall_rules(rules)
+        # Through the registry rather than calling check_firewall_rules here,
+        # so this menu cannot judge a group by a different rule set than the
+        # page does. The two are the same call today; keeping a second copy of
+        # which scanner belongs to which type is how they stop being.
+        warnings = registry.SECURITY_GROUP.check_spec({"rules": rules})
         if warnings:
             _report(warnings)
             if input("\nCreate anyway? (y/N): ").strip().lower() != "y":
@@ -438,10 +443,31 @@ def bucket_menu(s3):
         default_name = f"scp-test-{suffix}"
         name = input(f"Bucket name [{default_name}]: ").strip() or default_name
 
-        if not secure:
-            print("\nThis bucket will be created with no encryption, no versioning,")
-            print("and no public access block. That is the point of this option.")
-            if input("Continue? (y/N): ").strip().lower() != "y":
+        # The same pre-flight the API runs, and for the reason every other menu
+        # here already had one. This used to be three sentences naming what the
+        # weak option builds - no encryption, no versioning, no public access
+        # block - and by the time anybody read it back the scanner reported
+        # five findings, two of them critical. The one it had stopped
+        # mentioning was that the bucket accepts plain unencrypted connections.
+        #
+        # A description of what a rule set says, written by hand beside the
+        # rule set, goes stale the moment a rule is added and nothing fails
+        # when it does. Showing the findings is the thing this tool exists to
+        # do, and it cannot drift from them.
+        spec = {"name": name, "region": REGION, "secure_by_default": secure}
+        planned = registry.BUCKET.check_spec(spec)
+        if planned:
+            print("\nBefore building it, this is what it would be:")
+            _report(planned)
+
+        if worst_level(planned) == CRITICAL:
+            # POST /resources/bucket refuses this outright and needs
+            # accept_risk=true to proceed. The CLI asks instead, because there
+            # is a person here to ask - but it does have to ask, and it did
+            # not, which meant the same tool refused a configuration on one
+            # surface and built it quietly on the other.
+            if input("\nCreate it anyway? (y/N): ").strip().lower() != "y":
+                print("Stopped. Nothing was created.")
                 return
 
         ok, res, problems = create_bucket(
@@ -828,7 +854,33 @@ def instance_menu(ec2):
             print("why the tool always states the answer rather than leaving")
             print("it to the subnet.")
 
+        # The allowlist, off the registry rather than written out again here -
+        # the same arrangement the Azure machine menu already used, and the
+        # reason it cannot offer a size the tool would then refuse.
+        #
+        # This menu did not ask at all until now. It built a spec with no
+        # instance_type in it, launch_instance fell through to
+        # DEFAULT_INSTANCE_TYPE, and every machine the CLI has ever started has
+        # been a t3.micro. Harmless - that is the smallest size on the
+        # allowlist - but the page offers all of them and this offered one, and
+        # the paragraph in CLAUDE.md justifying why the AWS menus each ask
+        # something different named the instance size as its example.
+        sizes = resource.options(ec2)["instance_type"]
+        print("\nSizes this tool will build. Anything else is refused outright,")
+        print("because a typo should not be able to spend a hundred times more.")
+        for index, size in enumerate(sizes, 1):
+            print(f"  {index}. {size['label']}")
+        default_index = next(
+            (i for i, s in enumerate(sizes, 1)
+             if s["value"] == ec2i.DEFAULT_INSTANCE_TYPE), 1)
+        picked = input(f"Size [{default_index}]: ").strip() or str(default_index)
+        if not picked.isdigit() or not 1 <= int(picked) <= len(sizes):
+            print("Not a valid selection.")
+            return
+        instance_type = sizes[int(picked) - 1]["value"]
+
         spec = {"name": name, "region": REGION, "key_name": key_name,
+                "instance_type": instance_type,
                 "security_group_ids": group_ids or None,
                 "subnet_id": subnet["subnet_id"],
                 "assign_public_ip": public}
