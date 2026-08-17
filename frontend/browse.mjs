@@ -46,20 +46,52 @@ for (const cloud of clouds.length ? clouds : [null]) {
     await page.waitForTimeout(1500);
   }
 
-  const tabs = await page.$$eval("#types button", (bs) =>
-    bs.map((b) => b.dataset.key));
-  console.log(`${cloud || "resources"}: ${tabs.join(", ")}`);
+  /* The page is three tabs now, and #types belongs to two of them.
+   *
+   * This read #types straight after load. The page opens on the Dashboard,
+   * which has no type picker, so it enumerated nothing, walked nothing, and
+   * printed "no console errors on any tab of any cloud" about a page it had
+   * never opened. A sweep that finds zero things and calls them clean is the
+   * exact failure this project spends `unreadable` and *Scan incomplete* on
+   * everywhere else, sitting inside the instrument meant to catch it - and its
+   * output is indistinguishable from a good run unless somebody notices the
+   * list is empty. An empty picker is a reported problem now, not a quiet one.
+   *
+   * The Dashboard is screenshotted rather than skipped: it scans the whole
+   * account on arrival, and a wrong verdict there is the first thing anybody
+   * sees. */
+  await page.click('#tabs .tab[data-tab="dashboard"]');
+  await page.waitForTimeout(4000);
+  await page.screenshot({ path: `${out}/${cloud || "all"}-dashboard.png`,
+                          fullPage: true });
 
-  for (const tab of tabs) {
-    await page.click(`#types button[data-key="${tab}"]`);
-    await page.waitForTimeout(2500);
-    await page.screenshot({ path: `${out}/${tab}.png`, fullPage: true });
+  for (const pageTab of ["create", "audit"]) {
+    await page.click(`#tabs .tab[data-tab="${pageTab}"]`);
+    await page.waitForTimeout(1200);
 
-    // Anything the eye would catch: a control with no accessible caption, or a
-    // menu whose only entry is the placeholder.
-    const empty = await page.$$eval("#create-body select", (ss) =>
-      ss.filter((s) => s.options.length <= 1).length);
-    if (empty) console.log(`  ${tab}: ${empty} menu(s) with nothing to choose`);
+    const tabs = await page.$$eval("#types button", (bs) =>
+      bs.map((b) => b.dataset.key));
+    console.log(`${cloud || "resources"} / ${pageTab}: ` +
+                (tabs.join(", ") || "(nothing listed)"));
+    if (!tabs.length) {
+      problems.push(`${cloud || "resources"}/${pageTab}: ` +
+                    "the type picker listed nothing");
+    }
+
+    for (const tab of tabs) {
+      await page.click(`#types button[data-key="${tab}"]`);
+      await page.waitForTimeout(2500);
+      await page.screenshot({ path: `${out}/${pageTab}-${tab}.png`,
+                              fullPage: true });
+
+      // Anything the eye would catch: a control with no accessible caption, or
+      // a menu whose only entry is the placeholder.
+      const empty = await page.$$eval("#create-body select", (ss) =>
+        ss.filter((s) => s.options.length <= 1).length);
+      if (empty) {
+        console.log(`  ${pageTab}/${tab}: ${empty} menu(s) with nothing to choose`);
+      }
+    }
   }
 }
 

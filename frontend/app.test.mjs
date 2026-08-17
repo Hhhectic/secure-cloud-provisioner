@@ -1866,5 +1866,45 @@ if (check(Boolean(multiSelect), "the form offers a real multi-select")) {
   }
 }
 
+// ------------------------------------- the browser sweep still has a page to walk
+
+/* browse.mjs is not in `npm test` - it needs a running server and a real
+ * account - so nothing here notices when it stops working. It stopped working
+ * at the three-tab redesign and nobody saw for weeks.
+ *
+ * It read `#types` immediately after load. The page opens on the Dashboard,
+ * which has no type picker, so it enumerated zero tabs, walked none of them,
+ * and printed "no console errors on any tab of any cloud" - output identical
+ * to a clean run unless you notice the list is empty. The instrument this
+ * project calls its most important one was reporting a clean sweep of nothing.
+ *
+ * These pin the structural anchors it steers by. They are cheap, and the thing
+ * they protect is expensive: a broken sweep is worse than no sweep, because
+ * the tick gets believed. */
+
+console.log("\nThe browser sweep's anchors still exist on the page");
+console.log("---------------------------------------------------");
+
+const sweepDoc = (await boot(undefined, "create")).document;
+
+for (const tab of ["dashboard", "create", "audit"]) {
+  check(Boolean(sweepDoc.querySelector(`#tabs .tab[data-tab="${tab}"]`)),
+        `browse.mjs can reach the ${tab} tab`);
+}
+check(Boolean(sweepDoc.querySelector("#types")),
+      "and the type picker it enumerates is still called #types");
+check(sweepDoc.querySelectorAll("#cloud-toggle .opt").length >= 2,
+      "and the cloud toggle still offers both clouds by data-cloud");
+check([...sweepDoc.querySelectorAll("#cloud-toggle .opt")]
+        .every((o) => o.dataset.cloud),
+      "each carrying the data-cloud the sweep reads to know which halves exist");
+
+// The picker is populated per page-tab, which is the fact the sweep got wrong.
+// Asserting it here means a redesign that empties it fails in npm test rather
+// than silently in an instrument nobody reads the output of closely.
+check(sweepDoc.querySelectorAll("#types button").length > 0,
+      "and on the Create tab it actually lists types, which is what the sweep "
+      + "walks");
+
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");
 process.exit(failures ? 1 : 0);

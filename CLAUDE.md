@@ -168,7 +168,7 @@ it to 964 from `backend/` and 970 from the repository root. Then the pass over
 the four surfaces nobody had audited — see *What comparing the two surfaces
 found* — and the instance-size gap a second look at the CLI turned up, take it
 to **979 from `backend/`** and **985 from the repository root**, 0 skipped,
-plus **237 checks** across the two Node suites in `frontend/`. Every figure
+plus **244 checks** across the two Node suites in `frontend/`. Every figure
 here is re-run rather than carried forward, which is how two of them were once
 found to be one low — and re-running is also how the 977 that sat here was
 found to be two short of what the suite actually reports.
@@ -227,12 +227,51 @@ written down as a property of the project. Built with `python3 -m venv` and
 both requirements files plus `pytest` and `moto`, exactly as the setup block
 near the bottom describes.
 
-**Both smoke tests have now been re-run and both are green.** The live AWS one
-is **116 passed, 0 failed** against account 679140927523 with no flags; the
-Azure one, `--azure-only --with-azure-resources --azure-resource-group
-scp-demo`, is **47 passed, 0 failed** including building and destroying a real
-virtual machine. The 154 figure above was a run with `--with-instances` and
-`--with-blueprint`, which the no-flag run does not include.
+**All three live instruments have been re-run against the current tree, and
+two of them were broken.** That is the finding, not the figures: the offline
+suite was green the whole time, and both breakages were in the things this
+file calls its real instruments.
+
+Where they stand now, all in `us-west-2` rather than the shared `us-east-1` —
+`--region` is free isolation and is now the recommended way to run this:
+
+- `smoke_test.py --region us-west-2` — **119 passed, 0 failed**
+- the same plus `--with-instances --with-workload --with-blueprint` —
+  **183 passed, 0 failed**, the whole bastion built and torn down
+- `--azure-only --with-azure-resources --azure-resource-group scp-demo` —
+  **47 passed, 0 failed**, including building and destroying a real machine
+- `browse.mjs` — every tab of both clouds, no console errors, 28 screenshots
+
+Nothing was left running afterwards: no instances, no non-default networks, no
+NAT gateways and no unattached elastic addresses in either region, checked
+independently of the smoke test's own leftover assertions. `scp-billing-5-usd`
+remains, deliberately.
+
+**The smoke test broke when the placement refusal landed, and nobody re-ran
+it.** `_sg_create` stopped falling back to the account's default VPC — rightly,
+since placement cannot be changed afterwards — but `smoke_security_group` and
+the HTTP section both built specs without a `vpc_id`, so three checks failed
+against real AWS while every offline test stayed green. Both read the network
+off `resource.options` now, the same list the page and the CLI choose from, so
+the script picks the way a person does. This is the second time a correct
+change has broken the script that proves it: worth making the pair one habit,
+because the offline suite cannot see either half.
+
+**`browse.mjs` had been sweeping nothing since the three-tab redesign.** It
+read `#types` immediately after load, and the page opens on the Dashboard,
+which has no type picker — so it enumerated zero tabs, walked none of them,
+and printed *no console errors on any tab of any cloud*. That output is
+identical to a clean run unless somebody notices the list is empty, which is
+why it survived a redesign it was supposed to be checking. It selects each
+page tab before enumerating now, screenshots the Dashboard as a surface in its
+own right, and **an empty picker is a reported problem rather than a silent
+one**.
+
+It is worth naming plainly what that was: a scan that looked at nothing and
+reported clean, inside the instrument this project trusts most — the exact
+failure `unreadable` and *Scan incomplete* exist to prevent everywhere else.
+`app.test.mjs` now pins the anchors it steers by, because `browse.mjs` is not
+in `npm test` and nothing else would notice it going blind again.
 
 **Every provisionable type has now been driven through the browser**, against
 both real clouds, which had never been done for anything before this. All nine
