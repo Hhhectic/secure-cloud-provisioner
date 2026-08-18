@@ -392,7 +392,7 @@ The AWS half, which is what the rest of this file is about:
 
 ```bash
 cd backend
-source /home/huori/scp-venv/bin/activate     # not ../.venv: see below
+source /home/huori/scp-venv/bin/activate     # ../.venv too, minus one: see below
 
 pytest -v                                   # offline, moto, no credentials
                                             # 1005, and the same 1005 from the
@@ -487,20 +487,51 @@ Both still work against `group/main`, where those modules remain.
 `requirements.txt` at the root is still installed, and still holds the Azure
 SDK. It was never part of that application, whatever its position suggested.
 
-**The virtualenv is `/home/huori/scp-venv`, and this file has twice named one
-that does not exist** — first `../.venv`, then `/home/user/scp-venv`. There is
-no `.venv` in the repository and there does not appear ever to have been one on
-this machine, so the documented activation line failed before anything else was
-tried, both times. It also arrived without `pytest` or `moto`, so the offline
-suite could not run until both were installed — the SDKs were there and the
-test tools were not, which is a confusing way to be broken because the
-application starts fine. If you are setting this up again:
+**The virtualenv is `/home/huori/scp-venv`, this file has twice named one
+that does not exist, and it then denied one that does.** The two wrong names
+were `../.venv` and `/home/user/scp-venv`. The entry correcting them overshot:
+it said there is "no `.venv` in the repository and there does not appear ever
+to have been one on this machine". There is one. `/home/huori/code/.venv` was
+built on 9 August by `/usr/bin/python3 -m venv`, six days before `scp-venv`,
+holds 443 MB, and **runs the whole offline suite — 1005 passed in 4m58s**,
+measured rather than reasoned about. An absence inferred from one shell not
+finding something, and then written down as a property of the machine, is the
+`resource_skus` mistake pointed the other way: that one recorded a number
+taken under load as the call's cost, this one recorded a failed lookup as the
+world.
+
+What stands from that entry is its other half. `scp-venv` did arrive without
+`pytest` or `moto`, so the offline suite could not run until both were
+installed — the SDKs were there and the test tools were not, which is a
+confusing way to be broken because the application starts fine. If you are
+setting this up again:
 
 ```bash
 python3 -m venv /home/huori/scp-venv
 /home/huori/scp-venv/bin/pip install -r backend/requirements.txt -r requirements.txt
 /home/huori/scp-venv/bin/pip install pytest moto
 ```
+
+**The two are not interchangeable, and no test can tell them apart.**
+`scp-venv` holds `azure-mgmt-monitor` 7.0.0 and `.venv` does not; `.venv`
+holds `azure-mgmt-authorization`, `azure-mgmt-security`, `azure-mgmt-sql` and
+`azure-mgmt-subscription`, and `scp-venv` does not. The suite answers 1005
+under either, `az/monitor.py`'s fifteen included, because those run against a
+stub and every SDK import here is lazy. The difference is visible only live,
+and there it is a defect rather than a missing package: under `.venv`,
+`GET /resources/azure-monitor` fails with `ModuleNotFoundError` where every
+other Azure type answers **503 naming what to install**.
+
+`az/monitor.get_client` does a bare `from azure.mgmt.monitor import
+MonitorManagementClient`. Every other client in `az/` goes through
+`az/common._import`, which is the one place an absent SDK becomes
+`AzureNotConfigured` and a sentence somebody can act on, and it is the only
+bare SDK import in the package. So the newest Azure type is the one place the
+lazy-import design half holds — the page still starts, which was the point,
+but that tab answers a traceback instead of an explanation, on exactly the
+checkout most likely to be missing the package. Found by driving one route
+under two virtualenvs, which is an instrument this file did not have: both are
+green, both start, and only one of them can answer.
 
 A checkout is also missing `.env`, which is gitignored and therefore absent
 from any fresh clone and from every git worktree — `backend/environment.py`
@@ -2404,10 +2435,14 @@ caching.
     omission — see *The five Azure types*. Storage and security groups fix.
   - **One subscription, one region, one service principal.** Everything
     measured was measured in `eastus` against one tenant. The role the
-    principal holds was never enumerated — `azure-mgmt-authorization` is not
-    installed and adding it just to ask was not worth it — so "the writes
-    worked" is what is known, rather than which grant made them work. It
-    demonstrably cannot register a resource provider.
+    principal holds was never enumerated, so "the writes worked" is what is
+    known rather than which grant made them work. It demonstrably cannot
+    register a resource provider. The reason recorded here was that
+    `azure-mgmt-authorization` is not installed and that adding it just to ask
+    was not worth it, and the first half of that is false — it is installed,
+    at 4.0.0, in `/home/huori/code/.venv`. Nobody asked. What that changes is
+    the size of the question rather than the answer: it is a read away rather
+    than an install away, and what it costs now is the writing.
 - **The second application is gone.** This entry has been rewritten four times
   and each version was overtaken rather than wrong: first the two halves had
   never met, then they had merged but both still ran, then the only thing
