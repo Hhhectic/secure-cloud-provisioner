@@ -5,17 +5,26 @@ not one, and the split is forced by AWS rather than chosen.
 
 | File | Attach as | Size |
 |---|---|---|
-| `iam-policy.json` | inline policy on the user | 1797 / 2048 |
-| `iam-policy-account-audit.json` | customer managed policy | 523 / 6144 |
+| `iam-policy.json` | inline policy on the user | 1966 / 2048 |
+| `iam-policy-account-audit.json` | customer managed policy | 1517 / 6144 |
 | `iam-policy-demo.json` | customer managed, **only while demoing** | 405 / 6144 |
 
 ## Why two files
 
 **All of an IAM user's inline policies together may not exceed 2,048
-non-whitespace characters.** The complete permission set is 2,282. Pasting it
-into the console as a single inline policy fails, and the natural way to make
-it fit is to delete whichever statement you are least sure you need — which is
-how an account ends up with the audit half missing.
+non-whitespace characters.** The complete permission set is
+3483. Pasting it into the console as a single
+inline policy fails, and the natural way to make it fit is to delete whichever
+statement you are least sure you need — which is how an account ends up with
+the audit half missing.
+
+The numbers in the table above are measured from the files rather than typed.
+They were typed once and went stale in the direction that matters: the table
+advertised 1797/2048 while the file had grown to 2,379, so it said the policy
+fitted when pasting it had been failing for some time. `test_the_inline_policy
+_still_fits_the_2048_character_limit` measures them now, and the audit reads
+moved out a second time to get back under - the same fix as the first time,
+for the same reason, which is worth knowing before adding to the inline file.
 
 That failure is close to silent. Every provisioning path keeps working; only
 the account audit degrades, and it degrades into nine "could not check" notes
@@ -28,8 +37,21 @@ user's inline budget, so the audit reads live there.
 
 ## Why the split falls where it does
 
-The audit **reads** moved out. Every `Deny` stayed inline, including
+The audit **reads** moved out, and then `ReadOnlyAcrossEverythingThisToolAudits` followed them when the inline
+file grew back past the limit. Every `Deny` stayed inline, including
 `RefuseEveryIamWrite`.
+
+That read block was the only statement that could move. The four remaining
+Allows are the ones the Denies guard - bucket settings, network and compute,
+alarms, emptying a bucket for teardown - and separating a guardrail from what
+it guards is the one thing this split must not do. The read block is guarded by
+nothing: thirteen reads on `Resource: "*"`, which is the same kind of thing the
+managed policy already held.
+
+**If you are updating a live account**, both policies change together. Moving
+the statement out of the inline policy without adding it to the managed one
+costs the tool thirteen reads and produces exactly the near-silent degradation
+described above.
 
 Denies are the guardrails — no NAT gateways, nothing bigger than `*.small`, no
 `CreateKeyPair`, no IAM write of any kind. A guardrail that can be detached

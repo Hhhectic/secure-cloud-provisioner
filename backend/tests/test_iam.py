@@ -20,6 +20,7 @@ error that survives review.
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import quote
 
 import boto3
@@ -30,6 +31,86 @@ from moto import mock_aws
 from api import registry
 from aws import iam
 from aws.s3_buckets import PermissionDenied
+
+DOCS = Path(__file__).resolve().parent.parent.parent / "docs"
+
+
+def _policy_size(name):
+    """Non-whitespace characters, which is what AWS counts against the limit."""
+    body = json.loads((DOCS / name).read_text())
+    return len(json.dumps(body, separators=(",", ":"))), body
+
+
+def test_the_inline_policy_still_fits_the_2048_character_limit():
+    """All of an IAM user's inline policies together may not exceed 2,048.
+
+    This has now been breached twice. The audit reads were moved to a managed
+    policy specifically to get under it, the remainder grew back to 2,379, and
+    docs/iam-setup.md went on advertising 1797/2048 the whole time - a typed
+    number, stale in the only direction that matters, saying the thing fits
+    when pasting it had been failing for months.
+
+    Measuring it is the fix. A number nobody re-derives is a claim, and this
+    file is full of entries about claims.
+    """
+    size, _ = _policy_size("iam-policy.json")
+    assert size <= 2048, (
+        f"docs/iam-policy.json is {size} non-whitespace characters and cannot "
+        "be pasted as an inline policy. Move an Allow to "
+        "iam-policy-account-audit.json - never a Deny.")
+
+
+def test_the_managed_policies_fit_their_own_limit():
+    for name in ("iam-policy-account-audit.json", "iam-policy-demo.json"):
+        size, _ = _policy_size(name)
+        assert size <= 6144, f"docs/{name} is {size} characters, over 6144"
+
+
+def _actions(statement):
+    action = statement["Action"]
+    return {action} if isinstance(action, str) else set(action)
+
+
+def test_every_refusal_travels_with_the_permission_it_guards():
+    """A guardrail that detaches separately from what it guards is not one.
+
+    The first version of this asserted that every Deny lives inline, and the
+    demo policy showed that to be the wrong rule rather than a violation of the
+    right one: RefuseAnyVolumeBiggerThanTheDemoNeeds caps ec2:CreateVolume, and
+    the Allow it caps is in the same file, so detaching the demo policy takes
+    both halves at once. That is the principle being satisfied, not evaded.
+
+    So the rule asserted here is the real one - a refusal must not be separable
+    from what it restrains - and the demo policy's exemption is *checked*
+    rather than written down, because an exemption saying "the demo policy is
+    allowed refusals" would have retired the guard instead of narrowing it.
+
+    The pressure this exists against is the character limit above. That
+    pressure does not care which statement it moves.
+    """
+    _, inline = _policy_size("iam-policy.json")
+    assert [s for s in inline["Statement"] if s["Effect"] == "Deny"], \
+        "the inline policy carries no refusals at all"
+
+    # The audit policy is reads. A refusal there would guard permissions that
+    # live in a different file, which is the separation this forbids.
+    _, audit = _policy_size("iam-policy-account-audit.json")
+    strays = [s.get("Sid") for s in audit["Statement"] if s["Effect"] == "Deny"]
+    assert not strays, \
+        f"iam-policy-account-audit.json carries detachable refusals: {strays}"
+
+    # The demo policy may carry refusals, but only over what it grants itself.
+    _, demo = _policy_size("iam-policy-demo.json")
+    granted = set().union(*[_actions(s) for s in demo["Statement"]
+                            if s["Effect"] == "Allow"])
+    for statement in demo["Statement"]:
+        if statement["Effect"] != "Deny":
+            continue
+        loose = _actions(statement) - granted
+        assert not loose, (
+            f"{statement.get('Sid')} refuses {sorted(loose)}, which this policy "
+            "does not grant - so it guards a permission that lives elsewhere "
+            "and can be detached away from it")
 from scanner import controls
 from scanner.common import CRITICAL, WARNING, INFO, cited, fixable, worst_level
 from scanner.iam_rules import check_account

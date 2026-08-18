@@ -782,13 +782,33 @@ message is never for. Both have wording now, and the guard is derived from
 without it.
 
 `s3:PutObject` is in `docs/iam-policy-account-audit.json` rather than the
-inline policy, and measuring said why: **`docs/iam-policy.json` is 2,379
-non-whitespace characters against the 2,048 inline limit, and was already 331
-over before any of this**. So the documented inline policy has not been
-pasteable as one for some time, which quietly undoes the fix recorded below
-about the 2,048-character budget — the audit reads were moved out
-*specifically* to get under it, and the remainder has since grown back past
-it. The managed policy is at 1,104 of 6,144.
+inline policy, and measuring said why: `docs/iam-policy.json` was **2,379
+non-whitespace characters against the 2,048 inline limit**, 331 over, so the
+documented inline policy had not been pasteable as one for some time. That
+quietly undid the fix recorded below about the 2,048-character budget — the
+audit reads were moved out *specifically* to get under it, and the remainder
+grew back past it.
+
+**Fixed the same way, and then guarded so it cannot happen a third time.**
+`ReadOnlyAcrossEverythingThisToolAudits` followed the other reads into the
+managed policy: inline is **1,966 of 2,048** and managed **1,517 of 6,144**.
+It was the only statement that could move. The four remaining Allows are the
+ones the Denies guard, and separating a guardrail from what it guards is the
+one thing this split must not do; the read block is guarded by nothing.
+
+`docs/iam-setup.md` was worse than the file it described. Its table said
+**1797 / 2048** — typed once, never re-derived, and stale in the only
+direction that matters: it advertised a policy that fitted while pasting it
+had been failing. Every figure in that table is measured from the files now,
+and three tests in `test_iam.py` pin the two limits and assert that no `Deny`
+has drifted into a policy that can be detached on its own.
+
+**A live account needs both halves applied together.** Taking the statement
+out of the inline policy without adding it to the managed one costs the tool
+thirteen reads, and that failure is the near-silent one this project already
+paid for once: every provisioning path keeps working and the audit degrades
+into nine "could not check" notes that read like an account with nothing to
+report.
 
 **One finding is about money rather than exposure.** `_check_workload` in
 `scanner/instance_rules.py` reads a machine's processor use and says whether it
@@ -2485,9 +2505,15 @@ caching.
   what makes a whole account 3.4 seconds rather than thirty, and why
   auto-scanning on arrival is affordable. A single type holding a few hundred
   resources would still be slow, and no account here has one.
-- **`_sg_create` still falls back to the default VPC** when a spec omits
-  `vpc_id`. The CLI always passes one now, so only API callers can place a
-  group somewhere they did not choose.
+- **`_sg_create` no longer falls back to the default VPC, and this entry said
+  it did.** The code refuses a spec with no `vpc_id` and answers with the
+  options route to read one from — *What comparing the two surfaces found*
+  records the removal, and this bullet sat here contradicting it, so the file
+  asserted both halves at once. Checked against the code rather than read
+  back: `api/registry._sg_create` returns a refusal before it calls anything.
+  Confirmed live too — a create with no `vpc_id` is refused, and the drive
+  that proved it had to read `GET /resources/security-group/options` to get a
+  network the way the page does.
 - **The Azure smoke test covers all five types; three gaps are left.**
   This entry used to say there was no Azure half and no live run at all, which
   was the single largest gap in this file. `--azure-only

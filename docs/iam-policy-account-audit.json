@@ -54,6 +54,26 @@
       "Effect": "Allow",
       "Action": "s3:PutObject",
       "Resource": "arn:aws:s3:::*/*"
+    },
+    {
+      "Sid": "ReadOnlyAcrossEverythingThisToolAudits",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucket*",
+        "s3:GetEncryptionConfiguration",
+        "s3:ListBucket*",
+        "s3:ListAllMyBuckets",
+        "ec2:Describe*",
+        "ssm:GetParameter",
+        "sts:GetCallerIdentity",
+        "cloudwatch:DescribeAlarms",
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:ListMetrics",
+        "cloudwatch:ListTagsForResource",
+        "sns:ListSubscriptionsByTopic",
+        "sns:GetTopicAttributes"
+      ],
+      "Resource": "*"
     }
   ]
 }
