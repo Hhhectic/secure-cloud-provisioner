@@ -189,9 +189,11 @@ to 1005 from `backend/`, 0 skipped — and 1005 from the repository root too,
 now that retiring the root application took its six tests with it,
 plus **244 checks** across the two Node suites in `frontend/`. Then the monitor
 import defect and the guard that had to be written rather than widened to catch
-it — see *The two are not interchangeable* — take it to **1011 from either
-directory**, 0 skipped. Every figure here is re-run rather than carried
-forward, which is how two of them were once
+it — see *The two are not interchangeable* — take it to 1011 from either
+directory. Then the bucket read that answered 500 and the inline policy that
+had stopped fitting — four tests for the first, three for the second — take it
+to **1018 from either directory**, 0 skipped. Every figure here is re-run
+rather than carried forward, which is how two of them were once
 found to be one low — and re-running is also how the 977 that sat here was
 found to be two short of what the suite actually reports.
 
@@ -328,7 +330,7 @@ machines. What that found is the section below, and it is the reason the
 Node suites are not the whole story: `app.test.mjs` answers a stub, and a stub
 written to match the code cannot disagree with it.
 
-**There is one suite now: `pytest` answers 1011 from the root and 1011 from
+**There is one suite now: `pytest` answers 1018 from the root and 1018 from
 `backend/`, because they are the same tests.** The six that used to make the
 root figure larger were `test_azure_scanner.py`, which went with the
 application it covered.
@@ -398,7 +400,7 @@ cd backend
 source /home/huori/scp-venv/bin/activate     # ../.venv too, minus one: see below
 
 pytest -v                                   # offline, moto, no credentials
-                                            # 1011, and the same 1011 from the
+                                            # 1018, and the same 1018 from the
                                             # repository root: one suite now
 python main.py                              # the CLI, both clouds, 14 options
 uvicorn api.app:app --reload --host 127.0.0.1   # API, /docs and the page at /ui
@@ -496,9 +498,9 @@ were `../.venv` and `/home/user/scp-venv`. The entry correcting them overshot:
 it said there is "no `.venv` in the repository and there does not appear ever
 to have been one on this machine". There is one. `/home/huori/code/.venv` was
 built on 9 August by `/usr/bin/python3 -m venv`, six days before `scp-venv`,
-holds 443 MB, and **runs the whole offline suite — 1011 passed in 4m20s**,
-measured rather than reasoned about, and re-measured after the six checks
-below were added. An absence inferred from one shell not
+holds 443 MB, and **runs the whole offline suite — 1018 passed in 3m48s**,
+measured rather than reasoned about, and re-measured every time the count
+moved rather than adjusted by the number of tests added. An absence inferred from one shell not
 finding something, and then written down as a property of the machine, is the
 `resource_skus` mistake pointed the other way: that one recorded a number
 taken under load as the call's cost, this one recorded a failed lookup as the
@@ -519,7 +521,7 @@ python3 -m venv /home/huori/scp-venv
 **The two are not interchangeable, and no test can tell them apart.**
 `scp-venv` holds `azure-mgmt-monitor` 7.0.0 and `.venv` does not; `.venv`
 holds `azure-mgmt-authorization`, `azure-mgmt-security`, `azure-mgmt-sql` and
-`azure-mgmt-subscription`, and `scp-venv` does not. The suite answers 1011
+`azure-mgmt-subscription`, and `scp-venv` does not. The suite answers 1018
 under either, `az/monitor.py`'s fifteen included, because those run against a
 stub and every SDK import here is lazy. The difference was visible only live,
 and there it was a defect rather than a missing package: under `.venv`,
@@ -2598,7 +2600,7 @@ deliberately; monitor now does
 **One small thing first, and it is known and one-line.**
 
 0. **Root collection is no longer a question — there is one suite, and
-   `pytest` answers 1011 from either directory.** It was fixed first and then
+   `pytest` answers 1018 from either directory.** It was fixed first and then
    made moot: the six tests that only the root run collected belonged to the
    application that has since been deleted. Worth keeping only for the
    diagnosis, which this file twice recorded wrongly before getting it right.
