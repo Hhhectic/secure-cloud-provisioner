@@ -29,8 +29,8 @@ paid Microsoft products are licensed, and "you have not bought Defender" is a
 purchasing decision, not a configuration mistake.
 """
 
-from az.common import (AzureRefused, denied, not_allowed_to_look, plain,
-                       credential, subscription_id, why_azure_refused)
+from az.common import (AzureRefused, _import, denied, not_allowed_to_look,
+                       plain, credential, subscription_id, why_azure_refused)
 
 
 def get_client(region=None):
@@ -42,9 +42,18 @@ def get_client(region=None):
     accepted and ignored: activity log alerts are a subscription-wide
     resource with a global scope, and the signature has to match every other
     get_client in the registry.
-    """
-    from azure.mgmt.monitor import MonitorManagementClient
 
+    Through _import rather than a bare import statement, and that is the whole
+    difference between a tab that explains itself and one that does not. This
+    was the only bare SDK import in the package for as long as azure-monitor
+    existed: with azure-mgmt-monitor absent the page started perfectly - the
+    lazy import did its job - and then this route answered ModuleNotFoundError
+    where every other type answers 503 naming what to install. Neither guard on
+    that property saw it, because both ask about module scope and this sat
+    inside a function. See test_every_azure_sdk_import_goes_through_the_one_helper.
+    """
+    MonitorManagementClient = _import("azure.mgmt.monitor",
+                                      "MonitorManagementClient")
     return MonitorManagementClient(credential(), subscription_id())
 
 

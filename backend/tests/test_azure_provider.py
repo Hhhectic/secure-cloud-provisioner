@@ -162,8 +162,18 @@ def test_every_resource_type_is_still_registered_without(blocked):
     assert int(done.stdout.strip()) == len(registry.REGISTRY)
 
 
+# Every Azure type rather than a representative one. This test named az.nsg
+# and stopped, and az/monitor.py is what that cost: five of the six get_clients
+# reach the SDK through az/common and the sixth imported it directly, so the
+# case chosen to stand for the others was one of the five that did not need it.
+# A representative case represents until somebody adds the one that differs.
 @pytest.mark.parametrize("blocked,module,error,call", [
     (AZURE_SDK, "az.nsg", "az.common.AzureNotConfigured", "get_client('eastus')"),
+    (AZURE_SDK, "az.storage", "az.common.AzureNotConfigured", "get_client('eastus')"),
+    (AZURE_SDK, "az.keyvault", "az.common.AzureNotConfigured", "get_client('eastus')"),
+    (AZURE_SDK, "az.vnet", "az.common.AzureNotConfigured", "get_client('eastus')"),
+    (AZURE_SDK, "az.vm", "az.common.AzureNotConfigured", "get_client('eastus')"),
+    (AZURE_SDK, "az.monitor", "az.common.AzureNotConfigured", "get_client('eastus')"),
     (AWS_SDK, "aws.security_groups", "aws.common.AwsNotConfigured", "get_client('us-east-1')"),
 ])
 def test_asking_for_an_absent_client_explains_itself(blocked, module, error, call):
@@ -187,15 +197,59 @@ except Expected as e:
 def test_the_azure_modules_import_no_sdk_at_module_scope():
     """The property, asserted directly rather than inferred from the tests
     happening to pass. A module-level import here would stop api/registry.py
-    importing, and the AWS half with it."""
-    from pathlib import Path
+    importing, and the AWS half with it.
 
-    for name in ("common.py", "nsg.py", "storage.py"):
-        source = Path(__file__).parent.parent / "az" / name
+    Every file in az/ rather than three named ones. The list was common.py,
+    nsg.py and storage.py, written when those were most of the package, and a
+    hardcoded list of what to check goes stale in exactly one direction: it
+    silently stops covering whatever is added next.
+    """
+    for source in sorted((BACKEND / "az").glob("*.py")):
         for number, line in enumerate(source.read_text().splitlines(), 1):
             if line.startswith(("import azure", "from azure")):
                 raise AssertionError(
-                    f"az/{name}:{number} imports the SDK at module scope: {line}")
+                    f"az/{source.name}:{number} imports the SDK at module "
+                    f"scope: {line}")
+
+
+def test_every_azure_sdk_import_goes_through_the_one_helper():
+    """No module in az/ may reach the SDK directly, at any indentation.
+
+    The test above is about the page starting. This one is about what a tab
+    says when it cannot start, which is a different property and was the one
+    going unguarded. az/common._import is the single place an absent package
+    becomes AzureNotConfigured and a sentence naming what to install, and a
+    bare import inside a function skips it: the page still starts, so nothing
+    above notices, and the route answers a traceback instead.
+
+    That is not hypothetical. az/monitor.get_client did exactly this, and the
+    checkout it broke was the likelier of the two on this machine - the one
+    without azure-mgmt-monitor installed. Both virtualenvs pass the whole
+    suite, so no test could tell them apart; it took running one route under
+    each.
+
+    az/common.py reaches the SDK through __import__, which is not an import
+    statement and is the helper being asserted about here.
+    """
+    import ast
+
+    for source in sorted((BACKEND / "az").glob("*.py")):
+        for node in ast.walk(ast.parse(source.read_text())):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+
+            for name in names:
+                if name == "azure" or name.startswith("azure."):
+                    raise AssertionError(
+                        f"az/{source.name}:{node.lineno} imports {name} "
+                        "directly. Use az.common._import, so an absent package "
+                        "reaches the caller as AzureNotConfigured and a 503 "
+                        "naming what to install, rather than as a "
+                        "ModuleNotFoundError out of the route.")
 
 
 def test_missing_credentials_are_reported_separately_from_a_missing_sdk(

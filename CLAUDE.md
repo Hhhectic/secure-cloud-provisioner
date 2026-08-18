@@ -185,10 +185,13 @@ the four surfaces nobody had audited — see *What comparing the two surfaces
 found* — and the instance-size gap a second look at the CLI turned up, take it
 to 979 from `backend/`. Then the two account-wide checks and the
 `azure-monitor` type — see *An account-wide type, and what it cost* — take it
-to **1005 from `backend/`**, 0 skipped — and 1005 from the repository root too,
+to 1005 from `backend/`, 0 skipped — and 1005 from the repository root too,
 now that retiring the root application took its six tests with it,
-plus **244 checks** across the two Node suites in `frontend/`. Every figure
-here is re-run rather than carried forward, which is how two of them were once
+plus **244 checks** across the two Node suites in `frontend/`. Then the monitor
+import defect and the guard that had to be written rather than widened to catch
+it — see *The two are not interchangeable* — take it to **1011 from either
+directory**, 0 skipped. Every figure here is re-run rather than carried
+forward, which is how two of them were once
 found to be one low — and re-running is also how the 977 that sat here was
 found to be two short of what the suite actually reports.
 
@@ -325,7 +328,7 @@ machines. What that found is the section below, and it is the reason the
 Node suites are not the whole story: `app.test.mjs` answers a stub, and a stub
 written to match the code cannot disagree with it.
 
-**There is one suite now: `pytest` answers 1005 from the root and 1005 from
+**There is one suite now: `pytest` answers 1011 from the root and 1011 from
 `backend/`, because they are the same tests.** The six that used to make the
 root figure larger were `test_azure_scanner.py`, which went with the
 application it covered.
@@ -395,7 +398,7 @@ cd backend
 source /home/huori/scp-venv/bin/activate     # ../.venv too, minus one: see below
 
 pytest -v                                   # offline, moto, no credentials
-                                            # 1005, and the same 1005 from the
+                                            # 1011, and the same 1011 from the
                                             # repository root: one suite now
 python main.py                              # the CLI, both clouds, 14 options
 uvicorn api.app:app --reload --host 127.0.0.1   # API, /docs and the page at /ui
@@ -493,8 +496,9 @@ were `../.venv` and `/home/user/scp-venv`. The entry correcting them overshot:
 it said there is "no `.venv` in the repository and there does not appear ever
 to have been one on this machine". There is one. `/home/huori/code/.venv` was
 built on 9 August by `/usr/bin/python3 -m venv`, six days before `scp-venv`,
-holds 443 MB, and **runs the whole offline suite — 1005 passed in 4m58s**,
-measured rather than reasoned about. An absence inferred from one shell not
+holds 443 MB, and **runs the whole offline suite — 1011 passed in 4m20s**,
+measured rather than reasoned about, and re-measured after the six checks
+below were added. An absence inferred from one shell not
 finding something, and then written down as a property of the machine, is the
 `resource_skus` mistake pointed the other way: that one recorded a number
 taken under load as the call's cost, this one recorded a failed lookup as the
@@ -515,23 +519,37 @@ python3 -m venv /home/huori/scp-venv
 **The two are not interchangeable, and no test can tell them apart.**
 `scp-venv` holds `azure-mgmt-monitor` 7.0.0 and `.venv` does not; `.venv`
 holds `azure-mgmt-authorization`, `azure-mgmt-security`, `azure-mgmt-sql` and
-`azure-mgmt-subscription`, and `scp-venv` does not. The suite answers 1005
+`azure-mgmt-subscription`, and `scp-venv` does not. The suite answers 1011
 under either, `az/monitor.py`'s fifteen included, because those run against a
-stub and every SDK import here is lazy. The difference is visible only live,
-and there it is a defect rather than a missing package: under `.venv`,
-`GET /resources/azure-monitor` fails with `ModuleNotFoundError` where every
+stub and every SDK import here is lazy. The difference was visible only live,
+and there it was a defect rather than a missing package: under `.venv`,
+`GET /resources/azure-monitor` failed with `ModuleNotFoundError` where every
 other Azure type answers **503 naming what to install**.
 
-`az/monitor.get_client` does a bare `from azure.mgmt.monitor import
+`az/monitor.get_client` did a bare `from azure.mgmt.monitor import
 MonitorManagementClient`. Every other client in `az/` goes through
 `az/common._import`, which is the one place an absent SDK becomes
-`AzureNotConfigured` and a sentence somebody can act on, and it is the only
-bare SDK import in the package. So the newest Azure type is the one place the
-lazy-import design half holds — the page still starts, which was the point,
-but that tab answers a traceback instead of an explanation, on exactly the
+`AzureNotConfigured` and a sentence somebody can act on, and it was the only
+bare SDK import in the package. So the newest Azure type was the one place the
+lazy-import design half held — the page still started, which was the point,
+but that tab answered a traceback instead of an explanation, on exactly the
 checkout most likely to be missing the package. Found by driving one route
 under two virtualenvs, which is an instrument this file did not have: both are
-green, both start, and only one of them can answer.
+green, both start, and only one of them could answer.
+
+**It goes through `_import` now, and the interesting part is why neither
+existing guard caught it.** `test_asking_for_an_absent_client_explains_itself`
+named `az.nsg` and stopped, so the case chosen to stand for the others was one
+of the five that reach the SDK through `az/common` — it is parametrized over
+all six types now. `test_the_azure_modules_import_no_sdk_at_module_scope` read
+three files by name, which is a list that stops covering whatever is added
+next; it reads every file in `az/` now. **Neither would have caught this even
+after widening**, because both ask about *module scope* and this import sat
+inside a function, which is where every SDK import in this package is supposed
+to sit. So the guard that pins it is a new one:
+`test_every_azure_sdk_import_goes_through_the_one_helper` parses each module in
+`az/` and refuses an `azure.*` import at any indentation. The first two are
+about the page starting; the third is about what a tab says when it cannot.
 
 A checkout is also missing `.env`, which is gitignored and therefore absent
 from any fresh clone and from every git worktree — `backend/environment.py`
@@ -2076,14 +2094,26 @@ call. Same treatment as the three Azure vault constraints: named, not guessed
 at. Defender is a separate and deliberate no — its checks ask whether paid
 Microsoft products are licensed, which is a purchasing decision.
 
-**It has not run against the subscription.** Everything above is offline, on a
-stub that models two things a naive fake would not: the SDK enums that render
-through `str()` as `'ClassName.MEMBER'`, and `enabled` being *absent* rather
-than false on an alert that is on. Both are traps this file has already paid
-for once. But `az/monitor.py` is at exactly the stage `az/` as a whole was at
-before the first live run found four bugs in code the offline suite covered,
-and three of those four were the same mistake: **a stub written to match the
-code cannot disagree with it.** Assume the same is true here.
+**It has now run against the subscription, once.** This entry said it had
+not, and that `az/monitor.py` sat exactly where `az/` as a whole sat before its
+first live run found four bugs in code the offline suite covered.
+`GET /resources/azure-monitor` answers **200** against
+`74baf379-b419-4e16-a50b-98bc450901c9`: the subscription listed as its own
+single resource, scanned, **one warning and no criticals**. So the type is
+wired to the registry, the credentials reach the monitor API, and the id
+round-trips through a route — none of which had been shown.
+
+Everything else here is still offline, on a stub that models two things a naive
+fake would not: the SDK enums that render through `str()` as
+`'ClassName.MEMBER'`, and `enabled` being *absent* rather than false on an
+alert that is on. Both are traps this file has already paid for once. **One
+read is not a campaign, and the warning that entry carried has only been half
+discharged:** nothing has yet created an activity log alert, switched one off,
+or stripped its action group and watched the finding change, which is what
+would exercise the three rules against Azure rather than against a fake of
+Azure. **A stub written to match the code cannot disagree with it**, and that
+still stands for every rule in `scanner/azure_monitor_rules.py`. Read the live
+result as evidence the plumbing is real, not as evidence the judgements are.
 
 ## Style
 
@@ -2508,7 +2538,7 @@ deliberately; monitor now does
 **One small thing first, and it is known and one-line.**
 
 0. **Root collection is no longer a question — there is one suite, and
-   `pytest` answers 1005 from either directory.** It was fixed first and then
+   `pytest` answers 1011 from either directory.** It was fixed first and then
    made moot: the six tests that only the root run collected belonged to the
    application that has since been deleted. Worth keeping only for the
    diagnosis, which this file twice recorded wrongly before getting it right.
