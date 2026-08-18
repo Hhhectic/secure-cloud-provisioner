@@ -445,7 +445,20 @@ def list_objects(s3, bucket_name):
     "put a file in it" in one interface is the one thing scripts/make_vulnerable
     is careful never to do.
     """
-    found = s3.list_objects_v2(Bucket=bucket_name, MaxKeys=OBJECT_SAMPLE)
+    # Through _denied like every other reader here, and this was the one
+    # that was not. A bucket whose name exists but belongs to another account
+    # passes bucket_exists - a 403 counts as existing, deliberately, and that
+    # is documented there - and then answers AccessDenied to each read. The
+    # other eight raise PermissionDenied, which read_bucket_for_scanning
+    # catches per setting and files under `unreadable`. This one let botocore's
+    # ClientError out, past that `except PermissionDenied`, out of the route,
+    # and into the browser as a 500. scanner/s3_rules already had the branch
+    # for `unreadable["objects"]` and it could never be reached.
+    try:
+        found = s3.list_objects_v2(Bucket=bucket_name, MaxKeys=OBJECT_SAMPLE)
+    except ClientError as e:
+        _denied(e, "s3:ListBucket")
+
     contents = found.get("Contents", [])
 
     return {

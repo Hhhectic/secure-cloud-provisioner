@@ -46,6 +46,39 @@ def test_hardened_bucket_is_clean():
     assert check_bucket_settings(_settings()) == []
 
 
+def test_every_bucket_setting_has_wording_for_when_it_cannot_be_read():
+    """The label table is derived from the readers, not kept beside them.
+
+    SETTING_LABELS.get(name, name) falls back to the raw key, so a missing
+    entry is not an error - it is a sentence with an identifier in it, shown
+    to somebody who does not know what other_accounts means. Two settings were
+    in exactly that state, and one of them could not be reached at all until
+    list_objects stopped raising, so nothing had ever printed it.
+    """
+    from scanner.s3_rules import SETTING_LABELS
+
+    missing = set(s3_buckets._READERS) - set(SETTING_LABELS)
+    assert not missing, f"no wording for {sorted(missing)}"
+
+
+def test_contents_that_could_not_be_read_are_not_reported_as_an_empty_bucket():
+    """A missing clause must not be read as "nothing in it".
+
+    The scanner has always had this branch and nothing could reach it: the
+    reader raised instead of recording, so `unreadable["objects"]` was never
+    set by anything but a hand-written dict like this one.
+    """
+    warnings = check_bucket_settings(_settings(
+        public_access_block=None,
+        policy_is_public=True,
+        objects=None,
+        unreadable={"objects": "s3:ListBucket"},
+    ))
+    said = " ".join(w["message"] for w in warnings)
+    assert "nothing in it" not in said
+    assert "objects in it" not in said
+
+
 def test_fresh_bucket_flags_all_three_defaults():
     """A bucket created with no settings at all: the demo starting state."""
     warnings = check_bucket_settings(_settings(
@@ -241,6 +274,61 @@ def test_messages_avoid_jargon():
 def s3():
     with mock_aws():
         yield boto3.client("s3", region_name=REGION)
+
+
+class _ListingDenied:
+    """A client that refuses ListBucket the way AWS refuses it.
+
+    Everything else is the real moto client. Only list_objects_v2 is replaced,
+    because the case being modelled is one permission missing rather than a
+    broken account - which is also the shape of the real failure: a bucket
+    owned by somebody else answers every read this way.
+    """
+
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def list_objects_v2(self, **kwargs):
+        raise ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}},
+            "ListObjectsV2")
+
+
+def test_a_refused_object_listing_is_recorded_rather_than_raised(s3):
+    """The defect this test was written for answered 500 to a browser.
+
+    read_bucket_for_scanning catches PermissionDenied per setting and files it
+    under `unreadable`. list_objects raised botocore's ClientError instead,
+    which that handler does not catch, so GET /resources/bucket/{name} on a
+    bucket owned by another account crashed rather than reporting a gap in the
+    audit. Found by driving the routes against a real account.
+    """
+    s3.create_bucket(Bucket=BUCKET)
+
+    settings = s3_buckets.read_bucket_for_scanning(_ListingDenied(s3), BUCKET)
+
+    assert settings is not None, "a readable bucket read as absent"
+    assert settings["unreadable"].get("objects") == "s3:ListBucket"
+    assert settings["objects"] is None
+
+    # And the rest of the audit still happened. A refused listing must cost
+    # the contents clause and nothing else.
+    assert settings["encryption"] is not None
+    assert settings["versioning"] is not None
+
+
+def test_a_refused_listing_still_produces_a_scan(s3):
+    """The whole point of `unreadable`: a partial audit beats no audit."""
+    s3.create_bucket(Bucket=BUCKET)
+    settings = s3_buckets.read_bucket_for_scanning(_ListingDenied(s3), BUCKET)
+
+    warnings = check_bucket_settings(settings)
+
+    said = " ".join(w["message"] for w in warnings)
+    assert "nothing in it" not in said
 
 
 def test_secure_by_default_bucket_scans_clean(s3):

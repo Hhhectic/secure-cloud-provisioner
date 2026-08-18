@@ -747,6 +747,40 @@ finding gains a clause: "and there are 12 objects in it". Silent when the
 contents could not be read, because a missing clause must not be read as
 "nothing in it"; `unreadable` carries that as it does for every other setting.
 
+**That last sentence was false for as long as it had been written, and the way
+it failed was a 500.** `scanner/s3_rules` did have the branch — it checks
+`unreadable["objects"]` and returns no clause — and nothing could ever reach
+it, because `list_objects` never put anything there. Every other reader in
+`_READERS` ends in `_denied(e, ...)`, which turns AccessDenied into
+`PermissionDenied` so `read_bucket_for_scanning` can record it per setting.
+This one called `list_objects_v2` bare, so botocore's own error walked past
+that `except PermissionDenied`, out of the route, and into the browser.
+
+What made it reachable is a bucket that **exists and belongs to somebody
+else**. `bucket_exists` treats a 403 as existing — deliberately, and
+documented there — so the read proceeds and every setting answers AccessDenied.
+`GET /resources/bucket/{name}` answered **500** for any such name while the
+same name, absent, answered a clean 404: the "not there" path was right and the
+"not allowed" path crashed. It is the seventh instance of that family in this
+file and the first on the AWS side, where the lesson was already written down
+about Azure — *a read that only handles 404 is a read that turns a missing role
+into a crash.*
+
+It now answers 200 with all nine settings null, nine `unreadable` entries and
+nine "could not check" warnings, no criticals and nothing claimed clean. Found
+by driving the routes against a real account, not by the suite: moto grants
+everything, so the fake cannot produce the denial. `POST /acknowledgements`
+was hit by the same bug, because it re-scans the resource before accepting
+anything, and it answers 400 to an invented rule id now rather than 500.
+
+Fixing it exposed a smaller one. `SETTING_LABELS` in `scanner/s3_rules.py` had
+seven entries against `_READERS`' nine, and the lookup falls back to the key —
+so the newly reachable message read "Could not check **other_accounts** on this
+bucket", an identifier in front of somebody, which *Style* says a warning
+message is never for. Both have wording now, and the guard is derived from
+`_READERS` rather than kept beside it, so the next reader cannot be added
+without it.
+
 `s3:PutObject` is in `docs/iam-policy-account-audit.json` rather than the
 inline policy, and measuring said why: **`docs/iam-policy.json` is 2,379
 non-whitespace characters against the 2,048 inline limit, and was already 331

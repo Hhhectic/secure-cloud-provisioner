@@ -43,6 +43,14 @@ SETTING_LABELS = {
     "policy_is_public": "whether the permissions policy is public",
     "policy_denies_http": "whether unencrypted connections are refused",
     "logging_enabled": "whether access logging is on",
+    # These two arrived after the table and were not added to it, so a refused
+    # read of either fell back to the key and said "Could not check objects" or
+    # "Could not check other_accounts" - the second being an identifier rather
+    # than a sentence. Every key in aws/s3_buckets._READERS needs an entry
+    # here; test_every_bucket_setting_has_wording asserts it rather than
+    # trusting the next person to remember.
+    "objects": "how many files there are",
+    "other_accounts": "whether other accounts have been granted access",
 }
 
 
