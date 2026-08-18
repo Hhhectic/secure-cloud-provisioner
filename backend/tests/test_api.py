@@ -74,7 +74,7 @@ def test_resource_types_are_advertised(client):
     assert keys == {"security-group", "bucket", "key-pair", "instance",
                     "network", "iam", "snapshot", "alarm", "role",
                     "azure-nsg", "azure-storage", "azure-keyvault",
-                    "azure-vnet", "azure-vm"}
+                    "azure-vnet", "azure-vm", "azure-monitor"}
 
 
 def test_every_resource_says_whether_it_can_be_changed(client):
@@ -103,7 +103,7 @@ def test_the_azure_types_are_the_ones_in_the_azure_provider(client):
     entries = client.get("/resources").json()["resources"]
     azure = {r["key"] for r in entries if r["provider"] == "azure"}
     assert azure == {"azure-nsg", "azure-storage", "azure-keyvault",
-                     "azure-vnet", "azure-vm"}
+                     "azure-vnet", "azure-vm", "azure-monitor"}
 
 
 def test_the_provisioned_types_are_all_writable(client):
@@ -1475,7 +1475,7 @@ def test_every_type_declares_which_cloud_it_belongs_to(client):
     entries = {r["key"]: r for r in client.get("/resources").json()["resources"]}
 
     azure = {"azure-nsg", "azure-storage", "azure-keyvault", "azure-vnet",
-             "azure-vm"}
+             "azure-vm", "azure-monitor"}
     for key, entry in entries.items():
         assert entry["provider"] in {"aws", "azure"}, key
         assert entry["provider"] == ("azure" if key in azure else "aws"), key

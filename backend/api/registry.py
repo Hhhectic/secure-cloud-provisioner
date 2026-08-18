@@ -38,6 +38,7 @@ from az import storage as az_storage
 from az import keyvault as az_keyvault
 from az import vnet as az_vnet
 from az import vm as az_vm
+from az import monitor as az_monitor
 from scanner.rules import (
     check_firewall_rules,
     check_group_usage,
@@ -59,6 +60,8 @@ from scanner.azure_storage_rules import (check_storage_account,
                                          check_storage_spec)
 from scanner.azure_keyvault_rules import check_key_vault, check_key_vault_spec
 from scanner.azure_vnet_rules import check_vnet, check_vnet_spec
+from scanner.azure_monitor_rules import (check_monitoring,
+                                         check_monitoring_spec)
 from scanner.azure_vm_rules import check_vm, check_vm_spec
 
 DEFAULT_REGION = "us-east-1"
@@ -1707,9 +1710,44 @@ AZURE_VM = ResourceType(
 )
 
 
+# ------------------------------------------------------------- Azure monitoring
+
+
+AZURE_MONITOR = ResourceType(
+    key="azure-monitor",
+    provider="azure",
+    short_label="Monitoring",
+    label="Azure monitoring",
+    id_label="Subscription ID",
+    get_client=az_monitor.get_client,
+    list_all=az_monitor.list_subscriptions,
+    read=az_monitor.read_subscription_for_scanning,
+    check=check_monitoring,
+    describe=az_monitor.describe_subscription,
+    check_spec=check_monitoring_spec,
+    fix=_cannot_create,
+    # One subscription, and it is whichever one the credentials reach. There is
+    # nothing to narrow it to, exactly as for the IAM type.
+    only_ours_label=None,
+    # The first type here whose "resource" is the account rather than a thing
+    # inside it. It needed no new shape: ResourceType already has one, the
+    # routes take an id as one path segment, and a subscription id is one. The
+    # alternative was a `scope` field taught to every route and to the page, to
+    # serve a single type.
+    #
+    # Audited, never provisioned. Creating monitoring means deciding what an
+    # organisation wants to be told about, which is not a form this tool can
+    # honestly offer - and a fix would be this tool writing somebody's alerting
+    # policy, the same refusal az/vnet.py makes about attaching a security
+    # group it did not choose.
+    read_only=True,
+)
+
+
 REGISTRY = {r.key: r for r in (SECURITY_GROUP, BUCKET, KEY_PAIR, INSTANCE, IAM,
                                ROLE, AZURE_NSG, AZURE_STORAGE, AZURE_KEYVAULT,
-                               AZURE_VNET, AZURE_VM, SNAPSHOT, ALARM, VPC)}
+                               AZURE_VNET, AZURE_VM, AZURE_MONITOR, SNAPSHOT,
+                               ALARM, VPC)}
 
 
 def get(resource_type):

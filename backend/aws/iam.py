@@ -31,7 +31,8 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import unquote
 
-from aws.common import client as _client, BotoCoreError, ClientError
+from aws.common import (client as _client, enabled_regions, AwsNotConfigured,
+                        BotoCoreError, ClientError)
 
 # Raised by this module too, so one HTTP handler turns a missing permission into
 # a 403 for every resource type. The name says bucket only because that is
@@ -416,18 +417,90 @@ def users_with_virtual_mfa(iam):
 
 
 def read_analyzers(iam_region):
-    """How many Access Analyzer analyzers exist in one region.
-
-    CIS 1.19 asks for one in every region. This checks the region the tool is
-    pointed at, and the finding says so rather than implying it swept all of
-    them: an account-wide claim from a one-region read would be a stronger
-    statement than the evidence supports.
-    """
+    """How many Access Analyzer analyzers exist in one region."""
     client = _client("accessanalyzer", iam_region)
     try:
         return len(client.list_analyzers(type="ACCOUNT")["analyzers"])
     except ClientError as e:
         _denied(e, "access-analyzer:ListAnalyzers")
+
+
+def read_analyzer_coverage(home_region):
+    """Which regions have an Access Analyzer and which do not. CIS 1.19.
+
+    The control asks for one in *every* region, and this used to check the one
+    region the tool happened to be pointed at while the finding admitted as
+    much. That admission was honest and the check was still nearly worthless:
+    the whole value of Access Analyzer is catching a resource shared out of a
+    region nobody is looking at, so the one region somebody is actively working
+    in is the least informative place to ask about.
+
+    Returns what was actually established rather than a verdict:
+
+        home    the region the rest of the audit was run against
+        checked regions that answered
+        without those of them holding no analyzer
+        swept   whether the region list itself could be read
+
+    `swept` is the honest half. When `describe_regions` is refused this falls
+    back to the home region alone and says so, so the finding can distinguish
+    "no analyzer anywhere in your fourteen regions" from "no analyzer in the
+    one region I was able to look at". Reporting the second as the first would
+    be the sweep claiming coverage it never had.
+
+    Raises PermissionDenied only when nothing at all answered, which keeps the
+    behaviour the account reader already expects: a check that could not run
+    lands in `unreadable` rather than scoring as a pass.
+    """
+    try:
+        regions = enabled_regions(home_region)
+        swept = True
+    except (ClientError, BotoCoreError, AwsNotConfigured):
+        # Enumerating regions needs ec2:DescribeRegions, which a login scoped
+        # to Access Analyzer alone will not have. That is a smaller failure
+        # than not reading analyzers at all, so it narrows the sweep instead
+        # of ending it.
+        regions = [home_region]
+        swept = False
+
+    checked, without = [], []
+    refusal = None
+
+    for region in regions:
+        try:
+            found = len(
+                _client("accessanalyzer", region)
+                .list_analyzers(type="ACCOUNT")["analyzers"]
+            )
+        except (ClientError, BotoCoreError) as e:
+            # One region refusing does not abandon the rest - the same rule
+            # the per-setting reads in this module already follow. A region
+            # that did not answer is simply not in `checked`, so nothing
+            # counts it as clean.
+            refusal = e
+            continue
+        checked.append(region)
+        if found == 0:
+            without.append(region)
+
+    if not checked:
+        # Nothing answered anywhere, so the question went unanswered and must
+        # not resolve to "no analyzers". Re-raise what actually happened rather
+        # than classifying it here: read_account_for_scanning already sorts a
+        # refusal from a service that will not answer, and both land in
+        # `unreadable`.
+        #
+        # Not _denied() - that ends in a bare `raise`, which needs an active
+        # exception and there is none this far outside the except block. It
+        # failed as `RuntimeError: No active exception to reraise`, turning a
+        # recorded gap into a crash.
+        if refusal is not None:
+            raise refusal
+        raise PermissionDenied("access-analyzer:ListAnalyzers",
+                               "no region answered")
+
+    return {"home": home_region, "checked": checked,
+            "without": without, "swept": swept}
 
 
 def read_expired_certificates(iam, now=None):
@@ -750,8 +823,8 @@ def read_account_for_scanning(iam, resource_id=None, now=None,
             lambda: read_enumeration_policies(iam))
     attempt("expired_certificates", "iam:ListServerCertificates",
             lambda: read_expired_certificates(iam, now=now))
-    attempt("analyzer_count", "access-analyzer:ListAnalyzers",
-            lambda: read_analyzers(client_region(iam)))
+    attempt("analyzer_coverage", "access-analyzer:ListAnalyzers",
+            lambda: read_analyzer_coverage(client_region(iam)))
     attempt("support_role_exists", "iam:ListEntitiesForPolicy",
             lambda: policy_is_attached_to_anyone(iam, SUPPORT_POLICY_ARN))
     attempt("cloudshell_full_access", "iam:ListEntitiesForPolicy",

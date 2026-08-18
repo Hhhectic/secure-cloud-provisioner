@@ -75,7 +75,8 @@ def _settings(**overrides):
         "credentials": {},
         "admin_policies": [],
         "expired_certificates": [],
-        "analyzer_count": 1,
+        "analyzer_coverage": {"home": REGION, "checked": [REGION],
+                              "without": [], "swept": True},
         "support_role_exists": True,
         "cloudshell_full_access": False,
         "unreadable": {},
@@ -155,15 +156,15 @@ def test_a_check_that_could_not_run_is_recorded_not_skipped_silently(iam_client)
     """moto has no Access Analyzer, which makes it a working example of the
     case this has to handle: the question went unanswered."""
     settings = iam.read_account_for_scanning(iam_client)
-    assert settings["unreadable"]["analyzer_count"] == "access-analyzer:ListAnalyzers"
-    assert settings["analyzer_count"] is None
+    assert settings["unreadable"]["analyzer_coverage"] == "access-analyzer:ListAnalyzers"
+    assert settings["analyzer_coverage"] is None
 
 
 def test_one_unreadable_check_does_not_abandon_the_others(iam_client):
     iam_client.create_user(UserName="alice")
     settings = iam.read_account_for_scanning(iam_client)
 
-    assert "analyzer_count" in settings["unreadable"]
+    assert "analyzer_coverage" in settings["unreadable"]
     assert [u["user_name"] for u in settings["users"]] == ["alice"]
     assert settings["summary"]["root_mfa_enabled"] is False
 
@@ -582,7 +583,8 @@ def test_nothing_in_this_section_is_offered_as_an_automatic_fix():
         users=[_user(password_enabled=True, mfa_enabled=False,
                      access_keys=[_key(age_days=400)])],
         admin_policies=[{"name": "godmode", "attached_count": 3}],
-        analyzer_count=0,
+        analyzer_coverage={"home": REGION, "checked": [REGION],
+                           "without": [REGION], "swept": False},
     ))
     assert warnings
     assert fixable(warnings) == []
@@ -847,19 +849,56 @@ def test_an_expired_certificate_cites_1_18():
     assert found["control"]["id"] == "1.18"
 
 
-def test_no_access_analyzer_cites_1_19_and_admits_it_checked_one_region():
-    """CIS asks for one in every region. A one-region read cannot support an
-    account-wide claim, so the finding says which region it looked at."""
-    found = _find(check_account(_settings(analyzer_count=0)), "access_analyzer")
+def test_no_access_analyzer_anywhere_cites_1_19_and_counts_the_regions():
+    """CIS asks for one in every region, and now every region is asked."""
+    found = _find(check_account(_settings(analyzer_coverage={
+        "home": REGION, "checked": ["us-east-1", "eu-west-1", "ap-south-1"],
+        "without": ["us-east-1", "eu-west-1", "ap-south-1"], "swept": True,
+    })), "access_analyzer")
+
     assert found["control"]["id"] == "1.19"
+    assert "None of this account's 3 regions" in found["message"]
+
+
+def test_a_partial_gap_names_the_regions_rather_than_the_count_alone():
+    """Some covered and some not is a different sentence from none covered:
+    the first is a gap somebody closes, the second is a feature nobody turned
+    on. Naming them is what makes the first actionable."""
+    found = _find(check_account(_settings(analyzer_coverage={
+        "home": "us-east-1", "checked": ["us-east-1", "eu-west-1"],
+        "without": ["eu-west-1"], "swept": True,
+    })), "access_analyzer")
+
+    assert "1 of this account's 2 regions" in found["message"]
+    assert "eu-west-1" in found["message"]
+
+
+def test_every_region_covered_says_nothing_at_all():
+    warnings = check_account(_settings(analyzer_coverage={
+        "home": REGION, "checked": ["us-east-1", "eu-west-1"],
+        "without": [], "swept": True,
+    }))
+    assert "access_analyzer" not in _settings_of(warnings)
+
+
+def test_a_sweep_that_could_not_sweep_does_not_claim_it_did():
+    """The honest half. When the region list cannot be read this falls back to
+    one region, and the finding has to say so - otherwise "no analyzer in the
+    one region I could see" is reported as "no analyzer in your account"."""
+    found = _find(check_account(_settings(analyzer_coverage={
+        "home": REGION, "checked": [REGION], "without": [REGION],
+        "swept": False,
+    })), "access_analyzer")
+
     assert REGION in found["message"]
-    assert "one region" in found["message"]
+    assert "one region rather than a sweep" in found["message"]
+    assert "regions are not watching" not in found["message"]
 
 
-def test_an_unreadable_analyzer_count_is_not_reported_as_zero():
+def test_an_unreadable_analyzer_coverage_is_not_reported_as_zero():
     warnings = check_account(_settings(
-        analyzer_count=None,
-        unreadable={"analyzer_count": "access-analyzer:ListAnalyzers"}))
+        analyzer_coverage=None,
+        unreadable={"analyzer_coverage": "access-analyzer:ListAnalyzers"}))
     assert "access_analyzer" not in _settings_of(warnings)
 
 
@@ -938,7 +977,7 @@ def test_the_benchmark_version_these_ids_were_read_against_has_not_moved():
 #     v1.2 and deliberately dropped it by v3.0.0, because forced rotation
 #     produces predictable variations. Citing a control the benchmark removed
 #     on purpose would be worse than citing none.
-#   user_virtual_mfa - CIS 1.6 asks for hardware MFA on the root user only.
+#   user_virtual_mfa - CIS 1.5 asks for hardware MFA on the root user only.
 #     Stretching it to cover every user would claim a control for a population
 #     it does not name.
 #
@@ -1013,7 +1052,7 @@ def test_describing_the_account_does_not_restate_the_findings(iam_client):
 
     assert described["user_count"] == 1
     assert "users" not in described
-    assert described["checks_skipped"] == ["analyzer_count"]
+    assert described["checks_skipped"] == ["analyzer_coverage"]
 
 
 def test_describing_an_account_that_is_not_there_is_none():

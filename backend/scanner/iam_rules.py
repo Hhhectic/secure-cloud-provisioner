@@ -54,8 +54,8 @@ CHECK_LABELS = {
     "enumeration_policies": "whether anyone can read every identity in the "
                             "account",
     "expired_certificates": "whether expired certificates are still stored",
-    "analyzer_count": "whether anything watches for resources shared outside "
-                      "the account",
+    "analyzer_coverage": "whether anything watches for resources shared "
+                         "outside the account, in any region",
     "support_role_exists": "whether anyone can raise a support case",
     "cloudshell_full_access": "who can use the browser-based shell",
     "root_hardware_mfa": "whether the root user's second login step is a "
@@ -324,7 +324,7 @@ def _check_users(settings, account):
 
         # ---- What kind of second factor, once there is one -------------------
         #
-        # Prowler asks this and nothing here did. Uncited: CIS 1.6 asks for
+        # Prowler asks this and nothing here did. Uncited: CIS 1.5 asks for
         # hardware MFA on the *root* user only, and stretching it to cover
         # everybody would be citing a control for a population it does not
         # name - the same reasoning that leaves an exposed MySQL port
@@ -648,16 +648,45 @@ def _check_account_wide(settings, account):
         ))
 
     # ---- Watching for things shared outside the account. CIS 1.19 -----------
-    if settings.get("analyzer_count") == 0:
-        region = settings.get("region", "this region")
+    #
+    # The control says "for all regions" and this used to ask one, admitting so
+    # in the finding. The admission was honest and the check was still close to
+    # worthless: the value of Access Analyzer is catching a resource shared out
+    # of a region nobody watches, so the region somebody is actively working in
+    # is the least informative one to ask about.
+    coverage = settings.get("analyzer_coverage")
+
+    if coverage and coverage.get("without"):
+        without = coverage["without"]
+        checked = coverage.get("checked") or []
+
+        if coverage.get("swept"):
+            # A sweep that found some regions covered and others not is a
+            # different sentence from one that found nothing anywhere: the
+            # first is a gap somebody will close, the second is a feature
+            # nobody has turned on.
+            if len(without) == len(checked):
+                scope = (f"None of this account's {len(checked)} regions are "
+                         "watching")
+            else:
+                scope = (f"{len(without)} of this account's {len(checked)} "
+                         f"regions are not watching — {', '.join(without)}")
+        else:
+            # The region list could not be read, so this saw one region and
+            # must not imply otherwise.
+            scope = (f"Nothing in {coverage.get('home', 'this region')} is "
+                     "watching, and the list of regions could not be read, so "
+                     "this is one region rather than a sweep")
+
         warnings.append(_warning(
             INFO,
-            f"Nothing in {region} is watching for resources that have been "
-            "shared outside this account. Access Analyzer reports storage, "
-            "keys and roles reachable by other accounts or by the public, "
-            "which is the class of mistake nobody discovers by looking. It is "
-            "free. Note that this tool checked one region, and the "
-            "recommendation is to enable it in all of them.",
+            f"{scope} for resources that have been shared outside this "
+            "account. Access Analyzer reports storage, keys and roles "
+            "reachable by other accounts or by the public, which is the class "
+            "of mistake nobody discovers by looking. It is free, and the "
+            "recommendation is to enable it everywhere — a region nobody has "
+            "opened is exactly where something shared by accident goes "
+            "unnoticed.",
             _target(account, "access_analyzer"),
             control="ACCESS_ANALYZER",
         ))

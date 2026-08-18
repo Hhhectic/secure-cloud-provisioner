@@ -68,3 +68,23 @@ def client(service, region=None):
         raise AwsNotConfigured(f"{INSTALL_HINT} ({e})") from e
 
     return boto3.client(service, region_name=region)
+
+
+def enabled_regions(region=None):
+    """Every region this account can actually use, newest answer each call.
+
+    Asked of EC2 rather than hardcoded, because a hardcoded list is wrong in
+    both directions: it goes stale as AWS opens regions, and it names regions
+    an account has not opted into, so a sweep over it reports "could not check"
+    for places that were never available. `describe_regions` without
+    AllRegions answers exactly the set this account may call.
+
+    Raises rather than falling back to [region]. A sweep that quietly became a
+    single-region check would let a finding claim it looked everywhere when it
+    looked in one place, which is the reassuring-answer failure this project
+    spends `unreadable` on preventing. The caller decides what to say about a
+    sweep it could not perform.
+    """
+    ec2 = client("ec2", region)
+    found = ec2.describe_regions()["Regions"]
+    return sorted(r["RegionName"] for r in found)

@@ -183,7 +183,9 @@ below — see *What reading the scanner found that driving it could not* — tak
 it to 964 from `backend/` and 970 from the repository root. Then the pass over
 the four surfaces nobody had audited — see *What comparing the two surfaces
 found* — and the instance-size gap a second look at the CLI turned up, take it
-to **979 from `backend/`**, 0 skipped — and 979 from the repository root too,
+to 979 from `backend/`. Then the two account-wide checks and the
+`azure-monitor` type — see *An account-wide type, and what it cost* — take it
+to **1005 from `backend/`**, 0 skipped — and 1005 from the repository root too,
 now that retiring the root application took its six tests with it,
 plus **244 checks** across the two Node suites in `frontend/`. Every figure
 here is re-run rather than carried forward, which is how two of them were once
@@ -323,7 +325,7 @@ machines. What that found is the section below, and it is the reason the
 Node suites are not the whole story: `app.test.mjs` answers a stub, and a stub
 written to match the code cannot disagree with it.
 
-**There is one suite now: `pytest` answers 979 from the root and 979 from
+**There is one suite now: `pytest` answers 1005 from the root and 1005 from
 `backend/`, because they are the same tests.** The six that used to make the
 root figure larger were `test_azure_scanner.py`, which went with the
 application it covered.
@@ -393,7 +395,7 @@ cd backend
 source /home/huori/scp-venv/bin/activate     # not ../.venv: see below
 
 pytest -v                                   # offline, moto, no credentials
-                                            # 979, and the same 979 from the
+                                            # 1005, and the same 1005 from the
                                             # repository root: one suite now
 python main.py                              # the CLI, both clouds, 14 options
 uvicorn api.app:app --reload --host 127.0.0.1   # API, /docs and the page at /ui
@@ -1987,6 +1989,71 @@ also closed the question of whether to add a second, tighter threshold for
 administration ports, which had looked like the obvious next step and turns out
 to relocate the incoherence rather than remove it.
 
+## An account-wide type, and what it cost
+
+Everything registered here had been a *thing*: a bucket, a machine, a firewall.
+Two findings were not. CIS 1.19 asks for an Access Analyzer in every region and
+Prowler's monitor block asks whether a subscription reports its own security
+changes — both are questions about an account rather than about anything in it,
+and this file listed both as open on the grounds that `ResourceType` had no
+shape for them.
+
+It turned out to need no new shape at all. **The routes take an id as one path
+segment, and a subscription id is one.** `azure-monitor` is a read-only
+`ResourceType` whose `list_all` returns exactly one row, whose id is the
+subscription, and whose `read` refuses to answer about any other subscription
+the way `read_account_for_scanning` already refuses about another AWS account.
+No route changed. The alternative — a `scope` field taught to every route and
+to the page — would have been surgery on the seam every other type depends on,
+to serve one entry.
+
+That is now the second time the registry claim has held under a load it was not
+designed for, and it is a stronger test than adding Azure was: a second cloud
+is still a resource, and this is not.
+
+**What the monitor rules say, and what they refuse to say.** The reasoning is
+`scanner/alarm_rules.py`'s, carried across without modification — *an alarm
+fails by being quiet*. Three findings, and the ordering between them is the
+part worth reading:
+
+- An alert that exists and is **switched off** is worse than one that was never
+  written, because it appears in the portal's list exactly like a working one
+  and satisfies every glance.
+- An alert that is on but has **no action group** is the Azure spelling of an
+  alarm with no SNS topic: it fires, it is recorded, and it reaches nobody.
+- Whatever is **not watched at all**, as one sentence when there are no alerts
+  and as a note when there are some. Five findings on a subscription with none
+  teaches people to close the panel.
+
+The trap in that set is the third. Only alerts that are both enabled *and*
+reachable count as cover — otherwise a subscription reports "everything is
+watched" on the strength of alerts that cannot speak, and the first two
+findings quietly buy off the third. Pinned by a test that sets each of the two
+broken states in turn and asserts the gap is still reported.
+
+Nothing here carries a citation, for the reason the rest of `az/` already
+gives: CIS AWS Foundations plainly does not reach Azure, the CIS Azure
+benchmark is a document nobody on this project has read, and Prowler is not a
+published benchmark to cite in its place.
+
+**What it does not cover, stated rather than worked around.** Roughly a third
+of Prowler's monitor block is about diagnostic settings — whether the activity
+log is exported somewhere it outlives the ninety days Azure keeps it.
+`azure-mgmt-monitor` 7.0.0 ships **no diagnostic-settings operation group at
+all**, so those are unreachable without a different API version or a raw ARM
+call. Same treatment as the three Azure vault constraints: named, not guessed
+at. Defender is a separate and deliberate no — its checks ask whether paid
+Microsoft products are licensed, which is a purchasing decision.
+
+**It has not run against the subscription.** Everything above is offline, on a
+stub that models two things a naive fake would not: the SDK enums that render
+through `str()` as `'ClassName.MEMBER'`, and `enabled` being *absent* rather
+than false on an alert that is on. Both are traps this file has already paid
+for once. But `az/monitor.py` is at exactly the stage `az/` as a whole was at
+before the first live run found four bugs in code the offline suite covered,
+and three of those four were the same mistake: **a stub written to match the
+code cannot disagree with it.** Assume the same is true here.
+
 ## Style
 
 Comments explain *why*, not what. Test names are sentences describing the
@@ -2136,14 +2203,30 @@ caching.
   field, because `_priorities_for` numbers them from the row order and the
   arrows are what change it.
 
-  Two smaller gaps against the design. The Azure table shows the name in both
-  its columns, because an Azure row's id *is* its name now; the mockup replaces
-  them with resource group and location, which means adding both to the five
-  Azure list adapters — the readers already know them. And the page's wordmark
-  is **Sanctum** while the CLI, the README and this package are all still
-  Secure Cloud Provisioner. That is a decision nobody has made rather than a
-  rename; the served-page test asserts the page was served rather than
-  asserting a product name, so either answer costs one line.
+  Both smaller gaps against the design are now closed. The Azure table used to
+  show the name in both its columns, because an Azure row's id *is* its name;
+  it now shows the resource group and the location instead, which is what the
+  mockup asked for. That cost one line — `_az_summary` carries both fields
+  through where it had been dropping them, and the five list adapters all go
+  through it, so none of them needed touching. The readers had always known
+  both. The page adds the two columns when the rows carry them rather than
+  when the cloud is Azure, because "does this type have a resource group" is a
+  question the data answers and matching on provider there would be the page
+  inferring a shape from a naming convention — the mistake `ResourceType.provider`
+  exists to prevent.
+
+  The wordmark is **Sanctum** on the page and **Secure Cloud Provisioner** in
+  the CLI, the README and this package, and that is now a decision rather than
+  an oversight: Sanctum is the product's face and Secure Cloud Provisioner is
+  the package, the way a program's name and its distribution rarely match.
+
+  Renaming is not the one-line change this file claimed, and the claim was
+  wrong before this decision was made rather than because of it.
+  `test_api.py` asserts `"Sanctum" in page.text` outright, and `index.html`
+  carries it twice — in the `<title>` and in the wordmark. So it is three
+  edits and a test, which is still small, but "the served-page test asserts
+  the page was served rather than asserting a product name" was simply not
+  true of the test as written.
 
 - **The four Azure capabilities that lived outside `backend/` have landed.**
   Network security group creation was in `azure_crud.py`; virtual networks,
@@ -2191,10 +2274,38 @@ caching.
   and is the first thing to read before adding a rule; it records what was
   measured rather than what was assumed.
 
-  Prowler agrees on eight findings and covers four this tool does not: a
-  bucket policy granting another account access, password expiry, per-user
-  hardware MFA, and resources spread across regions. Two apparent gaps were
+  Prowler agreed on eight findings and covered four this tool did not. Three
+  of those four have since been written — a bucket policy granting another
+  account access, password expiry, and per-user hardware MFA — leaving
+  resources spread across regions as the only one open. Two apparent gaps were
   not gaps, and the reasoning is written down so nobody re-files them.
+
+  All three of the new ones are uncited, and each for its own reason rather
+  than by a blanket rule. CIS has no control for cross-account bucket access.
+  CIS carried a password-expiry recommendation in v1.2 and **deliberately
+  dropped it** by v3.0.0, on the reasoning that forced rotation produces
+  predictable variations, so citing one would attribute a control to a document
+  that removed it on purpose — the most tempting shape a fabricated citation
+  can take, because a plausible number really did once exist. And CIS **1.5**
+  asks for hardware MFA on the *root* user only, so stretching it across every
+  user would claim a control for a population it does not name.
+
+  That number was written as 1.6 first, in this file and in both places in the
+  code. 1.6 is *Eliminate use of the root user for administrative tasks* — a
+  different control, one away, and exactly the failure this file records under
+  *CIS section 1 renumbered in v5.0.0*: "two thirds of these IDs are one away
+  from a plausible wrong answer, and nothing a wrong one produces looks
+  broken." It was caught by checking the claim against `scanner/controls.py`
+  rather than by reading it back. Uncited findings are safe from this; prose
+  about which control was declined is not, and nothing tests prose.
+
+  That broke a real invariant. `test_every_iam_finding_carries_a_citation`
+  asserted exactly what its name says, on the correct grounds that section 1
+  covers nearly all of IAM and an uncited IAM finding therefore meant a
+  forgotten citation. It now allows two findings **named individually**, so a
+  citation that genuinely was forgotten still fails it. An exemption that said
+  "some findings are uncited" would have retired the guard instead of narrowing
+  it.
 
   CloudGoat is the other direction — deliberately broken infrastructure, 13 of
   29 scenarios run. Of those 13 it named the planted vulnerability in 3, named
@@ -2222,10 +2333,21 @@ caching.
   enumerates alarms carrying its own tag. The newest rule set is the one least
   tested against anything somebody else wrote.
 
-- **The snapshot audit covers one region.** Snapshots are regional and
-  `list_snapshots` sees only the client's region, the same limit as the Access
-  Analyzer check below. An account passing this check has been shown to pass
-  it in one place.
+- **The snapshot sweep now asks every region, and is not wired to a route.**
+  `publicly_restorable` still sees only its client's region;
+  `publicly_restorable_everywhere` asks all of them and returns
+  `{checked, found, swept}`. A snapshot shared with the world in a region
+  nobody opens is exactly the one nobody notices, and the region somebody
+  works in daily is where a mistake gets spotted anyway.
+
+  It has no route, deliberately. Every AWS `ResourceType` here is
+  per-resource and this is an account-wide question, so there is no id to hang
+  it on — the snapshot type would have to list snapshots from regions its
+  single-region reader cannot then resolve, which is the *A row's id is
+  whatever the routes accept* rule pointed at itself. The live smoke test
+  calls it, which is where the one-region limit was actually costing
+  something. Wiring it to a surface wants the account-scoped shape
+  `azure-monitor` now demonstrates, applied to AWS.
 - **The least-privilege policy currently bounds nothing.** `EC2_Dude` also
   holds `AmazonEC2FullAccess`, `AmazonS3FullAccess` and others, so every
   narrow `Allow` in `docs/iam-policy.json` is redundant and the separation of
@@ -2236,10 +2358,29 @@ caching.
   the FullAccess policies would make the documented policy the real one and
   make "this runs on 1,797 characters of permissions" a claim the smoke test
   proves rather than an aspiration.
-- **The Access Analyzer check covers one region.** CIS 1.19 asks for an
-  analyzer in every region; `read_analyzers` looks at the one the client was
-  built for. The finding says so rather than implying a sweep, but an account
-  passing this check has only been shown to pass it once.
+- **The Access Analyzer check asks every region now.** CIS 1.19 says "for
+  all regions" and this asked one, admitting so in the finding. The admission
+  was honest and the check was still close to worthless: the value of Access
+  Analyzer is catching a resource shared out of a region nobody watches, so
+  the region somebody is actively working in is the least informative one to
+  ask about.
+
+  `read_analyzer_coverage` returns `{home, checked, without, swept}` and the
+  finding counts regions rather than hedging. **`swept` is the load-bearing
+  half.** Enumerating regions needs `ec2:DescribeRegions`, which a login
+  scoped to Access Analyzer will not have, so the sweep narrows to one region
+  and says so — because "no analyzer in the one region I could see" reported
+  in the words of "no analyzer in your account" is a claim nothing supports.
+  `enabled_regions` raises rather than falling back for the same reason: the
+  caller decides what to say about a sweep it could not perform, and a silent
+  degrade would let every finding built on it claim coverage it never had.
+
+  One bug came out of writing it, and it is a Python detail worth knowing.
+  `_denied()` ends in a bare `raise`, which needs an active exception — called
+  after the per-region loop rather than inside an `except`, it failed as
+  `RuntimeError: No active exception to reraise` and turned a recorded gap into
+  a crash on every account. Twelve tests caught it immediately; nothing about
+  reading the code would have.
 - **Five of CIS section 1 is unimplemented, on purpose.** 1.1, 1.2, 1.10, 1.17
   and 1.20 have no API that answers them; the reasoning per control is at the
   foot of `scanner/controls.py`. Sixteen of twenty-one are covered.
@@ -2323,7 +2464,8 @@ and nobody can log into.
 
 Not done: nothing that stops a demo. The page builds every Azure type
 including a firewall with ordered rules. Everything in *Not done* above is a
-refinement, and the largest is that monitor and defender have no rules at all
+refinement, and the largest remaining one is that defender has no rules —
+deliberately; monitor now does
 — which Prowler covers and this does not.
 
 ## Next
@@ -2331,7 +2473,7 @@ refinement, and the largest is that monitor and defender have no rules at all
 **One small thing first, and it is known and one-line.**
 
 0. **Root collection is no longer a question — there is one suite, and
-   `pytest` answers 979 from either directory.** It was fixed first and then
+   `pytest` answers 1005 from either directory.** It was fixed first and then
    made moot: the six tests that only the root run collected belonged to the
    application that has since been deleted. Worth keeping only for the
    diagnosis, which this file twice recorded wrongly before getting it right.
@@ -2420,24 +2562,30 @@ refinement, and the largest is that monitor and defender have no rules at all
    name for 90 days — so test vaults with the weak option, which is what the
    smoke test does deliberately, and let the offline spec test cover the secure
    path.
-3. **Rules for monitor and defender, or a decision not to.** The rules widget
-   that used to sit here is done — see *The Azure half is done* above. What
-   Prowler found instead is a whole area with no rules: thirteen `monitor`
-   checks, all of them asking whether the subscription raises an alert when
-   somebody creates or deletes a security-relevant thing, plus diagnostic
-   settings. That is the Azure counterpart of `scanner/alarm_rules.py`, and
-   the reasoning transfers exactly — an alarm fails by being quiet.
+3. **Monitor is done and defender is a decided no.** See *An account-wide
+   type, and what it cost* below. `azure-monitor` is registered, read-only,
+   and its single resource is the subscription.
 
-   It needs a decision first, not code. Every Azure rule here reads one
-   resource and judges it; these read the *subscription* and judge its
-   configuration, so there is no resource id to hang a finding on and
-   `ResourceType` has no shape for it. The three `defender` checks are a
-   separate question and probably a no: they ask whether paid Microsoft
-   products are licensed, and "you have not bought Defender" is not a
-   configuration mistake.
+   Defender stays unimplemented on the reasoning this entry already had: its
+   three checks ask whether paid Microsoft products are licensed, and "you
+   have not bought Defender" is a purchasing decision rather than a
+   configuration mistake. Recorded as a refusal rather than a gap.
+
+   What is genuinely still missing from the monitor block is diagnostic
+   settings — whether the activity log is exported somewhere it outlives the
+   ninety days Azure keeps it. Not a choice: `azure-mgmt-monitor` 7.0.0 ships
+   no diagnostic-settings operation group at all. Reading them needs a
+   different API version or a raw ARM call, and guessing at one would be worse
+   than the gap.
 4. Detach `AmazonEC2FullAccess` and friends from `EC2_Dude`, so the documented
    least-privilege policy is the one actually in force and the smoke test
    proves it. Already done for EC2 and S3; SNS, CloudWatch and SSM remain and
    belong to a teammate.
-5. The four smaller Prowler gaps: cross-account bucket policies, password
-   expiry, per-user hardware MFA, multi-region.
+5. **The last Prowler gap is multi-region.** The other three are done — see
+   *Benchmarked against Prowler and CloudGoat*. What is left is the one that
+   is not a rule but a shape: `list_snapshots` sees only its client's region,
+   `read_analyzers` asks about one region while CIS 1.19 asks for every
+   region, and both findings say so rather than implying a sweep. Fixing it
+   properly means deciding whether a scan fans out across regions at the
+   reader or at the registry, which is a change to how every AWS type is read
+   rather than a rule to add.

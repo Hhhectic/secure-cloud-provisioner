@@ -19,3 +19,13 @@ azure-mgmt-keyvault>=14.0.0
 # the lazy-import design working: the page starts, one type is unavailable.
 # Resolved against a real install at 38.2.0.
 azure-mgmt-compute>=38.0.0
+# az/monitor.py, which arrived with the azure-monitor type. Listed here at the
+# same time as the code that needs it, which is the third attempt at a habit -
+# azure-mgmt-network and azure-mgmt-compute were both needed for weeks while
+# appearing in no requirements file, and each produced a checkout that
+# installed cleanly and then answered 503 on one tab.
+#
+# Resolved against a real install at 7.0.0. Note that 7.0.0 ships no
+# diagnostic-settings operation group at all, which is why az/monitor.py covers
+# activity log alerts and says plainly that it does not cover the rest.
+azure-mgmt-monitor>=7.0.0

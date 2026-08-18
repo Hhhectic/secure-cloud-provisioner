@@ -33,7 +33,8 @@ snapshots would report confidently on the one property that matters without
 ever having asked about it.
 """
 
-from aws.common import client as _client, ClientError
+from aws.common import (client as _client, enabled_regions, AwsNotConfigured,
+                        BotoCoreError, ClientError)
 
 from aws.s3_buckets import PermissionDenied
 
@@ -264,3 +265,55 @@ def apply_fix(ec2, snapshot_id, warning):
         "command makes this snapshot private again; this tool holds no "
         "permission to change a snapshot and does not ask for one."
     )
+
+
+def publicly_restorable_everywhere(home_region):
+    """The same question as publicly_restorable, asked of every region.
+
+    Snapshots are regional and `publicly_restorable` sees only its client's
+    region, so an account that passes it has been shown to pass it in one
+    place. That is the weakest possible form of this check: a snapshot shared
+    with the world in a region nobody opens is precisely the one nobody
+    notices, and the region somebody works in daily is the one where a mistake
+    gets spotted anyway.
+
+    Returns what was established rather than a verdict, the same shape
+    read_analyzer_coverage uses:
+
+        checked  regions that answered
+        found    [{"id", "region"}] for every world-restorable snapshot
+        swept    whether the region list itself could be read
+
+    `swept` is False when ec2:DescribeRegions is refused, and the caller must
+    not report a one-region result as an account-wide all-clear. A region that
+    did not answer is absent from `checked` rather than counted as clean, for
+    the reason this module already gives about trusting a filter: the quiet
+    failure here produces the reassuring answer.
+
+    Deliberately not wired to a route. Every ResourceType here is per-resource
+    and this is an account-wide question, so it has no id to hang a finding on
+    - see the note in CLAUDE.md. It is called by the live smoke test, which is
+    where the one-region limit was actually costing something.
+    """
+    try:
+        regions = enabled_regions(home_region)
+        swept = True
+    except (ClientError, BotoCoreError, AwsNotConfigured):
+        regions = [home_region]
+        swept = False
+
+    checked, found = [], []
+
+    for region in regions:
+        try:
+            ec2 = _client("ec2", region)
+            public = publicly_restorable(ec2)
+        except (ClientError, BotoCoreError, PermissionDenied):
+            # One region refusing does not abandon the rest, and an
+            # unanswered region is simply not in `checked`.
+            continue
+        checked.append(region)
+        found.extend({"id": s.get("SnapshotId"), "region": region}
+                     for s in public)
+
+    return {"checked": checked, "found": found, "swept": swept}
