@@ -74,6 +74,13 @@ class ResourceSpec(BaseModel):
     region: Optional[str] = None
     secure_by_default: bool = True
 
+    # Off by default, and separate from secure_by_default on purpose. Hosting
+    # is something a bucket does rather than a posture it has, and the two are
+    # independent: a hardened bucket can serve a site badly, and an open one
+    # can serve none. Defaulting it on would also mean every bucket this tool
+    # has ever made grew a website endpoint on upgrade.
+    website: bool = False
+
     # Key pair. The public half only: this API has no field for a private key
     # and adding one would defeat the point of importing rather than generating.
     public_key: Optional[str] = None
@@ -182,6 +189,19 @@ class FixRequest(BaseModel):
 
     rule_id: str = Field(min_length=1)
     new_cidr: Optional[str] = None
+
+
+class WebsiteRequest(BaseModel):
+    """Which way to move the static-hosting switch.
+
+    `enabled` is required and has no default. A body that forgot to say which
+    direction it meant would otherwise pick one, and the two directions are not
+    equally recoverable: turning hosting on publishes an endpoint, turning it
+    off does not. A caller who did not say gets a 422 rather than a guess.
+    """
+    enabled: bool
+    index_document: str = "index.html"
+    error_document: str = "error.html"
 
 
 class DeleteOptions(BaseModel):

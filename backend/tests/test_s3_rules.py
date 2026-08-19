@@ -393,6 +393,232 @@ def test_weak_bucket_flags_then_fixes_clean(s3):
     assert summarize(after)[WARNING] == 0
 
 
+def test_a_weak_bucket_is_unblocked_by_a_write_not_by_omission(s3):
+    """secure_by_default=False must turn the four blocks off, not merely skip
+    turning them on.
+
+    Those were the same thing until April 2023, when AWS began applying all
+    four blocks to every new bucket itself. After that, skipping the hardening
+    returned a fully blocked bucket while the pre-create scan promised an
+    exposure - the form said one thing and the account held another.
+
+    moto does not apply that default either, which is why the old code looked
+    correct here and the whole suite stayed green over it. Note what this
+    asserts: not that the bucket *reads* as public, which it did before and
+    after, but that the configuration was written. Only a write survives
+    contact with real AWS.
+    """
+    ok, name, _ = s3_buckets.create_bucket(
+        s3, BUCKET, region=REGION, secure_by_default=False)
+    assert ok
+
+    blocks = s3_buckets.get_public_access_block(s3, name)
+    assert blocks is not None, "no block configuration was written at all"
+    assert blocks == s3_buckets.ALL_BLOCKS_OFF
+
+
+def test_asking_for_a_weak_bucket_does_not_weaken_an_existing_one(s3):
+    """A name already in use has somebody's data behind it.
+
+    create_bucket re-hardens a bucket that was already there, which is safe in
+    the direction this tool usually travels. The inverse is not, so the weak
+    path stops and says so rather than stripping protection off data it did not
+    create.
+    """
+    ok, _, _ = s3_buckets.create_bucket(s3, BUCKET, region=REGION)
+    assert ok
+
+    ok, name, problems = s3_buckets.create_bucket(
+        s3, BUCKET, region=REGION, secure_by_default=False)
+    assert ok
+
+    assert s3_buckets.get_public_access_block(s3, name) == s3_buckets.ALL_BLOCKS_ON
+    # Not "already existed": create_bucket has always said that about a name it
+    # found rather than made, so matching on it passes with or without the
+    # refusal. The refusal is the only thing that says "does not weaken".
+    assert any("does not weaken" in p for p in problems), problems
+
+
+@pytest.mark.parametrize("secure", [True, False])
+def test_the_preflight_predicts_the_blocks_the_create_writes(s3, secure):
+    """What the form promises and what the create does must not drift apart.
+
+    They live in different files, neither imports the other, and that is how
+    they came to disagree about the single most important setting on the form:
+    check_spec described an unprotected bucket that create_bucket had no way to
+    produce.
+
+    Only the public access block is compared. moto does not model the SSE-S3
+    default AWS has applied since January 2023, so encryption genuinely differs
+    between here and production and asserting on it would pin moto's behaviour
+    rather than AWS's. That half is checked live, in scripts/smoke_test.py.
+
+    Worth knowing what this test cannot do: it passed against the broken code
+    too. moto models neither of the defaults AWS added in 2023, so offline the
+    old prediction (no configuration) and the old result (no configuration)
+    agreed, and the disagreement only existed against real AWS. This guards the
+    two halves against drifting apart from here on; it is not what would have
+    caught the original bug. That is
+    test_a_weak_bucket_is_unblocked_by_a_write_not_by_omission, which asserts
+    on the write rather than on the reading.
+    """
+    from api.registry import _bucket_check_spec
+
+    name = BUCKET + ("-secure" if secure else "-weak")
+    spec = {"name": name, "region": REGION, "secure_by_default": secure}
+
+    predicted = {w["rule"]["setting"] for w in _bucket_check_spec(spec)}
+
+    ok, created, _ = s3_buckets.create_bucket(
+        s3, name, region=REGION, secure_by_default=secure)
+    assert ok
+    actual = {w["rule"]["setting"] for w in
+              check_bucket_settings(s3_buckets.read_bucket_for_scanning(s3, created))}
+
+    assert ("public_access_block" in predicted) == ("public_access_block" in actual), (
+        f"preflight said public_access_block warning="
+        f"{'public_access_block' in predicted}, the created bucket said "
+        f"{'public_access_block' in actual}"
+    )
+
+
+# --------------------------------------------------- static website hosting
+
+
+def test_a_new_bucket_serves_no_website(s3):
+    """Off is reported as a value. AWS raises for a bucket that never had one."""
+    s3.create_bucket(Bucket=BUCKET)
+
+    site = s3_buckets.get_website(s3, BUCKET)
+
+    assert site == {"enabled": False, "index": None, "error": None}
+
+
+def test_hosting_switches_on_and_back_off(s3):
+    ok, name, _ = s3_buckets.create_bucket(
+        s3, BUCKET, region=REGION, secure_by_default=False)
+    assert ok
+
+    ok, message = s3_buckets.enable_website(s3, name)
+    assert ok, message
+    site = s3_buckets.get_website(s3, name)
+    assert site["enabled"]
+    assert site["index"] == "index.html"
+
+    ok, message = s3_buckets.disable_website(s3, name)
+    assert ok, message
+    assert s3_buckets.get_website(s3, name)["enabled"] is False
+
+
+def test_turning_hosting_off_twice_is_not_an_error(s3):
+    """AWS accepts the delete on a bucket with no website, so this needs no
+    exists-check and a double click is harmless."""
+    s3.create_bucket(Bucket=BUCKET)
+
+    assert s3_buckets.disable_website(s3, BUCKET)[0]
+    assert s3_buckets.disable_website(s3, BUCKET)[0]
+
+
+def test_turning_hosting_on_does_not_open_the_bucket(s3):
+    """The switch configures hosting and stops there.
+
+    Hosting and exposure are separate settings and this keeps them separate.
+    A button labelled "serve a website" that also published every object would
+    be the same shape of mistake as a create call that claimed to unblock a
+    bucket without writing anything - a control asserting an outcome it did
+    not produce.
+    """
+    ok, name, _ = s3_buckets.create_bucket(s3, BUCKET, region=REGION)
+    assert ok
+    before = s3_buckets.get_public_access_block(s3, name)
+
+    ok, _ = s3_buckets.enable_website(s3, name)
+    assert ok
+
+    assert s3_buckets.get_public_access_block(s3, name) == before
+    assert s3_buckets.get_public_access_block(s3, name) == s3_buckets.ALL_BLOCKS_ON
+    assert s3_buckets.reachable_by_anyone(s3, name) == []
+
+
+def test_turning_hosting_on_says_what_still_blocks_it(s3):
+    """A hardened bucket has three separate reasons its site will not serve,
+    and the message names them rather than reporting a bare success."""
+    ok, name, _ = s3_buckets.create_bucket(s3, BUCKET, region=REGION)
+    assert ok
+
+    ok, message = s3_buckets.enable_website(s3, name)
+    assert ok
+
+    assert "Nothing is public" in message
+    assert "403" in message
+    # The one that is easy to miss: the website endpoint is http-only, so the
+    # CIS 2.1.1 fix this tool applies by default denies every request to it.
+    assert "http-only" in message
+
+
+def test_a_bucket_can_be_created_already_hosting(s3):
+    ok, name, problems = s3_buckets.create_bucket(
+        s3, BUCKET, region=REGION, secure_by_default=False, website=True)
+    assert ok
+
+    assert s3_buckets.get_website(s3, name)["enabled"] is True
+    # The outcome is reported rather than left to be discovered. Asking for a
+    # site and getting one that serves nobody is the case worth a sentence.
+    assert any("website hosting is on" in p for p in problems), problems
+
+
+def test_creating_without_asking_for_a_website_leaves_hosting_off(s3):
+    """The default, stated as a test because a create-time switch that
+    defaulted on would grow an endpoint on every bucket this tool has made."""
+    ok, name, problems = s3_buckets.create_bucket(s3, BUCKET, region=REGION)
+    assert ok
+
+    assert s3_buckets.get_website(s3, name)["enabled"] is False
+    assert not any("website" in p.lower() for p in problems)
+
+
+def test_a_secure_bucket_that_hosts_is_told_it_serves_nobody(s3):
+    """Both boxes ticked is the combination that silently does not work.
+
+    The endpoint is http-only and secure_by_default installs a policy denying
+    exactly that, so the site refuses every visitor. Nothing prevents the
+    combination - it is legitimate, and the second step is somebody's to take -
+    but it is not allowed to look like it worked.
+    """
+    ok, name, problems = s3_buckets.create_bucket(
+        s3, BUCKET, region=REGION, secure_by_default=True, website=True)
+    assert ok
+
+    said = " ".join(problems)
+    assert "http-only" in said, problems
+    assert "403" in said, problems
+
+
+def test_website_endpoint_spells_both_region_forms():
+    """Older regions take a dash, newer ones a dot. There is no rule, only a
+    list, and getting it wrong yields a hostname that does not resolve."""
+    assert s3_buckets.website_endpoint("b", "us-west-2") == (
+        "http://b.s3-website-us-west-2.amazonaws.com")
+    assert s3_buckets.website_endpoint("b", "eu-central-1") == (
+        "http://b.s3-website.eu-central-1.amazonaws.com")
+
+
+def test_the_page_and_the_backend_agree_on_which_regions_take_a_dash():
+    """frontend/app.js keeps its own copy so it can show a bucket's address
+    without a round trip. Two copies of a list nothing derives is exactly how
+    the two drift, so the drift is asserted rather than hoped against."""
+    from pathlib import Path
+    import re
+
+    page = (Path(__file__).resolve().parents[2]
+            / "frontend" / "app.js").read_text(encoding="utf-8")
+    block = re.search(r"WEBSITE_DASH_REGIONS = new Set\(\[(.*?)\]\)", page, re.S)
+    assert block, "the page no longer declares WEBSITE_DASH_REGIONS"
+
+    in_page = set(re.findall(r'"([a-z0-9-]+)"', block.group(1)))
+    assert in_page == s3_buckets._WEBSITE_DASH_REGIONS
+
+
 def test_reads_survive_an_unconfigured_bucket(s3):
     """Unset settings raise on AWS. Each getter must report absence as a value."""
     s3.create_bucket(Bucket=BUCKET)

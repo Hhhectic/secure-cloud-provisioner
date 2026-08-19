@@ -112,7 +112,13 @@
     <section id="detail">
       <div class="card-head">
         <h2>Detail</h2>
-        <span id="detail-id" class="muted"></span>
+        <!-- The identifier and anything that acts on this one resource, kept
+             together on the right so a control cannot end up below the fold
+             behind a long list of findings. -->
+        <div class="detail-head-right">
+          <span id="detail-id" class="muted"></span>
+          <span id="detail-actions"></span>
+        </div>
       </div>
       <!-- Replaced by resetDetail() as soon as app.js runs. Kept as plain
            text so the panel is not empty in the half-second before it does,

@@ -93,10 +93,12 @@ def _writable(s3, name, blocked=True):
         s3, name, region=REGION, secure_by_default=False)
     assert ok, name_or_error
     if blocked:
-        # secure_by_default=False leaves no block configuration at all, which
-        # reachable_by_anyone correctly reads as public. Put the blocks on
-        # explicitly so these buckets differ from a secure one only in the
-        # transport policy moto over-enforces.
+        # secure_by_default=False now writes all four blocks off, which
+        # reachable_by_anyone correctly reads as public. (It used to leave no
+        # configuration at all, read as public for a different reason - and
+        # against real AWS it left the blocks *on*, which was the bug.) Put the
+        # blocks back on explicitly so these buckets differ from a secure one
+        # only in the transport policy moto over-enforces.
         s3.put_public_access_block(
             Bucket=name,
             PublicAccessBlockConfiguration=s3_buckets.ALL_BLOCKS_ON)
@@ -194,6 +196,61 @@ def test_it_refuses_to_upload_into_a_bucket_the_world_can_read(s3):
     # And nothing was written on the way to deciding that.
     inside = s3_buckets.read_bucket_for_scanning(s3, "open-bucket")["objects"]
     assert inside["count"] == 0
+
+
+def test_saying_so_explicitly_gets_the_upload_through(s3):
+    """The refusal is a default, not a wall.
+
+    accept_risk is set by one button, the same one that pushed the create past
+    a critical finding. Refusing a second time is not a safety property; it is
+    the tool disbelieving an answer it asked for, and it left people with a
+    bucket that was built and files that were not.
+    """
+    _writable(s3, "open-on-purpose")
+    s3.delete_public_access_block(Bucket="open-on-purpose")
+
+    ok, message, written = s3_buckets.put_objects(
+        s3, "open-on-purpose", [("demo.txt", b"deliberately exposed")],
+        accept_risk=True)
+
+    assert ok, message
+    assert written == ["demo.txt"]
+    inside = s3_buckets.read_bucket_for_scanning(s3, "open-on-purpose")["objects"]
+    assert inside["count"] == 1
+
+
+def test_an_upload_into_an_open_bucket_says_where_the_files_landed(s3):
+    """What survives the bypass. The write already happened, so this is not a
+    warning about what might occur - it is a description of where the files
+    now are, and it is the one thing somebody who clicked past the refusal
+    still has to be able to read back."""
+    _writable(s3, "open-and-told")
+    s3.delete_public_access_block(Bucket="open-and-told")
+
+    ok, message, _ = s3_buckets.put_objects(
+        s3, "open-and-told", [("a.txt", b"1")], accept_risk=True)
+
+    assert ok
+    assert "readable by anyone" in message, message
+    # The reason, whatever it is. Deleting the configuration and turning its
+    # four switches off are different states with different wording, and this
+    # cares that a reason is given rather than which of the two it was.
+    assert "public access block" in message, message
+
+
+def test_the_bypass_is_off_unless_it_is_asked_for(s3):
+    """A default that had drifted to true would turn every ordinary upload
+    into a silent publish, which is the exact failure the refusal exists to
+    prevent. Pinned here rather than left to the signature."""
+    _writable(s3, "still-refused")
+    s3.delete_public_access_block(Bucket="still-refused")
+
+    ok, message, written = s3_buckets.put_objects(
+        s3, "still-refused", [("a.txt", b"1")])
+
+    assert not ok
+    assert written == []
+    assert "already open" in message
 
 
 def test_the_check_is_made_against_the_bucket_now_not_when_it_was_created(s3):

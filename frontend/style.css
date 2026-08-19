@@ -1042,6 +1042,32 @@ button.tally:disabled::after { display: none; }
 .what-it-is > summary:hover { color: var(--ink-soft); }
 .what-it-is .mono-block { margin-top: 8px; }
 
+/* ---------------------------------------------------- static website switch */
+
+/* Rides on the panel head beside the bucket's name rather than in the body.
+   It was under the findings once, which was the right ordering and the wrong
+   place: five findings pushed it past the fold and the panel read as having no
+   switch at all. */
+.detail-head-right {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+}
+.website-switch {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 12.5px;
+}
+.website-switch .state {
+  color: var(--muted); font: 500 10.5px/1 var(--mono);
+  letter-spacing: .08em; text-transform: uppercase;
+}
+/* Smaller than a body button. This one sits on a heading line and a
+   full-height control there makes the row look like a toolbar. */
+.website-switch button { padding: 3px 10px; font-size: 12px; }
+.website-switch a { color: var(--accent); font-size: 12px; white-space: nowrap; }
+
+/* The same control in the create panel, which is a body rather than a heading
+   line, so it needs the vertical room a heading row already had. */
+.created-actions { padding: 8px 0 4px; }
+
 /* ------------------------------------------------------------- placeholders */
 
 /* The one exception to black text, and it is not a hierarchy exception.

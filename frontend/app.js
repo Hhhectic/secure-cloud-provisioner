@@ -962,6 +962,10 @@ function resetDetail() {
     "Pick a row above to see what it is, what is wrong with it, and what "
     + "this tool can fix without being told how.", "nothing-note"));
   $("detail-body").replaceChildren(waiting);
+  // The header control acts on one resource. Left behind when the selection
+  // clears, it would be a switch pointing at nothing - and the last bucket
+  // looked at is exactly the thing it would still move.
+  $("detail-actions").replaceChildren();
 }
 
 async function loadList() {
@@ -1210,6 +1214,26 @@ async function showDetail(id) {
     renderFindingGroups(body, data.warnings, data.counts, id);
   }
 
+  /* Buckets can do one thing this panel can switch, and it rides in the
+     header beside the bucket's name.
+
+     It sat under the findings first, on the reasoning that an action should
+     not outrank a critical. That ordering was right and the placement was
+     still wrong: a hardened bucket carries five findings, so the switch
+     rendered about eighty pixels below the fold and the panel looked like it
+     had no switch at all. Findings still come first in the body; the control
+     is simply not in the body. */
+  $("detail-actions").replaceChildren(
+    state.type === "bucket"
+      ? websiteSwitch(id, data.settings, () => {
+          // The whole panel, because its settings block is on screen too and
+          // would otherwise still show the old website configuration.
+          showDetail(id);
+          forgetScan();
+          loadList();
+        })
+      : document.createDocumentFragment());
+
   /* The raw settings, folded away.
 
      This is what the resource *is*, as opposed to what is wrong with it, and
@@ -1223,6 +1247,118 @@ async function showDetail(id) {
   what.append(text("summary", "What it is"));
   what.append(text("pre", JSON.stringify(data.settings, null, 2), "mono-block"));
   body.append(what);
+}
+
+/* Static website hosting, as a switch in the panel header.
+
+   Compact on purpose. It shares a line with the bucket's name, so it says the
+   state in two words and offers the one move available; everything longer
+   lives in the message the action returns, which arrives at the moment it is
+   relevant rather than sitting on screen forever.
+
+   Reads its position from the settings the panel already fetched, so the
+   button cannot disagree with the JSON printed further down.
+
+   It posts where it wants to end up - enabled true or false - rather than
+   "toggle". A button meaning "the other one from whatever is there now" has to
+   be right about what is there now, and this panel can be showing a reading
+   taken before somebody else changed the bucket. Sending the destination makes
+   a stale button harmless: it asks for a state, and gets it. */
+function websiteSwitch(bucketId, settings, onChanged) {
+  const site = settings.website || { enabled: false };
+  const unreadable = (settings.unreadable || {}).website;
+
+  const box = document.createElement("span");
+  box.className = "website-switch";
+
+  // A refused read is not an "off", and a switch that cannot know where it is
+  // should not offer to move. Naming the missing permission beats drawing a
+  // position that is a guess.
+  if (unreadable) {
+    box.append(text("span", `website: unreadable (${unreadable})`, "state"));
+    return box;
+  }
+
+  box.append(text("span", `website: ${site.enabled ? "on" : "off"}`, "state"));
+
+  const button = document.createElement("button");
+  button.className = "quiet";
+  button.textContent = site.enabled ? "Turn off" : "Turn on";
+  button.onclick = async () => {
+    button.disabled = true;
+    try {
+      const res = await api(
+        `/resources/bucket/${encodeURIComponent(bucketId)}/website`,
+        { method: "POST", body: JSON.stringify({ enabled: !site.enabled }) }
+      );
+      toast(res.message);
+      // Two panels show this control and they redraw differently. The detail
+      // panel rebuilds itself, so its own settings block stays in step. The
+      // create panel has no rebuild - it is a record of one request - so the
+      // switch replaces itself there and leaves the rest of that record alone.
+      if (typeof onChanged === "function") onChanged();
+      else await reloadWebsiteSwitch(box, bucketId);
+    } catch (e) {
+      toast(e.message, true);
+      button.disabled = false;
+    }
+  };
+  box.append(button);
+
+  /* The address, only once there is something at it.
+
+     An endpoint shown before hosting is on reads as a promise the tool has
+     already kept, and the thing it points at answers nothing. The title
+     carries why a live one can still refuse every visitor - it is http-only,
+     so this tool's own CIS 2.1.1 policy denies requests to it. */
+  if (site.enabled) {
+    const link = document.createElement("a");
+    link.href = websiteUrl(bucketId);
+    link.textContent = "open ↗";
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.title = websiteUrl(bucketId)
+      + "\n\nhttp only — the S3 website endpoint has no https form. It answers "
+      + "403 until the bucket is readable by the public, which this switch "
+      + "deliberately does not do.";
+    box.append(link);
+  }
+
+  return box;
+}
+
+/* Redraws just this control, for the panel that has nothing else to redraw.
+
+   Re-reads the bucket rather than assuming the click did what it asked for.
+   The switch's whole argument is that it sends a destination rather than a
+   toggle, and it would be a poor advertisement for that if it then drew its
+   new position from the button it had just pressed. */
+async function reloadWebsiteSwitch(box, bucketId) {
+  try {
+    const data = await api(`/resources/bucket/${encodeURIComponent(bucketId)}`);
+    box.replaceWith(websiteSwitch(bucketId, data.settings));
+  } catch {
+    // The change itself already succeeded and has been reported. A failed
+    // re-read is not worth a second, contradictory message; the control is
+    // disabled and stale, which is honest about what it knows.
+  }
+}
+
+/* The website endpoint's hostname, which AWS spells two ways.
+
+   Older regions take a dash and newer ones take a dot, with no rule behind the
+   split. The same list exists in aws/s3_buckets.py; it is duplicated here only
+   so a bucket's address can be shown without a second round trip, and both
+   copies are asserted against each other by the backend test suite. */
+const WEBSITE_DASH_REGIONS = new Set([
+  "us-east-1", "us-west-1", "us-west-2", "ap-southeast-1", "ap-southeast-2",
+  "ap-northeast-1", "eu-west-1", "sa-east-1",
+]);
+
+function websiteUrl(bucketId) {
+  const region = state.region || "us-east-1";
+  const separator = WEBSITE_DASH_REGIONS.has(region) ? "-" : ".";
+  return `http://${bucketId}.s3-website${separator}${region}.amazonaws.com`;
 }
 
 /* The severity counts, as tallies rather than a sentence.
@@ -1546,6 +1682,7 @@ const LABELS = {
   assign_public_ip: "give it a public address",
   with_nat_gateway: "add a NAT gateway",
   secure_by_default: "secure defaults",
+  website: "serve a static website",
   public_key: "public key",
   notify: "email me when it fires",
 };
@@ -1563,6 +1700,17 @@ const FIELDS = {
   "bucket": [
     ["name", "text", "globally unique across all of AWS"],
     ["secure_by_default", "checkbox", true],
+    // Separate from secure defaults rather than folded into it, because the
+    // two are genuinely independent and their combination is the interesting
+    // case: tick both and the bucket hosts a site that refuses everyone. The
+    // create response says so rather than the form forbidding it.
+    ["website", "checkbox", false,
+     "Turns on the S3 website endpoint. It does not make the bucket public: "
+     + "the endpoint answers 403 to every visitor until a policy grants the "
+     + "world read access, which this tool will not do for you. It is also "
+     + "http-only — there is no https form of an S3 website address — so with "
+     + "secure defaults above left on, that policy denies every request the "
+     + "endpoint receives."],
     // Uploaded after the bucket exists, by a second request, not carried in
     // the spec. See submitSpec: a file is multipart and the spec is JSON.
     ["files", "files", null,
@@ -2295,10 +2443,16 @@ async function runLiveCheck(explicit = false) {
    this feature does, and somebody who hits it should be told why rather than
    left thinking the upload silently failed.
 
+   `acceptRisk` is carried through from the create that made the bucket. One
+   button, one decision: pressing "Create it anyway" past a critical finding
+   used to build the bucket and then refuse the files, which reads as the tool
+   half-obeying rather than as a second considered no. The server still reports
+   who can read what was written; what it no longer does is ask twice.
+
    A failed upload does not undo the bucket. Nothing in this tool rolls back;
    partial results report exactly what exists, and a bucket that was created
    was created. */
-async function uploadAttached(inputs, resourceId, out) {
+async function uploadAttached(inputs, resourceId, out, acceptRisk = false) {
   const attached = Object.values(inputs)
     .find((i) => i.kind === "files");
   const chosen = attached && attached.el.files;
@@ -2318,7 +2472,8 @@ async function uploadAttached(inputs, resourceId, out) {
     // us-east-1, and the upload would report it missing.
     const res = await fetch(
       `${API}/resources/bucket/${encodeURIComponent(resourceId)}/objects`
-      + `?region=${encodeURIComponent(state.region)}`,
+      + `?region=${encodeURIComponent(state.region)}`
+      + (acceptRisk ? "&accept_risk=true" : ""),
       { method: "POST", body: form });
     const answered = await res.json().catch(() => ({}));
 
@@ -2384,6 +2539,21 @@ async function submitSpec(inputs, acceptRisk = false) {
   delete out.dataset.spec;
 
   out.append(text("p", `Created ${body.resource_id}`));
+
+  /* Hosting, switchable without leaving this tab.
+
+     The same control the audit panel carries. Without it, turning hosting on
+     for the bucket just made meant crossing to Audit, picking the type, and
+     finding the row again - three navigations to reach a thing that was on
+     screen a second earlier. The upload field above already set the
+     precedent: this panel acts on the resource it just made. */
+  if (state.type === "bucket" && body.settings) {
+    const row = document.createElement("div");
+    row.className = "created-actions";
+    row.append(websiteSwitch(body.resource_id, body.settings));
+    out.append(row);
+  }
+
   for (const p of body.problems || []) out.append(text("p", p, "muted"));
   // A new resource the last scan never saw, so that scan no longer describes
   // this type. The create response carries its own findings, which is what
@@ -2394,7 +2564,7 @@ async function submitSpec(inputs, acceptRisk = false) {
   // Files go up only after the thing that holds them exists, and only if the
   // create really succeeded - so a refused create never leaves an upload
   // looking for a bucket that was never made.
-  await uploadAttached(inputs, body.resource_id, out);
+  await uploadAttached(inputs, body.resource_id, out, acceptRisk);
 
   const counts = body.counts;
   out.append(text("p",

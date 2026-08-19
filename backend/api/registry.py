@@ -478,6 +478,7 @@ def _bucket_create(client, spec):
         spec["name"],
         region=spec.get("region") or DEFAULT_REGION,
         secure_by_default=spec.get("secure_by_default", True),
+        website=spec.get("website", False),
     )
 
 
@@ -497,11 +498,18 @@ def _bucket_check_spec(spec):
     secure = spec.get("secure_by_default", True)
     return check_bucket_settings({
         "bucket": spec.get("name") or "this bucket",
-        "public_access_block": dict(s3.ALL_BLOCKS_ON) if secure else None,
-        "encryption": {
-            "enabled": secure,
-            "algorithm": "AES256" if secure else None,
-        },
+        # Off is four switches written false, not a missing configuration.
+        # Predicting None described a bucket AWS has not handed out since April
+        # 2023, and one create_bucket cannot produce either: it writes the
+        # blocks off explicitly, so this is the shape the scan reads back.
+        "public_access_block": (dict(s3.ALL_BLOCKS_ON) if secure
+                                else dict(s3.ALL_BLOCKS_OFF)),
+        # On either way, and not this form's to decide. AWS has encrypted every
+        # new bucket with SSE-S3 since January 2023 and refuses to stop:
+        # delete_bucket_encryption returns success and leaves AES256 in place.
+        # Predicting an unencrypted bucket raised a critical against a state no
+        # create call here can reach.
+        "encryption": {"enabled": True, "algorithm": "AES256"},
         "versioning": {"enabled": secure, "mfa_delete": False},
         "public_acl_grants": [],
         "policy_is_public": False,

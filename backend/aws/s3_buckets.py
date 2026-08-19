@@ -25,6 +25,7 @@ _NOT_CONFIGURED = {
     "NoSuchBucketPolicy",
     "NoSuchTagSet",
     "NoSuchLifecycleConfiguration",
+    "NoSuchWebsiteConfiguration",
 }
 
 # Codes that mean "this login is not allowed to look".
@@ -59,6 +60,12 @@ ALL_BLOCKS_ON = {
     "RestrictPublicBuckets": True,
 }
 
+# The same four switches, off. This is not the absence of a configuration and
+# not the default: since April 2023 AWS writes ALL_BLOCKS_ON onto every new
+# bucket itself, so producing an open one takes a write. See
+# unblock_public_access.
+ALL_BLOCKS_OFF = {key: False for key in ALL_BLOCKS_ON}
+
 
 def get_client(region="us-east-1"):
     """Initializes and returns an S3 client."""
@@ -87,7 +94,8 @@ def bucket_exists(s3, bucket_name):
         return e.response["Error"]["Code"] not in ("404", "NoSuchBucket")
 
 
-def create_bucket(s3, bucket_name, region="us-east-1", secure_by_default=True):
+def create_bucket(s3, bucket_name, region="us-east-1", secure_by_default=True,
+                  website=False):
     """Creates a tagged bucket, optionally hardened on creation.
 
     Returns (ok, name_or_error, problems). The third element is the part that
@@ -100,7 +108,20 @@ def create_bucket(s3, bucket_name, region="us-east-1", secure_by_default=True):
     requires one. That asymmetry is a genuine AWS quirk, not a bug here.
 
     With secure_by_default left on, the bucket comes up blocked, encrypted and
-    versioned. Pass False to create a deliberately weak bucket for demos.
+    versioned. Pass False for a deliberately weak bucket, which takes a write
+    of its own rather than the absence of one - see unblock_public_access.
+
+    Encryption is not part of that bargain in either direction. AWS has applied
+    SSE-S3 to every new bucket since January 2023 and will not let it be turned
+    off; delete_bucket_encryption returns success and leaves AES256 in place. A
+    bucket created here is encrypted whatever this flag says.
+
+    `website` turns on static hosting, last of all, and is orthogonal to
+    `secure_by_default`: hosting is a thing the bucket does, not a posture, and
+    the two combine in a way worth being told about rather than prevented. A
+    secure bucket that hosts serves nobody, because the endpoint is http-only
+    and the CIS 2.1.1 policy applied above denies exactly that. enable_website
+    says so in its message, which lands in `problems`.
     """
     existed = bucket_exists(s3, bucket_name)
 
@@ -152,6 +173,32 @@ def create_bucket(s3, bucket_name, region="us-east-1", secure_by_default=True):
             ok, msg = harden(s3, bucket_name)
             if not ok:
                 problems.append(msg)
+    elif existed:
+        # Hardening a bucket that was already there is safe in the direction
+        # this tool usually travels. Weakening one is not. The name was in use,
+        # so whatever is inside belongs to somebody, and stripping the
+        # protection off it is not what asking for a new weak bucket meant.
+        problems.append(
+            "Its public access blocks were left exactly as they were. Asking "
+            "for a weak bucket does not weaken a bucket that already existed."
+        )
+    else:
+        ok, msg = unblock_public_access(s3, bucket_name)
+        if not ok:
+            problems.append(msg)
+
+    # Last, so the obstacles it reports describe the bucket as it ends up
+    # rather than as it was halfway through being hardened.
+    #
+    # The message is appended whether or not the call succeeded, which is the
+    # one place here a success lands in `problems`. It earns the space: "on,
+    # and serving nobody, because the policy this same request installed
+    # denies the only protocol the endpoint speaks" is precisely what somebody
+    # who ticked both boxes needs to read, and saying nothing would let the
+    # form imply a working site.
+    if website:
+        ok, msg = enable_website(s3, bucket_name)
+        problems.append(msg)
 
     return True, bucket_name, problems
 
@@ -415,6 +462,27 @@ def logging_enabled(s3, bucket_name):
         _denied(e, "s3:GetBucketLogging")
 
 
+def get_website(s3, bucket_name):
+    """Returns {enabled, index, error} for static website hosting.
+
+    Absent hosting is reported as a value rather than an exception, the same
+    bargain every other reader in this section makes: AWS raises
+    NoSuchWebsiteConfiguration for a bucket that simply never had a website,
+    and "off" is an answer, not a failure.
+    """
+    try:
+        resp = s3.get_bucket_website(Bucket=bucket_name)
+        return {
+            "enabled": True,
+            "index": (resp.get("IndexDocument") or {}).get("Suffix"),
+            "error": (resp.get("ErrorDocument") or {}).get("Key"),
+        }
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _NOT_CONFIGURED:
+            return {"enabled": False, "index": None, "error": None}
+        _denied(e, "s3:GetBucketWebsite")
+
+
 # Each setting the scanner expects, paired with the reader that fetches it.
 # How many keys to ask for. One page, and the count is reported as "at least"
 # past it: the question a finding needs answered is "is there anything in
@@ -512,31 +580,39 @@ def reachable_by_anyone(s3, bucket_name):
     return reasons
 
 
-def put_objects(s3, bucket_name, files):
-    """Uploads objects, and refuses if the bucket is open to the world.
+def put_objects(s3, bucket_name, files, accept_risk=False):
+    """Uploads objects. Refuses a bucket open to the world unless told plainly.
 
     `files` is [(key, bytes)].
 
-    **The refusal is the point of this function.** Everything else in this
-    tool is careful never to put data behind an exposure: make_vulnerable
-    weakens a bucket and deliberately stops, and publishes a snapshot only
-    after proving the volume it came from was never written to. An upload
-    button in the same interface that can turn Block Public Access off would
-    put both halves one click apart, and the half that goes wrong is silent -
-    a file lands somewhere it can be read and nothing says so.
+    **The refusal is the default, and the default is the point.** Everything
+    else in this tool is careful never to put data behind an exposure by
+    accident: make_vulnerable weakens a bucket and deliberately stops, and
+    publishes a snapshot only after proving the volume it came from was never
+    written to. An upload button in the same interface that can turn Block
+    Public Access off puts both halves one click apart, and the half that goes
+    wrong is silent - a file lands somewhere it can be read and nothing says so.
 
-    So the bucket is checked at the moment of writing, not at the moment the
-    form was drawn. A bucket created secure ten minutes ago may not be secure
-    now, and the only reading that matters is the one taken against the state
-    the object would actually land in.
+    The bucket is therefore checked at the moment of writing, not at the moment
+    the form was drawn. A bucket created secure ten minutes ago may not be
+    secure now, and the only reading that matters is the one taken against the
+    state the object would actually land in.
 
-    This does not stop the exposure being demonstrated. Upload first, open the
-    bucket afterwards, and the scan then reports a public bucket with
-    something in it - which is a sharper demonstration than an empty one, and
-    it is the order that never leaves data somewhere by accident.
+    `accept_risk` is what the person on the other end already said. It is the
+    same flag the create route takes, set by the same button, and it is only
+    ever true because somebody read a critical finding and chose to proceed.
+    Refusing them a second time would not be a safety property; it would be the
+    tool disbelieving an answer it asked for. What survives the bypass is the
+    honesty: an upload into an open bucket reports that the files are readable
+    by anyone, in the response, every time.
+
+    The recommended order has not changed and the docs still give it. Upload
+    first, open the bucket afterwards, and the scan then reports a public
+    bucket with something in it - a sharper demonstration than an empty one,
+    and the order that never leaves data somewhere by accident.
     """
     open_to = reachable_by_anyone(s3, bucket_name)
-    if open_to:
+    if open_to and not accept_risk:
         return False, (
             f"Refused: {bucket_name} can be read by people outside this "
             f"account, because {', and '.join(open_to)}. This tool will not "
@@ -555,6 +631,19 @@ def put_objects(s3, bucket_name, files):
                     "This login lacks s3:PutObject. See docs/iam-policy.json."
                 ), written
             return False, e.response["Error"]["Message"], written
+
+    # Uploaded anyway, and said so. The write succeeded, so this is not a
+    # warning about what might happen - it is a description of where the files
+    # now are, which is the one thing somebody who clicked past the refusal
+    # still needs to be able to read back.
+    if open_to:
+        return True, (
+            f"Uploaded {len(written)} to {bucket_name}. That bucket can be "
+            f"read by people outside this account, because "
+            f"{', and '.join(open_to)} - so "
+            f"{'the file is' if len(written) == 1 else 'those files are'} now "
+            "readable by anyone who finds the address."
+        ), written
 
     return True, f"Uploaded {len(written)} to {bucket_name}.", written
 
@@ -650,6 +739,7 @@ _READERS = {
     "logging_enabled": logging_enabled,
     "objects": list_objects,
     "other_accounts": policy_grants_other_accounts,
+    "website": get_website,
 }
 
 
@@ -695,6 +785,38 @@ def block_public_access(s3, bucket_name):
             PublicAccessBlockConfiguration=ALL_BLOCKS_ON,
         )
         return True, "Public access is now blocked on all four settings."
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "AccessDenied":
+            return False, "This login lacks permission to change bucket access settings."
+        return False, e.response["Error"]["Message"]
+
+
+def unblock_public_access(s3, bucket_name):
+    """Turns all four public access blocks off. The inverse of block_public_access.
+
+    A call of its own, because "not hardened" and "open" stopped meaning the
+    same thing in April 2023, when AWS began applying all four blocks to every
+    new bucket itself. Before that, creating a bucket and leaving it alone
+    produced an open one; since then it produces a blocked one, and opening it
+    is a write like any other.
+
+    Skipping that write was the bug. Asking for a deliberately weak bucket
+    returned a fully blocked one while the pre-create scan promised an exposure,
+    so the warning and the resource disagreed and the warning was the wrong
+    half. scripts/make_vulnerable.py had already met this and patched around it
+    on its own, which left the demo path honest and the form not.
+
+    Nothing is public when this returns. All four off means nothing stands
+    between this bucket and a policy or ACL that would expose it, which is what
+    CIS 2.1.4 reports and what the scan will now say about it.
+    """
+    try:
+        s3.put_public_access_block(
+            Bucket=bucket_name,
+            PublicAccessBlockConfiguration=ALL_BLOCKS_OFF,
+        )
+        return True, ("Public access is unblocked on all four settings. Nothing "
+                      "is public yet, and nothing is stopping it either.")
     except ClientError as e:
         if e.response["Error"]["Code"] == "AccessDenied":
             return False, "This login lacks permission to change bucket access settings."
@@ -783,6 +905,145 @@ def enforce_https(s3, bucket_name):
     except ClientError as e:
         if e.response["Error"]["Code"] == "AccessDenied":
             return False, "This login lacks permission to change bucket policies."
+        return False, e.response["Error"]["Message"]
+
+
+# ------------------------------------------------- Static website hosting
+
+
+# AWS spells the website endpoint two ways, and the split is historical rather
+# than systematic: the regions that existed before it standardised take a dash,
+# everything opened since takes a dot. There is no rule to derive, only a list.
+# Getting it wrong yields a hostname that does not resolve, which reads to
+# somebody testing their site as "it is broken" rather than "that is the wrong
+# address".
+_WEBSITE_DASH_REGIONS = {
+    "us-east-1", "us-west-1", "us-west-2", "ap-southeast-1", "ap-southeast-2",
+    "ap-northeast-1", "eu-west-1", "sa-east-1",
+}
+
+
+def website_endpoint(bucket_name, region="us-east-1"):
+    """The URL a static site on this bucket would answer on.
+
+    http, not https, and that is AWS's constraint rather than a shortcut taken
+    here: the S3 website endpoint has no TLS form at all. Anything needing
+    https in front of a bucket needs CloudFront, which is outside what this
+    tool provisions.
+    """
+    separator = "-" if region in _WEBSITE_DASH_REGIONS else "."
+    return f"http://{bucket_name}.s3-website{separator}{region}.amazonaws.com"
+
+
+def website_obstacles(s3, bucket_name):
+    """Reasons a configured website would not actually serve anything.
+
+    Turning hosting on is one setting, and it is nowhere near sufficient: the
+    endpoint exists immediately and returns 403 to every visitor until the
+    bucket is also readable by the public. Reporting "hosting is on" without
+    saying so would be the same class of mistake this module was just fixed
+    for - a control that claims an outcome it did not produce.
+
+    Each read is guarded separately. A login that cannot read one of these
+    still gets a useful answer about the others, and an unreadable setting is
+    left out rather than guessed at in either direction.
+    """
+    obstacles = []
+
+    try:
+        blocks = get_public_access_block(s3, bucket_name)
+        if blocks and any(blocks.get(k) for k in
+                          ("BlockPublicPolicy", "RestrictPublicBuckets")):
+            obstacles.append(
+                "public access is still blocked on this bucket, so the website "
+                "endpoint answers every request with 403"
+            )
+    except PermissionDenied:
+        pass
+
+    try:
+        if not policy_is_public(s3, bucket_name):
+            obstacles.append(
+                "no policy grants the public read access, so there is nothing "
+                "the endpoint is allowed to hand out"
+            )
+    except PermissionDenied:
+        pass
+
+    try:
+        if policy_denies_http(s3, bucket_name):
+            obstacles.append(
+                "this bucket's policy refuses unencrypted connections, and the "
+                "S3 website endpoint is http-only - it has no https form, so "
+                "that policy denies every request the website endpoint receives"
+            )
+    except PermissionDenied:
+        pass
+
+    return obstacles
+
+
+def _joined(clauses):
+    """Joins clauses that each already contain a comma.
+
+    ", and ".join over three of those reads as a list of six things, because
+    the reader cannot tell which commas separate items and which are internal.
+    Semicolons carry the outer level so the clauses stay legible.
+    """
+    if len(clauses) == 1:
+        return clauses[0]
+    return "; ".join(clauses[:-1]) + "; and " + clauses[-1]
+
+
+def enable_website(s3, bucket_name, index="index.html", error="error.html"):
+    """Turns on static website hosting, and says what still stands in the way.
+
+    Deliberately does not open the bucket. Hosting and exposure are two
+    separate settings, AWS keeps them separate, and collapsing them into one
+    button would mean a click labelled "serve a website" silently published
+    every object in the bucket. The message names what is missing instead, so
+    the second step stays a decision somebody makes on purpose.
+    """
+    try:
+        s3.put_bucket_website(
+            Bucket=bucket_name,
+            WebsiteConfiguration={
+                "IndexDocument": {"Suffix": index},
+                "ErrorDocument": {"Key": error},
+            },
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "AccessDenied":
+            return False, "This login lacks permission to change website settings."
+        return False, e.response["Error"]["Message"]
+
+    blocking = website_obstacles(s3, bucket_name)
+    if blocking:
+        return True, (
+            f"Static website hosting is on, serving {index}. Nothing is public: "
+            f"{_joined(blocking)}."
+        )
+    return True, (
+        f"Static website hosting is on, serving {index}. This bucket is "
+        "readable by the public, so the site is live to anyone with the address."
+    )
+
+
+def disable_website(s3, bucket_name):
+    """Turns static website hosting off. Deletes nothing inside the bucket.
+
+    AWS accepts this on a bucket that never had a website, so it needs no
+    exists-check and is safe to call twice.
+    """
+    try:
+        s3.delete_bucket_website(Bucket=bucket_name)
+        return True, (
+            "Static website hosting is off. The files are untouched and still "
+            "reachable through the normal S3 API to anyone the policy allows."
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "AccessDenied":
+            return False, "This login lacks permission to change website settings."
         return False, e.response["Error"]["Message"]
 
 

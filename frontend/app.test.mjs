@@ -1906,5 +1906,202 @@ check(sweepDoc.querySelectorAll("#types button").length > 0,
       "and on the Create tab it actually lists types, which is what the sweep "
       + "walks");
 
+// ------------------------------------------- the static website hosting switch
+
+/* The one control on the detail panel that changes the account rather than
+ * describing it, so where it is and what it sends both matter.
+ *
+ * It lives in the panel head, not the body. It was under the findings first,
+ * which ordered it correctly and placed it wrong: a hardened bucket carries
+ * five findings, so the switch rendered below the fold and the panel looked
+ * like it had none. That is asserted here rather than left to a comment,
+ * because "it is on the page" and "somebody can see it" are different claims
+ * and only the first one was ever true. */
+
+console.log("\nThe static website switch is in the panel head, and says where it wants to end up");
+console.log("--------------------------------------------------------------------------------");
+
+const bucketStub = (website, extra = {}) => ({
+  "/resources": () => ({
+    resources: [...STUB_TYPES,
+      { key: "bucket", label: "Storage bucket", short_label: "Storage bucket",
+        provider: "aws", id_label: "Bucket name", read_only: false,
+        only_ours_label: "only ones this tool made" }],
+  }),
+  "/resources/bucket": () => ({
+    resource_type: "bucket", resources: [{ id: "demo-bucket", name: "demo-bucket" }],
+  }),
+  "/resources/bucket/demo-bucket": () => ({
+    resource_type: "bucket", resource_id: "demo-bucket",
+    settings: { bucket: "demo-bucket", website, unreadable: {}, ...extra },
+    warnings: [], counts: { critical: 0, warning: 0, info: 0 },
+  }),
+  "/resources/bucket/demo-bucket/website": () => ({
+    ok: true, message: "Static website hosting is on, serving index.html.",
+  }),
+});
+
+async function openBucket(stub) {
+  const { document: doc, sent } = await boot(stub, "audit");
+  doc.querySelector("#types button[data-key=\"bucket\"]")?.click();
+  await new Promise((r) => setTimeout(r, 80));
+  const row = doc.querySelector("#list tr.clickable");
+  if (row) row.click();
+  await new Promise((r) => setTimeout(r, 80));
+  return { doc, sent };
+}
+
+const { doc: offDoc, sent: offSent } =
+  await openBucket(bucketStub({ enabled: false, index: null, error: null }));
+
+const offSwitch = offDoc.querySelector(".website-switch");
+if (check(Boolean(offSwitch), "a bucket's detail panel carries the switch")) {
+  check(offSwitch.closest("#detail-actions") !== null,
+        "in the panel head, where no number of findings can push it off screen");
+  check(offDoc.querySelector("#detail-body .website-switch") === null,
+        "and not in the body, which is where it was hiding below the fold");
+  check(/website: off/i.test(offSwitch.textContent),
+        "reading its position out of the settings already on screen");
+  const button = offSwitch.querySelector("button");
+  check(button.textContent === "Turn on",
+        "and the button offers the direction it is not already in");
+  check(!offSwitch.querySelector("a"),
+        "with no address, an endpoint that answers nothing yet reading as a "
+        + "promise already kept");
+
+  const before = offSent.length;
+  button.click();
+  await new Promise((r) => setTimeout(r, 80));
+  const post = offSent.slice(before).find(
+    (r) => r.path.includes("/website") && r.options.method === "POST");
+
+  if (check(Boolean(post), "pressing it posts to the bucket's website route")) {
+    check(JSON.parse(post.options.body).enabled === true,
+          "asking for the state it wants rather than for a toggle");
+  }
+}
+
+const { doc: onDoc } =
+  await openBucket(bucketStub({ enabled: true, index: "index.html", error: null }));
+
+const onSwitch = onDoc.querySelector(".website-switch");
+if (check(Boolean(onSwitch), "a bucket already hosting says so")) {
+  check(/website: on/i.test(onSwitch.textContent), "in the same two words");
+  check(onSwitch.querySelector("button").textContent === "Turn off",
+        "and offers the other direction");
+  const link = onSwitch.querySelector("a");
+  check(Boolean(link) && link.href.startsWith("http://demo-bucket.s3-website-us-east-1"),
+        "showing the address, spelled with the dash us-east-1 takes");
+  check(Boolean(link) && /http only/i.test(link.title),
+        "and carrying why a live endpoint can still refuse everyone, which is "
+        + "AWS's limit rather than this tool's shortcut");
+}
+
+/* A refused read is not an off. */
+const { doc: blindDoc } = await openBucket({
+  ...bucketStub({ enabled: false, index: null, error: null }),
+  "/resources/bucket/demo-bucket": () => ({
+    resource_type: "bucket", resource_id: "demo-bucket",
+    settings: { bucket: "demo-bucket", website: null,
+                unreadable: { website: "s3:GetBucketWebsite" } },
+    warnings: [], counts: { critical: 0, warning: 0, info: 0 },
+  }),
+});
+
+const blindSwitch = blindDoc.querySelector(".website-switch");
+if (check(Boolean(blindSwitch), "an unreadable website setting still gets a line")) {
+  check(/s3:GetBucketWebsite/.test(blindSwitch.textContent),
+        "naming the permission that is missing");
+  check(!blindSwitch.querySelector("button"),
+        "and offering no switch, because one that cannot know its own "
+        + "position should not offer to move");
+}
+
+/* The control acts on one bucket, so it must not outlive the selection. */
+const { doc: clearDoc } =
+  await openBucket(bucketStub({ enabled: true, index: "index.html", error: null }));
+check(Boolean(clearDoc.querySelector("#detail-actions .website-switch")),
+      "the switch is there while a bucket is selected");
+clearDoc.querySelector("#types button[data-key=\"security-group\"]").click();
+await new Promise((r) => setTimeout(r, 100));
+check(!clearDoc.querySelector("#detail-actions .website-switch"),
+      "and is gone once the selection is, rather than staying pointed at the "
+      + "last bucket looked at");
+
+/* And the same control on the create side, where the bucket has just been made.
+ *
+ * Without it, turning hosting on for the bucket you are looking at meant
+ * crossing to Audit, picking the type and finding the row - three navigations
+ * to something that was on screen a second earlier. */
+
+console.log("\nThe create panel offers hosting on the bucket it just made");
+console.log("---------------------------------------------------------");
+
+const CREATED = {
+  resource_type: "bucket", resource_id: "born-bucket", problems: [],
+  settings: { bucket: "born-bucket", website: { enabled: false, index: null },
+              unreadable: {} },
+  warnings: [], counts: { critical: 0, warning: 0, info: 0 },
+};
+
+const { document: madeDoc, sent: madeSent } = await boot({
+  "/resources": () => ({
+    resources: [...STUB_TYPES,
+      { key: "bucket", label: "Storage bucket", short_label: "Storage bucket",
+        provider: "aws", id_label: "Bucket name", read_only: false,
+        only_ours_label: "only ones this tool made" }],
+  }),
+  "/resources/bucket/options": () => ({ options: {} }),
+  "/resources/bucket/check": () => ({
+    resource_type: "bucket", warnings: [],
+    counts: { critical: 0, warning: 0, info: 0 },
+  }),
+  "/resources/bucket": (options) =>
+    options.method === "POST" ? CREATED
+                              : { resource_type: "bucket", resources: [] },
+}, "create");
+
+madeDoc.querySelector("#types button[data-key=\"bucket\"]").click();
+await new Promise((r) => setTimeout(r, 120));
+
+const form = $(madeDoc, "create-body");
+// By property, not attribute. The form's text inputs are built without an
+// explicit type, so `input[type=text]` matches none of them - the attribute
+// selector reads the attribute, and the default lives on the property.
+const inputs = [...form.querySelectorAll("input")];
+const boxes = inputs.filter((i) => i.type === "checkbox");
+check(boxes.length === 2,
+      "the bucket form offers hosting as its own switch, beside secure defaults");
+check(/serve a static website/i.test(form.textContent),
+      "named for what it does rather than for the API field");
+check(/does not make the bucket public/i.test(form.textContent),
+      "and saying plainly that ticking it publishes nothing, which is the "
+      + "thing a reader would otherwise assume");
+
+// Tick it, and it has to reach the request body.
+inputs.find((i) => i.type === "text").value = "born-bucket";
+boxes[1].checked = true;
+
+const madeBefore = madeSent.length;
+[...form.querySelectorAll("button")].find((b) => b.textContent === "Create").click();
+await new Promise((r) => setTimeout(r, 150));
+
+const createPost = madeSent.slice(madeBefore).find(
+  (r) => r.path.startsWith("/resources/bucket") && r.options.method === "POST"
+         && !r.path.includes("/check"));
+if (check(Boolean(createPost), "creating posts the spec")) {
+  check(JSON.parse(createPost.options.body).website === true,
+        "carrying the hosting choice, not dropping it on the floor");
+}
+
+const madeSwitch = madeDoc.querySelector("#create-out .website-switch");
+if (check(Boolean(madeSwitch),
+          "and the result panel carries the switch for the bucket just made")) {
+  check(/website: off/i.test(madeSwitch.textContent),
+        "reading its position from the settings the create call returned");
+  check(madeDoc.querySelector("#create-out").textContent.includes("born-bucket"),
+        "beside the name of the thing it acts on");
+}
+
 console.log(failures ? `\n${failures} failure(s)` : "\nall passed");
 process.exit(failures ? 1 : 0);

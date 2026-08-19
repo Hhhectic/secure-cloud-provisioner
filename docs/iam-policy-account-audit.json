@@ -56,6 +56,12 @@
       "Resource": "arn:aws:s3:::*/*"
     },
     {
+      "Sid": "TurnStaticWebsiteHostingBackOff",
+      "Effect": "Allow",
+      "Action": "s3:DeleteBucketWebsite",
+      "Resource": "arn:aws:s3:::*"
+    },
+    {
       "Sid": "ReadOnlyAcrossEverythingThisToolAudits",
       "Effect": "Allow",
       "Action": [

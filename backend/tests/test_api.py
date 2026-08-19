@@ -32,6 +32,83 @@ def client():
         yield TestClient(app, base_url="http://127.0.0.1:8000")
 
 
+def _make_bucket(client, name, secure=True):
+    body = {"name": name, "secure_by_default": secure}
+    res = client.post("/resources/bucket?accept_risk=true", json=body)
+    assert res.status_code == 201, res.text
+    return name
+
+
+def test_website_route_switches_hosting_on_and_off(client):
+    name = _make_bucket(client, "scp-api-site", secure=False)
+
+    on = client.post(f"/resources/bucket/{name}/website", json={"enabled": True})
+    assert on.status_code == 200, on.text
+    assert "on" in on.json()["message"].lower()
+
+    read = client.get(f"/resources/bucket/{name}")
+    assert read.json()["settings"]["website"]["enabled"] is True
+
+    off = client.post(f"/resources/bucket/{name}/website", json={"enabled": False})
+    assert off.status_code == 200, off.text
+
+    read = client.get(f"/resources/bucket/{name}")
+    assert read.json()["settings"]["website"]["enabled"] is False
+
+
+def test_the_create_form_can_ask_for_hosting(client):
+    """The spec field has to survive ResourceSpec and the registry adapter."""
+    res = client.post("/resources/bucket?accept_risk=true",
+                      json={"name": "scp-api-born-hosting",
+                            "secure_by_default": False, "website": True})
+    assert res.status_code == 201, res.text
+
+    read = client.get("/resources/bucket/scp-api-born-hosting")
+    assert read.json()["settings"]["website"]["enabled"] is True
+
+
+def test_a_create_that_does_not_ask_for_hosting_does_not_get_it(client):
+    res = client.post("/resources/bucket?accept_risk=true",
+                      json={"name": "scp-api-no-hosting", "secure_by_default": False})
+    assert res.status_code == 201, res.text
+
+    read = client.get("/resources/bucket/scp-api-no-hosting")
+    assert read.json()["settings"]["website"]["enabled"] is False
+
+
+def test_the_upload_route_carries_the_create_decision(client):
+    """One button, one decision. Attaching files to a create pushed through a
+    critical finding used to build the bucket and refuse the files."""
+    name = _make_bucket(client, "scp-api-open-upload", secure=False)
+
+    refused = client.post(f"/resources/bucket/{name}/objects",
+                          files={"files": ("a.txt", b"1", "text/plain")})
+    assert refused.status_code == 400
+    assert "already open" in refused.json()["detail"]["message"]
+
+    allowed = client.post(f"/resources/bucket/{name}/objects?accept_risk=true",
+                          files={"files": ("a.txt", b"1", "text/plain")})
+    assert allowed.status_code == 200, allowed.text
+    assert "readable by anyone" in allowed.json()["message"]
+
+
+def test_website_route_refuses_a_bucket_that_is_not_there(client):
+    res = client.post("/resources/bucket/scp-no-such-bucket/website",
+                      json={"enabled": True})
+    assert res.status_code == 404
+
+
+def test_website_route_will_not_guess_a_direction(client):
+    """`enabled` has no default. The two directions are not equally
+    recoverable - one publishes an endpoint and the other does not - so a body
+    that forgot to say which it meant is refused rather than assigned one."""
+    name = _make_bucket(client, "scp-api-site-2", secure=False)
+
+    res = client.post(f"/resources/bucket/{name}/website", json={})
+
+    assert res.status_code == 422
+
+
 @pytest.fixture
 def vpc_id():
     """The default VPC moto creates, looked up the way the app looks it up."""

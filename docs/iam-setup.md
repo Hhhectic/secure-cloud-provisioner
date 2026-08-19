@@ -6,7 +6,7 @@ not one, and the split is forced by AWS rather than chosen.
 | File | Attach as | Size |
 |---|---|---|
 | `iam-policy.json` | inline policy on the user | 1966 / 2048 |
-| `iam-policy-account-audit.json` | customer managed policy | 1517 / 6144 |
+| `iam-policy-account-audit.json` | customer managed policy | 1638 / 6144 |
 | `iam-policy-demo.json` | customer managed, **only while demoing** | 405 / 6144 |
 
 ## Why two files

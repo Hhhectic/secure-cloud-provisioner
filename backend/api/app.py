@@ -694,7 +694,7 @@ if _multipart_is_installed():
     @app.post("/resources/bucket/{bucket_name}/objects",
               response_model=models.ActionResponse)
     async def upload_objects(bucket_name: str, files: list[UploadFile] = File(...),
-                             region: str = "us-east-1"):
+                             region: str = "us-east-1", accept_risk: bool = False):
         """Puts files into a bucket, unless the bucket is open to the world.
 
         Its own route rather than a field on ResourceSpec, for three reasons. A
@@ -705,6 +705,13 @@ if _multipart_is_installed():
 
         The refusal lives in `aws/s3_buckets.put_objects` and is checked against
         the bucket's state at the moment of writing - see the reasoning there.
+
+        `accept_risk` carries the same decision the create route takes, because
+        it is the same click. Attaching files to a create that was pushed
+        through a critical finding used to succeed at the bucket and fail at
+        the upload, which read as the tool half-working rather than as a second
+        deliberate refusal. The upload still says, in its success message,
+        exactly who can read what was just written.
         """
         known = _resource("bucket")
         # The region the caller is working in, like every other route here. It
@@ -731,7 +738,8 @@ if _multipart_is_installed():
             # is its own small mess.
             payload.append((Path(f.filename or "unnamed").name, body))
 
-        ok, message, written = s3_buckets.put_objects(client, bucket_name, payload)
+        ok, message, written = s3_buckets.put_objects(
+            client, bucket_name, payload, accept_risk=accept_risk)
         if not ok:
             raise HTTPException(
                 status_code=400,
@@ -739,6 +747,52 @@ if _multipart_is_installed():
             )
 
         return models.ActionResponse(ok=True, message=message)
+
+
+@app.post("/resources/bucket/{bucket_name}/website",
+          response_model=models.ActionResponse)
+def set_website(bucket_name: str, request: models.WebsiteRequest,
+                region: str = "us-east-1"):
+    """Turns static website hosting on or off for one bucket.
+
+    One route taking a direction rather than two routes, because the page
+    draws one switch and a switch that posts to a different address depending
+    on its current position has to know that position to act. This way the
+    button sends where it wants to end up, and a double click lands there
+    twice instead of toggling back.
+
+    Not a fix action. The fix table is for findings the scanner raised, and
+    hosting is neither a finding nor a remedy for one - it is a thing a bucket
+    can do, that somebody may want on. Routing it through /fix would have meant
+    inventing a rule that fires on every bucket without a website, which would
+    be a scanner telling people off for not running a web server.
+
+    Turning it on does not open the bucket; see aws/s3_buckets.enable_website
+    for why, and read the returned message, which names whatever still stands
+    between the endpoint and a visitor.
+    """
+    known = _resource("bucket")
+    client = known.get_client(region)
+
+    if not s3_buckets.bucket_exists(client, bucket_name):
+        raise HTTPException(
+            status_code=404,
+            detail=f"No bucket called {bucket_name} in {region}.",
+        )
+
+    if request.enabled:
+        ok, message = s3_buckets.enable_website(
+            client, bucket_name,
+            index=request.index_document,
+            error=request.error_document,
+        )
+    else:
+        ok, message = s3_buckets.disable_website(client, bucket_name)
+
+    if not ok:
+        raise HTTPException(status_code=400, detail=message)
+
+    return models.ActionResponse(ok=True, message=message)
 
 
 # ------------------------------------------------------------- Acknowledgement

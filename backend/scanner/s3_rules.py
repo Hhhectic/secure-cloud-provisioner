@@ -51,6 +51,7 @@ SETTING_LABELS = {
     # trusting the next person to remember.
     "objects": "how many files there are",
     "other_accounts": "whether other accounts have been granted access",
+    "website": "whether it serves a static website",
 }
 
 

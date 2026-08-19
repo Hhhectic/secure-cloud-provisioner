@@ -304,14 +304,20 @@ def smoke_bucket(region):
 
         ids = {w["control"]["id"] for w in cited(warnings)}
 
+        # This branch used to be a note explaining that CIS 2.1.4 could not
+        # fail on a new bucket, because AWS blocks every one of them itself.
+        # That was true, and it was also this script watching the bug happen
+        # and writing it down as weather: the bucket above asked for no
+        # hardening, so it is supposed to come back open. create_bucket now
+        # turns the four blocks off explicitly. If they are on, that write did
+        # not land, and no amount of AWS history excuses it.
         pab = settings.get("public_access_block") or {}
         if all(pab.get(k) for k in ("BlockPublicAcls", "IgnorePublicAcls",
                                     "BlockPublicPolicy", "RestrictPublicBuckets")):
-            note("AWS blocked public access on this bucket itself, as it has "
-                 "for every new bucket since April 2023. CIS 2.1.4 therefore "
-                 "cannot fail on a newly created bucket. It still fails on "
-                 "buckets made before that date, and on any bucket where "
-                 "someone has since turned the blocks off.")
+            fail("this bucket was created with secure_by_default off and came "
+                 "back with all four public access blocks on. AWS applies them "
+                 "to every new bucket since April 2023 and create_bucket is "
+                 "meant to turn them back off; that call did not take effect.")
         else:
             check("2.1.4" in ids, "scanner flagged public access is not blocked "
                                   "(CIS 2.1.4)")
