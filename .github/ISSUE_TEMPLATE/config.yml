@@ -1,0 +1,17 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Hhhectic/secure-cloud-provisioner/security/advisories/new
+    about: >
+      Privately, not as a public issue. Also the right channel for a code of
+      conduct report.
+  - name: Known gaps in what the scanner checks
+    url: https://github.com/Hhhectic/secure-cloud-provisioner/blob/main/docs/benchmark.md
+    about: >
+      Every finding Prowler reported on the same account and this tool did not,
+      listed by name. Check here before filing a missed finding.
+  - name: Setting up the IAM login the tool needs
+    url: https://github.com/Hhhectic/secure-cloud-provisioner/blob/main/docs/iam-setup.md
+    about: >
+      Permission errors are usually this. The tool names the missing permission
+      in its error message; this doc says where to add it.

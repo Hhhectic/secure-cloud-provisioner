@@ -1,0 +1,99 @@
+name: Bug report
+description: Something does not work the way it says it does
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Not for security vulnerabilities.** Report those privately through the
+        [Security tab](https://github.com/Hhhectic/secure-cloud-provisioner/security)
+        instead — see [SECURITY.md](../blob/main/SECURITY.md).
+
+        Please do not paste access keys, account IDs, subscription IDs, ARNs, or
+        anything from a `.env` file. Redact them.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: And what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce it
+      description: >
+        The smallest set of steps that shows it. If it involves a resource, the
+        settings you submitted matter more than the resource ID.
+      placeholder: |
+        1. Open the Create tab, pick Storage bucket
+        2. Set ...
+        3. Press Create
+        4. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where
+      multiple: true
+      options:
+        - Web interface (Sanctum)
+        - HTTP API
+        - Command line (backend/main.py)
+        - Scanner rules
+        - Tests / CI
+        - Docs
+    validations:
+      required: true
+
+  - type: dropdown
+    id: cloud
+    attributes:
+      label: Cloud
+      options:
+        - AWS
+        - Azure
+        - Both
+        - Neither / not applicable
+    validations:
+      required: true
+
+  - type: dropdown
+    id: against
+    attributes:
+      label: Was this against a real account, or the offline test suite?
+      description: >
+        Worth asking, because moto has disagreed with real AWS in this project
+        more than once. A bug that only appears against one of them is a
+        different bug from one that appears against both.
+      options:
+        - A real cloud account
+        - moto / the offline test suite
+        - Both
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Error message or output
+      description: >
+        Server log, browser console, or CLI output. Redact anything identifying.
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      placeholder: "git rev-parse --short HEAD"
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: "3.12.4"

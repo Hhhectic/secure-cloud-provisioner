@@ -1,0 +1,77 @@
+name: A rule missed something, or fired wrongly
+description: The scanner said a configuration was fine when it was not, or flagged one that was
+labels: ["scanner", "rules"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most valuable kind of issue for this project, so it has its
+        own form. **A rule that fails open is worse than no rule** — it turns
+        "unknown" into "checked, and fine."
+
+        Before filing: [docs/benchmark.md](../blob/main/docs/benchmark.md)
+        already lists the gaps found by comparing against Prowler. If it is on
+        that list, it is known.
+
+        Please do not paste account IDs, subscription IDs, or ARNs. The
+        *settings* are what matter, not which account they were in.
+
+  - type: dropdown
+    id: direction
+    attributes:
+      label: Which way did it go wrong?
+      options:
+        - Missed it — an insecure configuration produced no finding
+        - False positive — a safe configuration produced a finding
+        - Wrong severity, or wrong control cited
+        - The message was misleading or unclear
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: The configuration
+      description: >
+        The settings that were scanned, with identifiers redacted. Firewall
+        rules, bucket switches, or whatever applies.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have happened, and why it is unsafe
+      description: >
+        If a published control covers it, name it — CIS section, AWS Startup
+        Security Baseline item, or a vendor advisory. Not every real finding has
+        one, and that is fine; say so if it does not.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: cloud
+    attributes:
+      label: Cloud
+      options:
+        - AWS
+        - Azure
+        - Both
+    validations:
+      required: true
+
+  - type: input
+    id: resource-type
+    attributes:
+      label: Resource type
+      placeholder: "security-group, bucket, azure-nsg, ..."
+
+  - type: textarea
+    id: other-tools
+    attributes:
+      label: Did another scanner catch it?
+      description: >
+        Prowler, ScoutSuite, AWS Config, Defender for Cloud, or anything else.
+        Not required — but a second tool's output makes this much faster to act
+        on.

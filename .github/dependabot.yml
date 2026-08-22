@@ -1,0 +1,40 @@
+# Dependency updates.
+#
+# Monthly rather than weekly, and capped, because this is maintained in spare
+# time and a wall of open pull requests is a wall nobody reads. Security
+# advisories are not subject to `open-pull-requests-limit` and arrive regardless
+# of the schedule, which is the part that matters here.
+#
+# Two pip entries because requirements.txt pulls in backend/requirements.txt and
+# dependabot does not follow the `-r` include - the Azure pins live in one file
+# and everything else in the other.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    labels: ["dependencies"]
+
+  - package-ecosystem: pip
+    directory: "/backend"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    labels: ["dependencies"]
+
+  # Test tooling only - jsdom and playwright. The page itself has no
+  # dependencies, so nothing here ever reaches a user's browser.
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    labels: ["dependencies"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    labels: ["dependencies"]

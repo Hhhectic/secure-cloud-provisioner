@@ -1,0 +1,49 @@
+name: Feature or resource type request
+description: Something the tool should be able to do and cannot
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Adding a resource type is a provider module, a rules module, and one
+        line in `api/registry.py` — no route changes. See
+        [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md) if you would rather
+        open a pull request than an issue.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: >
+        The situation, not the solution. What does the tool make you do by hand,
+        or get wrong, today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What should it do instead?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of change is this?
+      options:
+        - A new resource type
+        - A new rule or control
+        - A new blueprint (a multi-resource architecture)
+        - Web interface
+        - Command line
+        - HTTP API
+        - Docs
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Anything you have already tried, or considered and rejected
