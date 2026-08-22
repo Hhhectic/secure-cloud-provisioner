@@ -31,8 +31,13 @@ cd backend  && uvicorn api.app:app --reload --host 127.0.0.1
 cd backend  && python main.py
 ```
 
-`pip install -r requirements.txt` from the root installs both clouds;
-`backend/requirements.txt` alone is the AWS half and is what CI installs.
+`pip install -r requirements.txt` from the root installs both clouds, and is
+what CI installs. `backend/requirements.txt` alone is the AWS half — enough to
+*run* the AWS side, but **not enough to run the tests**:
+`tests/test_azure_provisioning.py` imports `azure.core` at module level, so
+without the Azure SDK pytest cannot collect it and the whole run is interrupted
+before anything executes. That exact mistake kept CI red for weeks while every
+development machine passed.
 
 ## Green tests do not mean it works
 

@@ -13,8 +13,14 @@ pip install -r requirements.txt          # both clouds
 cd frontend && npm install               # test tooling only
 ```
 
-`backend/requirements.txt` alone is enough if you are only working on the AWS
-half. The page itself has no dependencies and never will — `npm install` fetches
+**Install the root `requirements.txt`, not `backend/requirements.txt`**, even if
+you only care about the AWS half. The backend file is enough to *run* the AWS
+side but not to run the tests: `tests/test_azure_provisioning.py` imports
+`azure.core` at module level, so without the Azure SDK pytest cannot collect it
+and the entire run is interrupted before a single test executes. The Azure tests
+need the SDK, not an account.
+
+The page itself has no dependencies and never will — `npm install` fetches
 jsdom and playwright so the frontend can be executed somewhere other than a
 person's browser, and neither is ever shipped.
 

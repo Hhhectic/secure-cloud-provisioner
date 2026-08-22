@@ -9,8 +9,11 @@
 # in. Installing either file on its own used to produce a checkout that could
 # run only half the tool, and said so as a 503 on one tab.
 #
-# CI installs backend/requirements.txt directly: the offline suite needs boto3,
-# moto and pytest, and never reaches an Azure module.
+# CI installs *this* file, not the backend one. It used to install the backend
+# one, on the reasoning that the offline suite never reaches an Azure module -
+# which is false: tests/test_azure_provisioning.py imports azure.core at module
+# level, so pytest could not collect it and the whole run was interrupted before
+# any test ran. See .github/workflows/tests.yml.
 -r backend/requirements.txt
 
 # --- Azure ----------------------------------------------------------------

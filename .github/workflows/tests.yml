@@ -28,8 +28,22 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      # The root file, not backend/requirements.txt, and the difference is the
+      # whole reason this job was failing.
+      #
+      # tests/test_azure_provisioning.py imports azure.core at module level.
+      # The Azure SDK is declared only in the root requirements.txt, so
+      # installing the backend file alone left pytest unable to *collect* that
+      # module - one ImportError, the whole run interrupted, exit code 2, and
+      # not a single test executed. It had been red on main for weeks with
+      # nobody noticing, because every development machine has the Azure SDK
+      # installed and so passes locally.
+      #
+      # The Azure tests need the SDK, not an account. They mock the clients and
+      # run with no AZURE_* variable set, which is why installing this is enough
+      # and no credential belongs in this workflow.
       - name: Install dependencies
-        run: pip install -r backend/requirements.txt
+        run: pip install -r requirements.txt
 
       # The frontend tests run under Node, which the runner already has along
       # with ssh-keygen. jsdom is the one thing that needs fetching, and it is
