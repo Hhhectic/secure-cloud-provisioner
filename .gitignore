@@ -220,6 +220,9 @@ __marimo__/
 # Secrets & cloud credentials
 .env
 .env.*
+# ...but not the template, which is checked in. Without this, .env.*
+# swallows it and a contributor who recreates the file loses it silently.
+!.env.example
 *.pem
 *.ppk
 credentials

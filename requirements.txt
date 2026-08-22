@@ -1,6 +1,23 @@
-fastapi>=0.100.0
-uvicorn>=0.22.0
-pydantic>=2.0.0
+# Everything needed to run the whole tool, both clouds:
+#
+#     pip install -r requirements.txt
+#
+# The split between this file and backend/requirements.txt is historical. This
+# one belonged to the root Azure application, which has been deleted, and it is
+# now the only declaration of the Azure SDK in the repository. Rather than merge
+# the two files and lose the provenance comments below, this one pulls the other
+# in. Installing either file on its own used to produce a checkout that could
+# run only half the tool, and said so as a 503 on one tab.
+#
+# CI installs backend/requirements.txt directly: the offline suite needs boto3,
+# moto and pytest, and never reaches an Azure module.
+-r backend/requirements.txt
+
+# --- Azure ----------------------------------------------------------------
+#
+# The Azure half degrades the same way the AWS half does without boto3.
+# api/registry.py imports every provider module at startup, and a missing SDK
+# costs one tab rather than the whole page - see az/common.py.
 azure-identity==1.15.0
 azure-mgmt-resource==26.0.0
 azure-mgmt-storage==21.0.0

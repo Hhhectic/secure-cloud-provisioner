@@ -13,6 +13,15 @@ pydantic>=2.7
 # which is the same rule aws/common.py and az/common.py follow for the SDKs.
 python-multipart>=0.0.9
 
+# Reads the .env at the repository root. environment.py has always treated this
+# as optional and still does - real environment variables work without it, which
+# is how CI runs - but it was listed in no requirements file at all, so a fresh
+# checkout following the instructions in .env.example and docs/iam-setup.md put
+# credentials in a file that nothing then read. The failure was silent: the
+# Azure error message names the missing variable either way, so it sent people
+# to fix a file that was already correct.
+python-dotenv>=1.0
+
 # Testing only. moto fakes AWS in memory so the suite needs no account.
 # httpx backs fastapi's TestClient. cryptography generates real key pairs for
 # the key pair tests: moto parses imported keys properly and rejects fabricated
