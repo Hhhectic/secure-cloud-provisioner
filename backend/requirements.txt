@@ -27,6 +27,6 @@ python-dotenv>=1.0
 # the key pair tests: moto parses imported keys properly and rejects fabricated
 # ones, correctly.
 pytest>=8.0
-moto[s3,ec2]>=5.0
+moto[s3,ec2]>=5.2.2
 httpx>=0.27
 cryptography>=42.0
