@@ -32,12 +32,15 @@ cd backend  && python main.py
 ```
 
 `pip install -r requirements.txt` from the root installs both clouds, and is
-what CI installs. `backend/requirements.txt` alone is the AWS half — enough to
-*run* the AWS side, but **not enough to run the tests**:
-`tests/test_azure_provisioning.py` imports `azure.core` at module level, so
-without the Azure SDK pytest cannot collect it and the whole run is interrupted
-before anything executes. That exact mistake kept CI red for weeks while every
-development machine passed.
+what CI installs. `backend/requirements.txt` alone declares no Azure SDK, and
+without one `tests/test_azure_provisioning.py` skips — **`1041 passed` becomes
+`931 passed, 1 skipped`**, so check the summary line before reporting a run.
+
+That file used to import `azure.core` at module level, which did not skip: it
+failed collection, interrupting the entire run for exit code 2 and zero tests.
+CI installed the backend file, so it ran nothing for weeks while every
+development machine passed. Do not put a cloud SDK at module scope, in tests or
+anywhere else — `az/common.py` explains the rule.
 
 ## Green tests do not mean it works
 

@@ -14,11 +14,13 @@ cd frontend && npm install               # test tooling only
 ```
 
 **Install the root `requirements.txt`, not `backend/requirements.txt`**, even if
-you only care about the AWS half. The backend file is enough to *run* the AWS
-side but not to run the tests: `tests/test_azure_provisioning.py` imports
-`azure.core` at module level, so without the Azure SDK pytest cannot collect it
-and the entire run is interrupted before a single test executes. The Azure tests
-need the SDK, not an account.
+you only care about the AWS half. The backend file runs the AWS side and its
+tests, but it declares no Azure SDK, and without one
+`tests/test_azure_provisioning.py` skips — 110 tests you are not running, said
+plainly in the summary line rather than silently. The Azure tests need the SDK,
+not an account: they mock their clients and run with no `AZURE_*` variable set.
+
+If you see `1 skipped` at the end of a run, that is what it is.
 
 The page itself has no dependencies and never will — `npm install` fetches
 jsdom and playwright so the frontend can be executed somewhere other than a

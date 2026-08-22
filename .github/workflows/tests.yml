@@ -60,6 +60,24 @@ jobs:
         run: pytest tests/test_frontend_keygen.py -q --no-header -rs
           && test -d ../frontend/node_modules/jsdom
 
+      # The same guard for the Azure half, and it exists because the failure it
+      # guards against already happened.
+      #
+      # tests/test_azure_provisioning.py reaches the SDK through
+      # pytest.importorskip, so that a checkout without it loses one file rather
+      # than the ability to collect any file. That is the right behaviour for a
+      # contributor and the wrong behaviour here: if this workflow ever stopped
+      # installing the Azure SDK, the file would skip, the run would be green,
+      # and half the repository would be untested with nothing saying so.
+      #
+      # So assert the SDK is importable. It is the same reasoning as the jsdom
+      # check above - a tool that is meant to be present must be proved present,
+      # because the alternative to a loud failure here is a quiet one.
+      - name: Confirm the Azure tests are not silently skipping
+        working-directory: backend
+        run: python -c "import azure.core.exceptions"
+          && pytest tests/test_azure_provisioning.py -q --no-header -rs
+
       - name: Run the offline suite
         working-directory: backend
         # Deliberately fake credentials rather than none.

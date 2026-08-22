@@ -18,7 +18,23 @@ from types import SimpleNamespace
 
 import pytest
 
-from azure.core.exceptions import HttpResponseError
+# The SDK at module scope, which az/common.py is careful never to do - read its
+# docstring for why. A test module is the one place that rule can be relaxed,
+# because pytest can skip a file it is unable to import. But it has to be
+# relaxed deliberately, and a plain `from azure.core.exceptions import ...` is
+# not that.
+#
+# A plain import here does not fail this module. It fails *collection*, which
+# interrupts the whole run: exit code 2, zero tests executed, every AWS test
+# included. CI installed backend/requirements.txt, which declares no Azure SDK,
+# and so ran nothing at all for weeks while reporting a duration that looked
+# like a real run. importorskip loses this one file instead, and says what to
+# install. The workflow then asserts the skip did not happen there.
+HttpResponseError = pytest.importorskip(
+    "azure.core.exceptions",
+    reason="the Azure SDK is absent. `pip install -r requirements.txt` from the "
+           "repository root installs it; backend/requirements.txt does not.",
+).HttpResponseError
 
 from api import registry
 from az import names as az_names
