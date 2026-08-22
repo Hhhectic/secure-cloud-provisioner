@@ -28,5 +28,5 @@ python-dotenv>=1.0
 # ones, correctly.
 pytest>=8.0
 moto[s3,ec2]>=5.0
-httpx>=0.27
+httpx>=0.28.1
 cryptography>=42.0
