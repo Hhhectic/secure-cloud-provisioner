@@ -11,7 +11,7 @@ pydantic>=2.7
 # it, and that route is registered only when this is importable - a missing
 # dependency belonging to one feature must not stop the whole page starting,
 # which is the same rule aws/common.py and az/common.py follow for the SDKs.
-python-multipart>=0.0.9
+python-multipart>=0.0.32
 
 # Reads the .env at the repository root. environment.py has always treated this
 # as optional and still does - real environment variables work without it, which
