@@ -72,7 +72,7 @@ TOPIC_NAME = "provisioning-tool-test-alerts"
 
 # Change this to an address you can actually open. AWS sends a confirmation
 # link and delivers nothing until you click it.
-ALERT_EMAIL = "huorichard2@gmail.com"
+ALERT_EMAIL = "you@example.com"
 
 try:
     from google.colab import userdata
